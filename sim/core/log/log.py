@@ -60,7 +60,7 @@ class Log:
         return
 
     def _open_file(self):
-        self.file_ptr = open(self.output_path, "w")
+        self.file_ptr = open(self.output_path, "w", encoding="utf-8")
         self._first_event = True
         self.file_ptr.write('{"traceEvents": [\n')
         self.file_ptr.flush()
@@ -102,33 +102,46 @@ class Log:
             time.sleep(self.flush_period)
 
         # Cleanup
+        self._flush()
         self._close_file()
         return
 
     def _create_tracks(self):
-        self.record(Log.Track(TrackID.Engine, "Engine"))
-        self.record(Log.Track(TrackID.Event, "Event"))
-        self.record(Log.Track(TrackID.Counter, "Counter"))
-        self.record(Log.Track(TrackID.State, "State"))
+        self.record(Log.track(TrackID.Engine, "Engine"))
+        self.record(Log.track(TrackID.Event, "Event"))
+        self.record(Log.track(TrackID.Counter, "Counter"))
+        self.record(Log.track(TrackID.State, "State"))
         return
 
     def start(self):
         """
         Starts the log writer module, running in a separate thread
         """
+
+        if self.file_ptr is not None:
+            return
+
         self._open_file()
         self.worker = threading.Thread(target=self._run, name="LogWriterThread")
         self.worker.start()
         self._create_tracks()
+        return
 
     def stop(self):
         """
         Signals the log writing thread to finish, flush all remaining events,
         then close the json file.
         """
+        if self.file_ptr is None:
+            return
+
         self.stop_event.set()
         if self.worker is not None:
             self.worker.join()
+
+        self.worker = None
+
+        return
 
     def record(self, log_event: dict, log_level: int = 0):
         """
@@ -142,7 +155,7 @@ class Log:
         return
 
     @staticmethod
-    def Track(track: TrackID, name: str):
+    def track(track: TrackID, name: str):
         return {
             "ph": "M",
             "name": "process_name",
@@ -153,7 +166,7 @@ class Log:
         }
 
     @staticmethod
-    def Subtrack(track: TrackID, obj_id: int, name: str):
+    def subtrack(track: TrackID, obj_id: int, name: str):
         return {
             "ph": "M",
             "name": "thread_name",
@@ -165,71 +178,71 @@ class Log:
         }
 
     @staticmethod
-    def Engine(obj_id: int, title: str, timestamp: float, args: dict[str, Any] | None = None):
+    def engine(obj_id: int, title: str, timestamp: float, args: dict[str, Any] | None = None):
         return {
-            "pid": TrackID.Engine,
+            "pid": TrackID.Engine.value,
             "tid": obj_id,
             "cat": "Event",
             "name": title,
             "ph": "i",
             "ts": timestamp,
             "s": "t",
-            "args": args
+            "args": args if args is not None else {}
         }
 
     @staticmethod
-    def EventInstant(obj_id: int, title: str, timestamp: float, args: dict[str, Any] | None = None):
+    def event_instant(obj_id: int, title: str, timestamp: float, args: dict[str, Any] | None = None):
         return {
-            "pid": TrackID.Event,
+            "pid": TrackID.Event.value,
             "tid": obj_id,
             "cat": "Event",
             "name": title,
             "ph": "i",
             "ts": timestamp,
             "s": "t",
-            "args": args
+            "args": args if args is not None else {}
         }
 
     @staticmethod
-    def EventBegin(obj_id: int, title: str, timestamp: float, args: dict[str, Any] | None = None):
+    def event_begin(obj_id: int, title: str, timestamp: float, args: dict[str, Any] | None = None):
         return {
-            "pid": TrackID.Event,
+            "pid": TrackID.Event.value,
             "tid": obj_id,
             "cat": "Event",
             "name": title,
             "ph": "B",
             "ts": timestamp,
-            "args": args
+            "args": args if args is not None else {}
         }
 
     @staticmethod
-    def EventEnd(obj_id: int, title: str, timestamp: float, args: dict[str, Any] | None = None):
+    def event_end(obj_id: int, title: str, timestamp: float, args: dict[str, Any] | None = None):
         return {
-            "pid": TrackID.Event,
+            "pid": TrackID.Event.value,
             "tid": obj_id,
             "cat": "Event",
             "name": title,
             "ph": "E",
             "ts": timestamp,
-            "args": args
+            "args": args if args is not None else {}
         }
 
     @staticmethod
-    def StateCounter(obj_id: int, title: str, timestamp: float, counters: dict[str, Any] | None = None):
+    def counter(obj_id: int, title: str, timestamp: float, counters: dict[str, Any] | None = None):
         return {
-            "pid": TrackID.Counter,
+            "pid": TrackID.Counter.value,
             "tid": obj_id,
             "cat": "State",
             "name": title,
             "ph": "C",
             "ts": timestamp,
-            "args": counters
+            "args": counters if counters is not None else {}
         }
 
     @staticmethod
-    def StateGeneric(obj_id: int, title: str, timestamp: float, states: dict[str, Any] | None = None):
+    def state(obj_id: int, title: str, timestamp: float, states: dict[str, Any] | None = None):
         return {
-            "pid": TrackID.State,
+            "pid": TrackID.State.value,
             "tid": obj_id,
             "cat": "State",
             "name": title,
@@ -237,6 +250,6 @@ class Log:
             "ts": timestamp,
             "id": obj_id,
             "args": {
-                "snapshot": states
+                "snapshot": states if states is not None else {}
             }
         }
