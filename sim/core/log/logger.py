@@ -51,6 +51,7 @@ class Logger:
         self.log_queue = queue.Queue()
         self.flush_period = flush_period
         self.file_ptr = None
+        self._first_event = True
 
         # Prepare another thread for background flushing
         self.stop_event = threading.Event()
@@ -59,61 +60,49 @@ class Logger:
 
     def _open_file(self):
         self.file_ptr = open(self.output_path, "w")
+        self._first_event = True
         self.file_ptr.write('{"traceEvents": [\n')
         self.file_ptr.flush()
 
     def _close_file(self):
-        self.file_ptr.flush()
-        # Take care of the last trailing ",\n"
-        pos = self.file_ptr.tell()
-        read_back = 2
-        self.file_ptr.seek(max(pos - read_back, 0))
-        tail = self.file_ptr.read(read_back)
-
-        if tail == ",\n":
-            self.file_ptr.seek(max(pos - read_back, 0))
-            self.file_ptr.truncate()
-
-        # Append the JSON structure closing, then close the file
         self.file_ptr.write("\n]}\n")
+        self.file_ptr.flush()
         self.file_ptr.close()
 
     def _flush(self):
-        """Drain the log_queue and writes events to the json file on disk."""
-        arr_log_event = []
+        """Drain the log_queue and write events to the json file on disk."""
+        log_events = []
         while True:
             try:
-                log_event = self.log_queue.get_nowait()
-                arr_log_event.append(log_event)
+                log_events.append(self.log_queue.get_nowait())
             except queue.Empty:
                 break
 
-        if arr_log_event:
-            # Write each log event to the file
-            text_to_write = ""
-            for log_event in arr_log_event:
-                log_text = orjson.dumps(log_event).decode() + ",\n"
-                text_to_write += log_text
+        if not log_events:
+            return
 
-            self.file_ptr.write(text_to_write)
-            self.file_ptr.flush()
+        parts = []
+        for log_event in log_events:
+            if self._first_event:
+                self._first_event = False
+            else:
+                parts.append(",\n")
+            parts.append(orjson.dumps(log_event).decode())
+
+        self.file_ptr.write("".join(parts))
+        self.file_ptr.flush()
 
     def _run(self):
         """
         Internal loop run by the log writer thread, periodically flushing log events to the disk.
         """
-        try:
-            while not self.stop_event.is_set():
-                self._flush()
-                time.sleep(self.flush_period)
-            # Final one flush when the stop signal is delivered
+        while not self.stop_event.is_set():
             self._flush()
-        except Exception as e:  # TODO exception format
-            # Simulator exploded somehow
-            print(f"[Logger] Encountered an exception: {e}")
-            self._flush()
-        finally:
-            self._close_file()
+            time.sleep(self.flush_period)
+
+        # Cleanup
+        self._close_file()
+        return
 
     def _create_tracks(self):
         self.record(self.format_track(TrackID.Debug, "Debug"))
@@ -149,21 +138,23 @@ class Logger:
         if log_level <= self.log_level:
             self.log_queue.put(log_event)
 
-    def format_track(self, pid: TrackID, name: str):
+    @staticmethod
+    def format_track(self, track: TrackID, name: str):
         return {
             "ph": "M",
             "name": "process_name",
-            "pid": pid,
+            "pid": track.value,
             "args": {
                 "name": name
             }
         }
 
-    def format_subtrack(pid: TrackID, tid: int, name: str):
+    @staticmethod
+    def format_subtrack(self, track: TrackID, tid: int, name: str):
         return {
             "ph": "M",
             "name": "thread_name",
-            "pid": pid,
+            "pid": track.value,
             "tid": tid,
             "args": {
                 "name": name
