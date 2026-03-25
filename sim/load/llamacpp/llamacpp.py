@@ -163,4 +163,13 @@ class Llamacpp(TraceLoader):
                 NodeMap[node_id] = new_node
                 node_id += 1
 
+        # Add a last node to NodeMap
+        # Last node is a mechanism to notify the simulator that simulation has ended
+        prev_node = NodeMap[node_id - 1]
+        last_node = Node(node_id, "LAST_NODE", 0, {"LAST_NODE": "TRUE"})
+        last_node.add_parent_node(prev_node.id)
+        prev_node.add_child_node(node_id)
+        NodeMap[node_id] = last_node
+        node_id += 1
+
         return Trace(self.obj_id, self.name, self.log, NodeMap, TensorMap)

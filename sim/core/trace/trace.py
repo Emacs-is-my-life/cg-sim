@@ -21,6 +21,12 @@ def map_check(node_map: dict[int, Node], tensor_map: dict[int, Tensor]):
             if tensor_id not in tensor_map:
                 raise Exception(f"Node {node.id}'s output tensor: Tensor {tensor_id} does not exist in the TensorMap.")
 
+        # Check if last node is present
+        last_node_id = next(reversed(node_map))
+        last_node = node_map[last_node_id]
+        if "LAST_NODE" not in last_node.args:
+            raise Exception(f"There is no LAST_NODE in the node_map. Simulation will never end.")
+
     return
 
 
