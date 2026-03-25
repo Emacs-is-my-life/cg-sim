@@ -28,7 +28,8 @@ class Trace(SimObject):
     Datastructure representing the ML workload
     """
 
-    def __init__(self, obj_id: int, node_map: dict[int, Node], tensor_map: dict[int, Tensor]):
+    def __init__(self, node_map: dict[int, Node], tensor_map: dict[int, Tensor]):
+        obj_id: int = 0
         name = "Trace"
         super().__init__(obj_id, name)
 
@@ -49,8 +50,12 @@ class Trace(SimObject):
         }
 
         for _, node in self.node_map.items():
+            step = -1
+            if "step" in node.args:
+                step = node.args["step"]
+
             states["nodes"].append({
-                "step": node.step,
+                "step": step,
                 "id": node.id,
                 "name": node.name,
                 "status": node.status.name
