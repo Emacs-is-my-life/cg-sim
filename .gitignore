@@ -1,0 +1,11 @@
+# Temporary
+tmp/
+
+# Python
+__pycache__/
+ .mypy_cache
+
+# Clankers
+.codex/
+.aider/
+.aider.*
