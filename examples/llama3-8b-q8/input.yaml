@@ -1,0 +1,55 @@
+--- # Input parameters for cg_simulator run
+
+# Simulator configuration
+logger:
+  args:
+    output_path: "sim_result.json"
+
+# Trace(workload) loading
+trace:
+  type: "Llamacpp"
+  args:
+    # Provide path relative to current input.yaml file
+    record_path: "ggml_profile_node_records.csv"
+    graph_path: "step_0_compute_graph.dot"
+
+# Hardware configuration
+hardware:
+  # Compute unit
+  compute:
+    name: "cpu"
+    type: "SimpleCPU"
+	memory: "ram"
+	args:
+	  modifier: 1
+	  
+  # Memory unit
+  memory:
+    name: "ram"
+    type: "SimpleRAM"
+	args:
+	  memory_size_KB: 32768
+	  
+  # Storage unit
+  storage:
+    name: "ssd"
+    type: "SimpleSSD"
+	args:
+	  fixed_latency_micros: 50
+	  # [<IO_size_in_KB>, <IO_bandwidth_in_KBps>]
+	  read_io_curve_KBps:
+	    - [4, 10]
+		- [8, 100]
+		- [16, 1000]
+		- [32, 10000]
+	  write_io_curve_KBps:
+	    - [4, 10]
+		- [8, 100]
+		- [16, 1000]
+		- [32, 10000]
+
+# Scheduler configuration
+scheduler:
+  type: "Vanilla"
+  args:
+    foo: bar
