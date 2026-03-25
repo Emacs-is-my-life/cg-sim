@@ -19,8 +19,20 @@ class SimObject(ABC):
         self.name: str = name
         return
 
-    # TODO: type update
     @abstractmethod
-    def log_state(self) -> None:
-        """Log its state according to logging format"""
+    def log_counters(self) -> dict[str, Any] | None:
+        """
+        Log its counter according to logging format
+
+        Return: counters: dict[str, Any] | None
+        """
+        pass
+
+    @abstractmethod
+    def log_states(self) -> dict[str, Any] | None:
+        """
+        Log its state according to logging format
+
+        Return: states: dict[str, Any] | None
+        """
         pass
