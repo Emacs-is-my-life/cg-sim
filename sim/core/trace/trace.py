@@ -28,9 +28,7 @@ class Trace(SimObject):
     Datastructure representing the ML workload
     """
 
-    def __init__(self, node_map: dict[int, Node], tensor_map: dict[int, Tensor]):
-        obj_id: int = 0
-        name = "Trace"
+    def __init__(self, obj_id: int, name: str, node_map: dict[int, Node], tensor_map: dict[int, Tensor]):
         super().__init__(obj_id, name)
 
         map_check(node_map, tensor_map)

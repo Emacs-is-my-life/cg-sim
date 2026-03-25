@@ -5,7 +5,9 @@ from sim.core.trace import Trace
 
 
 class TraceLoader(ABC):
-    def __init__(self, args: dict[str, Any]):
+    def __init__(self, obj_id: int, name: str, args: dict[str, Any]):
+        self.id = obj_id
+        self.name = name
         self.args: dict[str, Any] = args
         return
 
