@@ -1,6 +1,7 @@
 from typing import Any
 
 from sim.core import SimObject
+from sim.core.log import Log, TrackID
 
 from .node import Node
 from .tensor import Tensor
@@ -28,12 +29,14 @@ class Trace(SimObject):
     Datastructure representing the ML workload
     """
 
-    def __init__(self, obj_id: int, name: str, node_map: dict[int, Node], tensor_map: dict[int, Tensor]):
-        super().__init__(obj_id, name)
+    def __init__(self, obj_id: int, name: str, log: Log, node_map: dict[int, Node], tensor_map: dict[int, Tensor]):
+        super().__init__(obj_id, name, log)
 
         map_check(node_map, tensor_map)
         self.node_map: dict[int, Node] = node_map
         self.tensor_map: dict[int, Tensor] = tensor_map
+
+        self.log.record(Log.subtrack(TrackID.State, self.id, self.name))
         return
 
     def log_counters(self) -> dict[str, Any] | None:

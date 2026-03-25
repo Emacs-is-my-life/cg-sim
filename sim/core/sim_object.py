@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
+from sim.core.log import Log
 
 class SimObject(ABC):
     """
@@ -13,10 +14,11 @@ class SimObject(ABC):
       - Memory(RAM, VRAM, SSD, ...)
     """
 
-    def __init__(self, id: int, name: str):
+    def __init__(self, obj_id: int, name: str, log: Log):
         """Initialization"""
-        self.id: int = id
-        self.name: str = name
+        self.id = obj_id
+        self.name = name
+        self.log = log
         return
 
     @abstractmethod

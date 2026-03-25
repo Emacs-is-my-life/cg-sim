@@ -163,4 +163,4 @@ class Llamacpp(TraceLoader):
                 NodeMap[node_id] = new_node
                 node_id += 1
 
-        return Trace(self.obj_id, self.name, NodeMap, TensorMap)
+        return Trace(self.obj_id, self.name, self.log, NodeMap, TensorMap)

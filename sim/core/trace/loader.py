@@ -2,12 +2,14 @@ from ABC import ABC, abstractmethod
 from typing import Any
 
 from sim.core.trace import Trace
+from sim.core.log import Log
 
 
 class TraceLoader(ABC):
-    def __init__(self, obj_id: int, name: str, args: dict[str, Any]):
+    def __init__(self, obj_id: int, name: str, log: Log, args: dict[str, Any]):
         self.id = obj_id
         self.name = name
+        self.log = log
         self.args: dict[str, Any] = args
         return
 
