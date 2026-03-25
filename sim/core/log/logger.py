@@ -4,18 +4,19 @@ import threading
 from pathlib import Path
 import orjson
 from enum import Enum
+from typing import Any
 
 
 class TrackID(Enum):
-    Debug = 0
+    Engine = 0
     Event = 1
     Counter = 2
     State = 3
 
 
-class Logger:
+class Log:
     """
-    Logger collects log from modules(core, compute, mm, disk, ...),
+    Log collects log from modules(core, compute, mm, disk, ...),
     then periodically flush them to disk.
     """
 
@@ -38,7 +39,7 @@ class Logger:
         # Set log level
         """
         log_level:
-        - 0: Log Debug, Event
+        - 0: Log Engine, Event
         - 1: + Log counter states
         - 2: + Log all states
         """
@@ -105,10 +106,10 @@ class Logger:
         return
 
     def _create_tracks(self):
-        self.record(self.format_track(TrackID.Debug, "Debug"))
-        self.record(self.format_track(TrackID.Event, "Event"))
-        self.record(self.format_track(TrackID.Counter, "Counter"))
-        self.record(self.format_track(TrackID.State, "State"))
+        self.record(Log.Track(TrackID.Engine, "Engine"))
+        self.record(Log.Track(TrackID.Event, "Event"))
+        self.record(Log.Track(TrackID.Counter, "Counter"))
+        self.record(Log.Track(TrackID.State, "State"))
         return
 
     def start(self):
@@ -138,8 +139,10 @@ class Logger:
         if log_level <= self.log_level:
             self.log_queue.put(log_event)
 
+        return
+
     @staticmethod
-    def format_track(self, track: TrackID, name: str):
+    def Track(track: TrackID, name: str):
         return {
             "ph": "M",
             "name": "process_name",
@@ -150,13 +153,90 @@ class Logger:
         }
 
     @staticmethod
-    def format_subtrack(self, track: TrackID, tid: int, name: str):
+    def Subtrack(track: TrackID, obj_id: int, name: str):
         return {
             "ph": "M",
             "name": "thread_name",
             "pid": track.value,
-            "tid": tid,
+            "tid": obj_id,
             "args": {
                 "name": name
+            }
+        }
+
+    @staticmethod
+    def Engine(obj_id: int, title: str, timestamp: float, args: dict[str, Any] | None = None):
+        return {
+            "pid": TrackID.Engine,
+            "tid": obj_id,
+            "cat": "Event",
+            "name": title,
+            "ph": "i",
+            "ts": timestamp,
+            "s": "t",
+            "args": args
+        }
+
+    @staticmethod
+    def EventInstant(obj_id: int, title: str, timestamp: float, args: dict[str, Any] | None = None):
+        return {
+            "pid": TrackID.Event,
+            "tid": obj_id,
+            "cat": "Event",
+            "name": title,
+            "ph": "i",
+            "ts": timestamp,
+            "s": "t",
+            "args": args
+        }
+
+    @staticmethod
+    def EventBegin(obj_id: int, title: str, timestamp: float, args: dict[str, Any] | None = None):
+        return {
+            "pid": TrackID.Event,
+            "tid": obj_id,
+            "cat": "Event",
+            "name": title,
+            "ph": "B",
+            "ts": timestamp,
+            "args": args
+        }
+
+    @staticmethod
+    def EventEnd(obj_id: int, title: str, timestamp: float, args: dict[str, Any] | None = None):
+        return {
+            "pid": TrackID.Event,
+            "tid": obj_id,
+            "cat": "Event",
+            "name": title,
+            "ph": "E",
+            "ts": timestamp,
+            "args": args
+        }
+
+    @staticmethod
+    def StateCounter(obj_id: int, title: str, timestamp: float, counters: dict[str, Any] | None = None):
+        return {
+            "pid": TrackID.Counter,
+            "tid": obj_id,
+            "cat": "State",
+            "name": title,
+            "ph": "C",
+            "ts": timestamp,
+            "args": counters
+        }
+
+    @staticmethod
+    def StateGeneric(obj_id: int, title: str, timestamp: float, states: dict[str, Any] | None = None):
+        return {
+            "pid": TrackID.State,
+            "tid": obj_id,
+            "cat": "State",
+            "name": title,
+            "ph": "O",
+            "ts": timestamp,
+            "id": obj_id,
+            "args": {
+                "snapshot": states
             }
         }
