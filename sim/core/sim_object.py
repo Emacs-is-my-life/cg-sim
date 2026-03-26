@@ -3,6 +3,7 @@ from typing import Any
 
 from sim.core.log import Log
 
+
 class SimObject(ABC):
     """
     Represents an object in the simulation, whose states should be logged.

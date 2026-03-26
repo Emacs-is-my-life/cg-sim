@@ -32,8 +32,8 @@ class BaseJob(ABC):
     Job Lifecycle:
 
     - Scheduler invokes hardware.pleaseDoSomething()
-    - Hardware creates a job, then do engine.submit(job)
-    - job is dumped into engine.job_waiting
+    - Hardware creates a job, then invoke engine.submit(job)
+    - job is dumped into engine.job_waiting queue (works in FIFO manner)
 
     - When the job get to the head of engine.job_waiting queue, engine checks job.is_runnable(sys)
     - if this job is runnable, then job is moved to engine.job_running queue,
@@ -60,15 +60,22 @@ class BaseJob(ABC):
 
         # Job start hook
         self.begin_mut(sys)
-        self.being_log(log)
+        self.begin_log(log)
         return
 
     def update_progress(self, time_elapsed: float) -> None:
+        if self.work_rate is None or self.work_rate == 0:
+            raise Exception(f"[Job] Job ID: {self.id}, work_rate is: {self.work_rate}")
+
         self.work_done += self.work_rate * time_elapsed
         return
 
-    def update_ETA(self, timestamp_now: float, new_work_rate: float) -> None:
-        self.work_rate = new_work_rate
+    def update_ETA(self, timestamp_now: float, new_work_rate: float | None = None) -> None:
+        if new_work_rate is not None:
+            self.work_rate = new_work_rate
+
+        if self.work_rate is None or self.work_rate == 0:
+            raise Exception(f"[Job] Job ID: {self.id}, work_rate is: {self.work_rate}")
 
         work_left = self.work_total - self.work_done
         self.timestamp_ETA = timestamp_now + (work_left / self.work_rate)
@@ -83,7 +90,7 @@ class BaseJob(ABC):
 
         # Job finish hook
         self.end_mut(sys)
-        self.end_mut(log)
+        self.end_log(log)
         return
 
     @abstractmethod

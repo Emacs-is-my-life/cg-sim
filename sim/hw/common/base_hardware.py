@@ -1,17 +1,17 @@
 from abc import abstractmethod
 
 from sim.core import SimObject
-from sim.core.log import Log
+from sim.core.log import Log, TrackID
 from sim.core.engine import Engine
 from sim.core.job import BaseJob
 
 
 class WorkRate:
     def __init__(self):
-        self.compute: float = 0    # This hardware computes this much, per microsecond
-        self.read_from: float = 0  # Amount of bytes others can read from this hardware, per microsecond
-        self.write_to: float = 0   # Amount of bytes others can write to this hardware, per microsecond
-        self.rw_total: float = 0   # Amount of bytes others can transfer to this hardware. RW quota are computed in combined manner
+        self.compute: float = 0    # AU / microsecond
+        self.read_from: float = 0  # KB / microsecond
+        self.write_to: float = 0   # KB / microsecond
+        self.rw_total: float = 0   # KB / microsecond
 
 
 class BaseHardware(SimObject):
@@ -22,6 +22,11 @@ class BaseHardware(SimObject):
 
         self.job_running: list[BaseJob] = []
         self.max_rate: WorkRate = WorkRate()
+
+        # Create logging tracks
+        log.record(Log.subtrack(TrackID.Event, self.id, self.name))
+        log.record(Log.subtrack(TrackID.Counter, self.id, self.name))
+        log.record(Log.subtrack(TrackID.State, self.id, self.name))
         return
 
     def schedule(self, job: BaseJob):
@@ -40,7 +45,7 @@ class BaseHardware(SimObject):
         pass
 
     @abstractmethod
-    def update_rate(self) -> None:
+    def update_work_rate(self) -> None:
         """
         Based on current running jobs in self.job_running,
         update self.max_rate based on hardware characteristics
