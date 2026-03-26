@@ -4,8 +4,7 @@
 This simulator has following characteristics:  
 
 - Input:
-  - Simulator options like logging level
-  - Compute graph(`cg-sim/core/trace/importer/` has trace importer code)
+  - Compute graph trace
   - Hardware configuration
   - Scheduler policy
 - Output:
@@ -13,6 +12,7 @@ This simulator has following characteristics:
   - Detailed execution log in Chrome tracing format for pipeline analysis
 - Discrete event system simulator for fast speed
 - Batteries included but replacable:
+  - `cg-sim/load/`: Write your own trace loader for your favorite ML framework
   - `cg-sim/hw/`: Write your own hardware(compute, memory, storage) model
   - `cg-sim/sched/`: Write your own scheduler policy
 
@@ -32,12 +32,17 @@ python main.py --input gogo --output gaga -o "It's not complete yet"
   - `cg-sim/core/init/`: Initialization logic to import trace, intialize logger, hardwares and scheduler for simulation run 
   - 'cg-sim/core/job/`: Represents jobs. Scheduler requests job, hardware models calculate how much would it take, then engine simulates time advance
   - `cg-sim/core/engine/`: Core engine that interacts with hardware & scheduler, asserts actions they do, and processes discrete events
+  
+## Trace Importer
+- `cg-sim/load/`: Base directory for trace importers
+  - `cg-sim/load/llamacpp/`: llama.cpp trace importer code
 
 ## Hardware models
 - `cg-sim/hw/`: Base directory for hardware models
   - `cg-sim/hw/common/`: Common component and logic for hardwares
   - `cg-sim/hw/compute/`: Computation hardware like CPU, GPU or NPU
-  - `cg-sim/hw/memory/`: Memory unit like VRAM, RAM and SSD
+  - `cg-sim/hw/memory/`: Memory unit like VRAM, RAM
+  - `cg-sim/hw/storage/`: Storage unit like SSD
   
 Implement your own hardware model in `cg-sim/hw/<hardware-type>/<hardware-name>/`.
 

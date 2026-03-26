@@ -62,7 +62,7 @@ class Engine(SimObject):
         return
 
     def _compile(self) -> None:
-        self.sched.compile(self.sys.trace)
+        self.sched.compile()
         return
 
     def _layout_forward(self) -> list[BaseJob]:
