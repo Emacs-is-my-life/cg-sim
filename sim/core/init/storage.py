@@ -1,7 +1,6 @@
 from sim.hw.storage import *
-from sim.hw.storage.common import BaseStorage
 
 
-def LOAD_STORAGE_CLASS(storage_type: str, args: dict) -> BaseStorage:
+def LOAD_STORAGE_CLASS(storage_type: str):
     storage: BaseStorage = globals()[storage_type]
     return storage

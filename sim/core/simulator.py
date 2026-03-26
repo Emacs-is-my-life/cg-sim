@@ -60,7 +60,8 @@ class Simulator:
 
         # Trace
         cfg["trace"]["args"]["input_path"] = config_file_path  # Supply input_path
-        trace_loader = LOAD_TRACE_CLASS(cfg["trace"]["type"], cfg["trace"]["args"])
+        TraceLoaderClass = LOAD_TRACE_CLASS(cfg["trace"]["type"])
+        trace_loader = TraceLoaderClass(cfg["trace"]["args"])
         trace = trace_loader.load()
 
         hw = {}
@@ -88,7 +89,7 @@ class Simulator:
         sys = System(trace, hw)
 
         # Engine
-        self.engine = Engine(sim_id.get(), "Engine", self.log, sys, sched)
+        self.engine = Engine(sim_id.get(), "Engine", log, sys, sched)
 
         return
 
