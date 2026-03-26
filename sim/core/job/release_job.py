@@ -4,6 +4,10 @@ from sim.hw.common import DataRegion
 
 from .job import BaseJob
 
+from .assertion.release_assertion import assertion
+from .mutation.release_mutation import begin_mutation, end_mutation
+from .logging.release_logging import begin_log, end_log
+
 
 class ReleaseJob(BaseJob):
     """
@@ -19,18 +23,21 @@ class ReleaseJob(BaseJob):
         self.region = region
         return
 
-    # TODO
     def is_runnable(self, sys: System) -> bool:
-        pass
+        return assertion(self, sys)
 
     def begin_mut(self, sys: System) -> None:
-        pass
+        begin_mutation(self, sys)
+        return
 
     def begin_log(self, log: Log, timestamp: float) -> None:
-        pass
+        begin_log(self, log, timestamp)
+        return
 
     def end_mut(self, sys: System) -> None:
-        pass
+        end_mutation(self, sys)
+        return
 
     def end_log(self, log: Log, timestamp: float) -> None:
-        pass
+        end_log(self, log, timestamp)
+        return

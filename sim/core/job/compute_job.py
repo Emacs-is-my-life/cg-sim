@@ -4,7 +4,10 @@ from sim.core import System
 from sim.hw.compute.common import BaseCompute
 
 from .job import BaseJob
+
 from .assertion.compute_assertion import assertion
+from .mutation.compute_mutation import begin_mutation, end_mutation
+from .logging.compute_logging import begin_log, end_log
 
 
 class ComputeJob(BaseJob):
@@ -18,18 +21,21 @@ class ComputeJob(BaseJob):
         self.node = node
         return
 
-    # TODO
     def is_runnable(self, sys: System) -> bool:
         return assertion(self, sys)
 
     def begin_mut(self, sys: System) -> None:
-        pass
+        begin_mutation(self, sys)
+        return
 
     def begin_log(self, log: Log, timestamp: float) -> None:
-        pass
+        begin_log(self, log, timestamp)
+        return
 
     def end_mut(self, sys: System) -> None:
-        pass
+        end_mutation(self, sys)
+        return
 
     def end_log(self, log: Log, timestamp: float) -> None:
-        pass
+        end_log(self, log, timestamp)
+        return
