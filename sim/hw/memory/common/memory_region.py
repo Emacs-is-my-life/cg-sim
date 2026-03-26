@@ -98,7 +98,7 @@ class MemorySpace:
 
         return regions
 
-    def claim(self, page_idx_start: int, num_pages: int, tensor_id: int) -> MemoryRegion | None:
+    def claim(self, tensor_id: int, page_idx_start: int, num_pages: int) -> MemoryRegion | None:
         """
         Try to allocate a new MemoryRegion and assign it to a Tensor
         - Success: returns MemoryRegion

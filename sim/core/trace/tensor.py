@@ -25,4 +25,4 @@ class Tensor:
         align_bytes = 64        # 64 B in AMD64 for optimal performance
         page_size_bytes = 4096  # 4 kB in AMD64
         tensor_aligned_size_bytes = ((size_bytes + align_bytes - 1) // align_bytes) * align_bytes
-        self.size_pages: int = int(np.ceil(tensor_aligned_size_bytes / page_size_bytes))
+        self.num_pages: int = int(np.ceil(tensor_aligned_size_bytes / page_size_bytes))

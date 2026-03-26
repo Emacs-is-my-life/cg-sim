@@ -2,7 +2,6 @@ from abc import abstractmethod
 
 from sim.core import SimObject
 from sim.core.log import Log, TrackID
-from sim.core.engine import Engine
 from sim.core.job import BaseJob
 
 
@@ -18,7 +17,6 @@ class BaseHardware(SimObject):
     """Abstract base class for all hardwares in simulator"""
     def __init__(self, obj_id: int, name: str, log: Log):
         super().__init__(obj_id, name, log)
-        self._engine: Engine | None = None   # Will be injected later, by engine
 
         self.job_running: list[BaseJob] = []
         self.max_rate: WorkRate = WorkRate()

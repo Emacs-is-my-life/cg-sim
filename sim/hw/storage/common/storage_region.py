@@ -7,8 +7,9 @@ class StorageRegion(DataRegion):
 
     Let's say storage has infinite size
     """
-    def __init__(self, tensor_id: int):
+    def __init__(self, num_pages: int, tensor_id: int):
         super().__init__(tensor_id)
+        self.num_pages = num_pages
         return
 
 
@@ -29,8 +30,14 @@ class StorageSpace:
 
         return regions
 
-    def claim(self, tensor_id: int) -> StorageRegion | None:
-        new_region = StorageRegion(tensor_id)
+    def check_avail(self) -> bool:
+        """
+        Check if StorageRegion is claim-able
+        """
+        return True
+
+    def claim(self, num_pages: int, tensor_id: int) -> StorageRegion | None:
+        new_region = StorageRegion(num_pages, tensor_id)
         self._regions.append(new_region)
         return new_region
 
