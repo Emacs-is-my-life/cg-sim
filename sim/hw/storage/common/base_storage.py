@@ -18,8 +18,8 @@ class BaseStorage(BaseHardware):
     def log_counters(self) -> dict[str, Any]:
 
         counters = {
-            "read_bandwidth_KBps": 0,
-            "write_bandwidth_KBps": 0
+            "read_bandwidth_KBps": -1,
+            "write_bandwidth_KBps": -1
         }
         return counters
 

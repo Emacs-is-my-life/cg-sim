@@ -94,5 +94,7 @@ class Simulator:
         return
 
     def run(self):
+        print("Simulation is starting ...")
         self.engine.run()
+        print("Simulation is finished.")
         return
