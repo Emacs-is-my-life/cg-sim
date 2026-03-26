@@ -36,7 +36,7 @@ class StorageSpace:
         """
         return True
 
-    def claim(self, num_pages: int, tensor_id: int) -> StorageRegion | None:
+    def claim(self, tensor_id: int, num_pages: int) -> StorageRegion | None:
         new_region = StorageRegion(num_pages, tensor_id)
         self._regions.append(new_region)
         return new_region

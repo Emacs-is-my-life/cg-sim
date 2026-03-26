@@ -27,8 +27,8 @@ class BaseHardware(SimObject):
         log.record(Log.subtrack(TrackID.State, self.id, self.name))
         return
 
-    def schedule(self, job: BaseJob):
-        """Schedule a job in this hardware."""
+    def run(self, job: BaseJob):
+        """Put a job in this hardware's running slot."""
         self.job_running.append(job)
         return
 

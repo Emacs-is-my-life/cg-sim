@@ -3,12 +3,14 @@ from typing import Any
 from sim.core.log import Log
 from sim.hw.common import BaseHardware
 
+from .storage_region import StorageSpace
 
 class BaseStorage(BaseHardware):
     """Base class for storage hardware models"""
 
     def __init__(self, obj_id: int, name: str, log: Log):
         super().__init__(obj_id, name, log)
+        self.space: StorageSpace = StorageSpace()
         return
 
     # TODO: After defining storage job
