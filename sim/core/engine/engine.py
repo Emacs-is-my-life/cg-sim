@@ -22,7 +22,7 @@ class Engine(SimObject):
 
     # TODO: polish type annotation(sys: System, sched: BaseScheduler)
     def __init__(self, obj_id: int, name: str, log: Log, sys: Any, sched: Any):
-        super().__init__(obj_id, name)
+        super().__init__(obj_id, name, log)
 
         # Key Objects
         self.log = log
@@ -37,14 +37,15 @@ class Engine(SimObject):
         self.time_elapsed: float = 0    # Time elapsed between the last job finish and the current
 
         # Job Queues
-        self.job_queue: list[BaseJob] = []
+        self.job_waiting: list[BaseJob] = []
         self.job_running: list[BaseJob] = []
 
         # Create subtracks for logging
         self.log.record(Log.subtrack(TrackID.Engine, self.id, self.name))
 
-    # TODO: Public Interfaces
     """
+    # TODO: Public Interfaces
+
     - submit(job): Called by hardwares for enqueueing jobs to the job_queue
         - if self.stage is SimStage.LAYOUT:
             - self._instant_exec(job)
@@ -62,38 +63,46 @@ class Engine(SimObject):
     - debug(<caller>, <msg>): Leaves debugging message
     """
 
-    # TODO: Private Interfaces
+
     """
+    # TODO: Private Interfaces
 
     - _complile(): Calls scheduler's compiler function
     - _layout(): Calles scheduler's layout function
     - _runtime(): Runs the simulation main loop
         - while True:
-            # Finish a job
-            - job = self._forward()
-            - if job is ComputeJob and "LAST_NODE" in job.node.args:
-                - break
+            # Advance simulation
+            - retired_jobs = self._forward()   # retired_jobs is an array of jobs
+            - for job in retired_jobs:
+                - if job is ComputeJob and "LAST_NODE" in job.node.args:
+                    - break
 
-            # Update job progresses
+                # Handle job retirement
+                - self._end_exec(job)
+
+            # Update work progress for remaining jobs
             - for job in self.job_running:
                 - job.work_done += self.time_elapsed * job.work_rate
 
-            # Handle system mutations from job end
-            - self._end_exec(job)
-
             # Let scheduler make decisions (adding jobs to the job_queue)
-            - self.sched.runtime(job)  # Provide just retired job for scheduling decisions
+            - self.sched.runtime(retired_job)   # Provide retired_job for scheduling decisions.
+                                                # Scheduler already has read access to system(trace, hardware states)
 
-            - for job_w in self.job_queue:
+            # Drain all runnable jobs from job_waiting to job_running, in FIFO manner
+            - for job_w in self.job_waiting:
                 # Check if this pending job is runnable
                 - if not _assert_exec(job_w):
                     - if len(self.job_running) == 0:
+                        # If the head job in job_waiting queue is not runnable,
+                        # and there is no jobs(which can mutate system state) in job_running,
+                        # then simulation will stay stuck forever.
                         - raise DEADLOCK_ERROR
                     - else:
                         - break
 
-                # Handle system mutations for the very start of the job
+                # For job_w is runnable, run it
                 - self._begin_exec(job_w)
+                - self.job_running.append(job_w)
 
             # Update & Gather roofline performance of each hardware
             # Assign bandwidth to ongoing transfers using water fill algorithm
@@ -101,17 +110,17 @@ class Engine(SimObject):
                 - Update job.work_rate based on the right above
                 - Update job.timestamp_ETA = self.timestamp_now + (work_left / job.work_rate)
 
-    - _assert_exec(<job>): Checks if job is runnable
-    - _begin_exec(<job>)
-        - Handle system mutations from the job start
-        - Handle event logging
-    - _end_exec(<job>)
-        - Handle system mutations from the job completion
-        - Handle event logging
+    - _assert_exec(<job>): Checks if job is runnable      (job.assert_exec())
+    - _duration_exec_begin(<job>)
+        - Handle system mutations from the job start      (job.mut_begin())
+        - Handle event logging                            (job.log_begin())
+    - _deuration_exec_end(<job>)
+        - Handle system mutations from the job completion (job.mut_end())
+        - Handle event logging                            (job.log_end())
     - _instant_exec(<job>):
-        - Handle system mutations from the job start
-        - Handle system mutations from the job completion
-        - Handle event logging
+        - Handle system mutations from the job start      (job.mut_begin())
+        - Handle system mutations from the job completion (job.mut_end())
+        - Handle event logging                            (job.log_instant())
 
     - _forward(): Sorts job_running, pops a job with earliest ETA
     - _cleanup(): Write a report and log it, stop the logger
