@@ -84,3 +84,10 @@ class Node:
 
         self.output_tensors.append(tensor_id)
         return
+
+
+class TerminalNode(Node):
+    """Node that marks the end of simulation"""
+    def __ini__(self, obj_id: int, name: str, compute_time_micros: float = 0, args: dict[str, Any] | None = {}):
+        super().__ini__(obj_id, name, compute_time_micros, args)
+        return

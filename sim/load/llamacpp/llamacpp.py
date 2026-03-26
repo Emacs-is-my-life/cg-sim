@@ -6,7 +6,7 @@ import polars as pl
 import re
 from typing import Any
 
-from sim.core.trace import Node, Tensor, Trace, TraceLoader
+from sim.core.trace import Node, TerminalNode, Tensor, Trace, TraceLoader
 
 from .utils import node_name_canonicalizer, get_tensor_type, TensorWithSign, get_real_tensor_id
 
@@ -164,9 +164,9 @@ class Llamacpp(TraceLoader):
                 node_id += 1
 
         # Add a last node to NodeMap
-        # Last node is a mechanism to notify the simulator that simulation has ended
+        # Last node is a mechanism to notify the simulator that it has reached the end
         prev_node = NodeMap[node_id - 1]
-        last_node = Node(node_id, "LAST_NODE", 0, {"LAST_NODE": "TRUE"})
+        last_node = TerminalNode(node_id, "TERMINAL_NODE")
         last_node.add_parent_node(prev_node.id)
         prev_node.add_child_node(node_id)
         NodeMap[node_id] = last_node

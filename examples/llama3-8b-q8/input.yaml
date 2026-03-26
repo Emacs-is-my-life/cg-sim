@@ -1,4 +1,4 @@
---- # Input parameters for cg_simulator run
+--- # Input parameters for cg-sim run
 
 # Simulator configuration
 logger:
@@ -19,7 +19,7 @@ hardware:
   compute:
     name: "cpu"
     type: "SimpleCPU"
-	memory: "ram"
+	memory_name: "ram"
 	args:
 	  modifier: 1
 	  
@@ -52,4 +52,4 @@ hardware:
 scheduler:
   type: "Vanilla"
   args:
-    foo: bar
+    foo: "bar"

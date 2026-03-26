@@ -1,14 +1,18 @@
-from abc import ABC
+from abc import ABC, abstractmethod
 from typing import Any
 import uuid
 import fastuuid
+
+from sim.core import System
+from sim.core.log import Log
+from sim.hw.common import BaseHardware
 
 
 class BaseJob(ABC):
     def __init__(self, work_total: float):
         # Basics
         self.id: uuid.UUID = fastuuid.uuid4()
-        self.running_on: [Any] = []    # TODO: implement BaseHardware, then do type annotation
+        self.running_on: list[BaseHardware] = []    # TODO: implement BaseHardware, then do type annotation
         self.args: dict[str, Any] = {}
 
         # Work
@@ -21,22 +25,83 @@ class BaseJob(ABC):
         self.timestamp_end: float | None = None    # Simulation time, that job ended execution
         self.timestamp_ETA: float | None = None    # Simulation time, when job is expected to end
 
-        """
-        How engine keeps track of jobs in job_running queue:
-
-        0. Sorts jobs and pops a job from the engine.job_running queue (one with closest timestamp_ETA)
-           then advances simulation time to its timestamp_ETA.
-             - If it's a compute job, and its node.args has "LAST_NODE" field, simulation ends.
-             - Otherwise, continue running.
-        1. Scheduler submits jobs to the engine.job_queue (zero or more jobs)
-        2. for job in engine.job_running:
-             - Update job.work_done = job.work_total - (job.work_rate * engine.time_elapsed)
-             - Update job.work_rate based on current running jobs & hardwares
-             - Compute work_left = job.work_total - job.work_done
-             - Update job.timestamp_ETA = engine.timestamp_now + (work_left / job.work_rate)
-        3. GOTO 0.
-
-        """
-
     def __lt__(self, other: "BaseJob") -> bool:
-        return (self.timestamp_ETA) < (other.timestamp_ETA)
+        return (self.timestamp_ETA, self.id) < (other.timestamp_ETA, other.id)
+
+    """
+    Job Lifecycle:
+
+    - Scheduler invokes hardware.pleaseDoSomething()
+    - Hardware creates a job, then do engine.submit(job)
+    - job is dumped into engine.job_waiting
+
+    - When the job get to the head of engine.job_waiting queue, engine checks job.is_runnable(sys)
+    - if this job is runnable, then job is moved to engine.job_running queue,
+      - job.begin()
+
+    - While simulation is running:
+      - job.update_progress()
+      | Engine retires finished jobs ...
+      | Scheduler submits new jobs ...
+      | Engine recomputes hardware performance ...
+      - job.update_ETA()
+
+    - When job is finished
+      - job.end()
+    """
+
+    @abstractmethod
+    def is_runnable(self, sys: System) -> bool:
+        """Based system state, check if this job is runnable"""
+        pass
+
+    def begin(self, log: Log, sys: System, timestamp_now: float):
+        self.timestamp_begin = timestamp_now
+
+        # Job start hook
+        self.begin_mut(sys)
+        self.being_log(log)
+        return
+
+    def update_progress(self, time_elapsed: float) -> None:
+        self.work_done += self.work_rate * time_elapsed
+        return
+
+    def update_ETA(self, timestamp_now: float, new_work_rate: float) -> None:
+        self.work_rate = new_work_rate
+
+        work_left = self.work_total - self.work_done
+        self.timestamp_ETA = timestamp_now + (work_left / self.work_rate)
+        return
+
+    def end(self, log: Log, sys: System, timestamp_now: float):
+        self.timestamp_end = timestamp_now
+
+        # Retire this job from hardwares
+        for hw in self.running_on:
+            hw.retire(self)
+
+        # Job finish hook
+        self.end_mut(sys)
+        self.end_mut(log)
+        return
+
+    @abstractmethod
+    def begin_mut(self, sys: System) -> None:
+        """job execution begins -> system state mutation"""
+        pass
+
+    @abstractmethod
+    def begin_log(self, log: Log) -> None:
+        """job execution begins -> log this event"""
+        pass
+
+    @abstractmethod
+    def end_mut(self, sys: System) -> None:
+        """job execution ends -> system state mutation"""
+        pass
+
+    @abstractmethod
+    def end_log(self, log: Log) -> None:
+        """job execution ends -> log this event"""
+        pass

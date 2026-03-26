@@ -3,7 +3,7 @@ from typing import Any
 from sim.core import SimObject
 from sim.core.log import Log, TrackID
 
-from .node import Node
+from .node import Node, TerminalNode
 from .tensor import Tensor
 
 
@@ -24,8 +24,8 @@ def map_check(node_map: dict[int, Node], tensor_map: dict[int, Tensor]):
         # Check if last node is present
         last_node_id = next(reversed(node_map))
         last_node = node_map[last_node_id]
-        if "LAST_NODE" not in last_node.args:
-            raise Exception(f"There is no LAST_NODE in the node_map. Simulation will never end.")
+        if not isinstance(last_node, TerminalNode):
+            raise Exception(f"The last node in node_map, is not TerminalNode. Simulation will either end prematurely, or never end.")
 
     return
 
@@ -57,7 +57,7 @@ class Trace(SimObject):
         }
 
         for _, node in self.node_map.items():
-            step = -1
+            step = 0
             if "step" in node.args:
                 step = node.args["step"]
 
