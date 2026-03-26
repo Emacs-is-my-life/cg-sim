@@ -60,7 +60,7 @@ class BaseJob(ABC):
 
         # Job start hook
         self.begin_mut(sys)
-        self.begin_log(log)
+        self.begin_log(log, timestamp_now)
         return
 
     def update_progress(self, time_elapsed: float) -> None:
@@ -90,7 +90,7 @@ class BaseJob(ABC):
 
         # Job finish hook
         self.end_mut(sys)
-        self.end_log(log)
+        self.end_log(log, timestamp_now)
         return
 
     @abstractmethod
@@ -99,7 +99,7 @@ class BaseJob(ABC):
         pass
 
     @abstractmethod
-    def begin_log(self, log: Log) -> None:
+    def begin_log(self, log: Log, timestamp: float) -> None:
         """job execution begins -> log this event"""
         pass
 
@@ -109,6 +109,6 @@ class BaseJob(ABC):
         pass
 
     @abstractmethod
-    def end_log(self, log: Log) -> None:
+    def end_log(self, log: Log, timestamp: float) -> None:
         """job execution ends -> log this event"""
         pass

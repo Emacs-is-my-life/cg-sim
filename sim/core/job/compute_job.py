@@ -6,6 +6,7 @@ from sim.hw.compute.common import BaseCompute
 from .job import BaseJob
 from .assertion.compute_assertion import assertion
 
+
 class ComputeJob(BaseJob):
     """
     Computation Job
@@ -24,11 +25,11 @@ class ComputeJob(BaseJob):
     def begin_mut(self, sys: System) -> None:
         pass
 
-    def begin_log(self, log: Log) -> None:
+    def begin_log(self, log: Log, timestamp: float) -> None:
         pass
 
     def end_mut(self, sys: System) -> None:
         pass
 
-    def end_log(self, log: Log) -> None:
+    def end_log(self, log: Log, timestamp: float) -> None:
         pass
