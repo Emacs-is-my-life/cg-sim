@@ -34,6 +34,7 @@ class MemorySpace:
     def __init__(self, num_total_pages: int):
         self.num_total_pages: int = num_total_pages
         self.num_used_pages: int = 0
+        self.peak_num_used_pages: int = 0
 
         self._regions_by_page_idx_start: SortedDict[int, MemoryRegion] = SortedDict()
         return
@@ -111,6 +112,10 @@ class MemorySpace:
         new_region = MemoryRegion(page_idx_start, num_pages, tensor_id)
         self._regions_by_start_page_idx[page_idx_start] = new_region
         self.num_used_pages += num_pages
+
+        if self.num_used_pages > self.peak_num_used_pages:
+            self.peak_num_used_pages = self.num_used_pages
+
         return new_region
 
     def release(self, free_region: MemoryRegion) -> None:

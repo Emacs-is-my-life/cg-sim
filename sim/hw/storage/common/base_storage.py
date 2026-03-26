@@ -5,6 +5,7 @@ from sim.hw.common import BaseHardware
 
 from .storage_region import StorageSpace
 
+
 class BaseStorage(BaseHardware):
     """Base class for storage hardware models"""
 

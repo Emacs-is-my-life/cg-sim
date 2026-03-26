@@ -36,6 +36,9 @@ class Log:
             output_path = p
         self.output_path = output_path
 
+        # On/Off Switch
+        self.on = True
+
         # Set log level
         """
         log_level:
@@ -149,7 +152,7 @@ class Log:
         This method is thread-safe.
         """
 
-        if log_level <= self.log_level:
+        if self.on and (log_level <= self.log_level):
             self.log_queue.put(log_event)
 
         return

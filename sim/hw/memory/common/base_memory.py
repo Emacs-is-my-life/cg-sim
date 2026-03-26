@@ -25,7 +25,7 @@ class BaseMemory(BaseHardware):
 
         counters = {
             "memory_used_KB": 4 * self.space.num_used_pages,
-            "memory_bandwidth_KBps": 1_000_000 * total_transfers
+            "memory_transfer_KBps": 1_000_000 * total_transfers
         }
 
         return counters

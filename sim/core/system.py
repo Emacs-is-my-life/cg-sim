@@ -23,8 +23,8 @@ class System:
     - transfer()
     """
 
-    def __init__(self, engine: Engine, trace: Trace, hw: dict[str, BaseHardware]):
-        self.engine: Engine = engine
+    def __init__(self, trace: Trace, hw: dict[str, BaseHardware]):
+        self.engine: Engine = None   # Will be injected by engine
         self.trace: Trace = trace
         self.hw: dict[str, BaseHardware] = hw
         return
