@@ -1,5 +1,7 @@
 from sim.hw.common import DataRegion
 
+from .base_storage import BaseStorage
+
 
 class StorageRegion(DataRegion):
     """
@@ -7,9 +9,8 @@ class StorageRegion(DataRegion):
 
     Let's say storage has infinite size
     """
-    def __init__(self, num_pages: int, tensor_id: int):
-        super().__init__(tensor_id)
-        self.num_pages = num_pages
+    def __init__(self, hw: BaseStorage, num_pages: int, tensor_id: int):
+        super().__init__(hw, num_pages, tensor_id)
         return
 
 
@@ -18,7 +19,8 @@ class StorageSpace:
     Has many StorageRegions
     """
 
-    def __init__(self):
+    def __init__(self, hw: BaseStorage):
+        self.hw: BaseStorage = hw
         self._regions: list[StorageRegion] = []
         return
 
@@ -37,7 +39,7 @@ class StorageSpace:
         return True
 
     def claim(self, tensor_id: int, num_pages: int) -> StorageRegion | None:
-        new_region = StorageRegion(num_pages, tensor_id)
+        new_region = StorageRegion(self.hw, num_pages, tensor_id)
         self._regions.append(new_region)
         return new_region
 

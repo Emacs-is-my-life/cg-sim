@@ -12,7 +12,7 @@ class SimpleRAM(BaseMemory):
     - Instant memory move(memory-to-memory transfer)
     """
 
-    def init(self, obj_id: int, name: str, log: Log, args: dict[str, Any]):
+    def __init__(self, obj_id: int, name: str, log: Log, args: dict[str, Any]):
         memory_size_KB: int = int(args["memory_size_KB"])
         super().__init__(obj_id, name, log, memory_size_KB)
         self.memory_bandwidth_KBps = float(args["memory_bandwidth_KBps"])

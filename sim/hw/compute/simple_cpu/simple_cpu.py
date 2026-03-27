@@ -13,7 +13,7 @@ class SimpleCPU(BaseCompute):
     Latency = node.compute_time_micros / modifier
     """
 
-    def init(self, obj_id: int, name: str, log: Log, args: dict[str, Any]):
+    def __init__(self, obj_id: int, name: str, log: Log, args: dict[str, Any]):
         super().__init__(obj_id, name, log)
 
         modifier: float = args["modifier"]

@@ -2,6 +2,8 @@ from sortedcontainers import SortedDict
 
 from sim.hw.common import DataRegion
 
+from .base_memory import BaseMemory
+
 
 class MemoryRegion(DataRegion):
     """
@@ -12,12 +14,11 @@ class MemoryRegion(DataRegion):
     So, region [0, 10) and [10, 20) are non-overlapping.
     """
 
-    def __init__(self, page_idx_start: int, num_pages: int, tensor_id: int):
-        super().__init__(tensor_id)
+    def __init__(self, hw: BaseMemory, page_idx_start: int, num_pages: int, tensor_id: int):
+        super().__init__(hw, num_pages, tensor_id)
 
         self.page_idx_start = page_idx_start
         self.page_idx_end = page_idx_start + num_pages
-        self.num_pages = num_pages
         return
 
 
@@ -31,7 +32,8 @@ class MemorySpace:
     - No two MemoryRegions can overlap
     """
 
-    def __init__(self, num_total_pages: int):
+    def __init__(self, hw: BaseMemory, num_total_pages: int):
+        self.hw: BaseMemory = hw
         self.num_total_pages: int = num_total_pages
         self.num_used_pages: int = 0
         self.peak_num_used_pages: int = 0
@@ -109,7 +111,7 @@ class MemorySpace:
         if not self.check_avail(page_idx_start, num_pages):
             return None
 
-        new_region = MemoryRegion(page_idx_start, num_pages, tensor_id)
+        new_region = MemoryRegion(self.hw, page_idx_start, num_pages, tensor_id)
         self._regions_by_start_page_idx[page_idx_start] = new_region
         self.num_used_pages += num_pages
 

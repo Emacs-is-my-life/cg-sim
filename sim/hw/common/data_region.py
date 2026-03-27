@@ -28,9 +28,10 @@ class DataRegion(ABC):
     where tensor can reside.
     """
 
-    def __init__(self, hw: BaseMemory | BaseStorage, tensor_id: int):
+    def __init__(self, hw: BaseMemory | BaseStorage, num_pages: int, tensor_id: int):
         self.id: uuid.UUID = fastuuid.uuid4()
         self.hw: BaseMemory | BaseStorage = hw
+        self.num_pages: int = num_pages
         self.tensor_id: int = tensor_id    # Data(tensor) stored in this region
 
         self.is_latest: bool = False       # Is this copy of tensor, up-to-date value?

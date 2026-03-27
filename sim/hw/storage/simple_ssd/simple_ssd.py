@@ -19,7 +19,7 @@ class SimpleSSD(BaseStorage):
     io_bandwidth is dependent on io_size. Bigger io_size results in  higher io_bandwidth
     """
 
-    def init(self, obj_id: int, name: str, log: Log, args: dict[str, Any]):
+    def __init__(self, obj_id: int, name: str, log: Log, args: dict[str, Any]):
         super().__init__(obj_id, name, log)
 
         # Load fixed_latency_micros
