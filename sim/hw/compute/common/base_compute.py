@@ -14,7 +14,7 @@ class BaseCompute(BaseHardware):
         self.memory: BaseMemory | None = None       # Assign later
         return
 
-    def is_available(self) -> bool:
+    def is_avail(self) -> bool:
         """
         Compute Hardware Invariant:
 

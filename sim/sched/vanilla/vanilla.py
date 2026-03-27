@@ -15,7 +15,7 @@ class Vanilla(BaseScheduler):
     Only runs when memory is adequate
     """
 
-    def __init__(self, obj_id: int, name: str, log: Log, sys: System, args: dict[str, Any] = {}):
+    def __init__(self, obj_id: int, name: str, log: Log, sys: System, args: dict[str, Any] | None = None):
         super().__init__(obj_id, name, log, sys)
         return
 

@@ -81,12 +81,12 @@ class Simulator:
         compute.memory = memory
         hw[compute.name] = compute
 
-        # Scheduler
-        SchedulerClass = LOAD_SCHEDULER_CLASS(cfg["scheduler"]["type"])
-        sched = SchedulerClass(sim_id.get(), "Scheduler", log, cfg["scheduler"]["args"])
-
         # System
         sys = System(trace, hw)
+
+        # Scheduler
+        SchedulerClass = LOAD_SCHEDULER_CLASS(cfg["scheduler"]["type"])
+        sched = SchedulerClass(sim_id.get(), "Scheduler", log, sys, cfg["scheduler"]["args"])
 
         # Engine
         self.engine = Engine(sim_id.get(), "Engine", log, sys, sched)

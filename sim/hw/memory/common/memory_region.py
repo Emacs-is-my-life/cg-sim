@@ -80,11 +80,11 @@ class MemorySpace:
         prev_region, next_region = self._find_neighbors(page_idx_start)
 
         # Check overlap with the previous region
-        if prev_region is not None and prev_region.end_page_idx > page_idx_start:
+        if prev_region is not None and prev_region.page_idx_end > page_idx_start:
             return False
 
         # Check overlap with the next region
-        if next_region is not None and next_region.start_page_idx < page_idx_end:
+        if next_region is not None and next_region.page_idx_start < page_idx_end:
             return False
 
         return True
@@ -112,7 +112,7 @@ class MemorySpace:
             return None
 
         new_region = MemoryRegion(self.hw, page_idx_start, num_pages, tensor_id)
-        self._regions_by_start_page_idx[page_idx_start] = new_region
+        self._regions_by_page_idx_start[page_idx_start] = new_region
         self.num_used_pages += num_pages
 
         if self.num_used_pages > self.peak_num_used_pages:
@@ -128,8 +128,8 @@ class MemorySpace:
 
         for mem_region in self._regions_by_page_idx_start.values():
             if mem_region.id == free_region.id:
-                del mem_region
                 self.num_used_pages -= mem_region.num_pages
+                del free_region
                 break
 
         return

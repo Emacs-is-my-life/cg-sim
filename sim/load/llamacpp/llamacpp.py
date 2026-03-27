@@ -130,7 +130,7 @@ class Llamacpp(TraceLoader):
                 _node_id = _node_data[1]
                 _node_name = _node_data[2]
                 _node_compute_time_ns = _node_data[4]
-                _node_compute_time_micros = 1000 * _node_compute_time_ns
+                _node_compute_time_micros = float(_node_compute_time_ns / 1_000)
 
                 new_node = Node(node_id, _node_name, _node_compute_time_micros, {"step": step})
                 if (step > 0) and (_node_id == 0):
@@ -143,7 +143,7 @@ class Llamacpp(TraceLoader):
 
                     # Add Data Dependency
                     for tid in last_node.output_tensors:
-                        new_node.add_input_tensor(tensor_id)
+                        new_node.add_input_tensor(tid)
 
                 # Copy traits from the vNodeMap
                 virtual_node = vNodeMap[_node_id]

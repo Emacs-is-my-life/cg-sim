@@ -1,4 +1,5 @@
-* TODO Fix broken ABC import and circular import in trace loader
+* DONE Fix broken ABC import and circular import in trace loader
+CLOSED: [2026-03-27 Fri 12:09]
 ** Overview of problem
 The trace loader base class imports =ABC= from a non-existent module and also introduces a circular import by importing =Trace= through the package namespace while that namespace imports the loader back. This can break simulator startup before initialization finishes.
 
@@ -12,7 +13,8 @@ The trace loader base class imports =ABC= from a non-existent module and also in
   - Change =from sim.core.trace import Trace= to =from .trace import Trace= to avoid package-level circular import.
 - Keep =sim/core/trace/__init__.py= exports as-is unless further circular imports appear elsewhere.
 
-* TODO Fix concrete hardware constructors to use __init__
+* DONE Fix concrete hardware constructors to use __init__
+CLOSED: [2026-03-27 Fri 12:10]
 ** Overview of problem
 Concrete hardware classes define =init(...)= instead of =__init__(...)=. As a result, Python uses inherited constructors, so subclass-specific configuration is never applied. This breaks initialization and causes argument mismatches.
 
@@ -28,7 +30,8 @@ Concrete hardware classes define =init(...)= instead of =__init__(...)=. As a re
   - memory: =(obj_id, name, log, args)= and parse =memory_size_KB= inside the constructor before calling =BaseMemory.__init__=
 - Preserve superclass initialization as the first step after validating/parsing constructor arguments where necessary.
 
-* TODO Fix scheduler construction order and argument mismatch
+* DONE Fix scheduler construction order and argument mismatch
+CLOSED: [2026-03-27 Fri 12:12]
 ** Overview of problem
 The simulator constructs the scheduler before the system object exists, but the scheduler base class requires a =System=. The current call also passes scheduler args into the =sys= position.
 
@@ -45,7 +48,8 @@ The simulator constructs the scheduler before the system object exists, but the 
 - Keep the scheduler constructor contract consistent across =BaseScheduler= and all implementations.
 - Do not special-case scheduler creation in multiple places; keep one clear constructor shape.
 
-* TODO Fix trace loader and trace object construction contract
+* DONE Fix trace loader and trace object construction contract
+CLOSED: [2026-03-27 Fri 12:15]
 ** Overview of problem
 The concrete trace loader returns =Trace(self.obj_id, self.name, self.log, ...)=, but the loader base class only stores =args=. The loader and trace construction APIs do not agree on ownership of trace metadata.
 
@@ -64,7 +68,8 @@ The concrete trace loader returns =Trace(self.obj_id, self.name, self.log, ...)=
   - Keep =Llamacpp.load()= returning =Trace(self.obj_id, self.name, self.log, ...)=.
 - Do not hide metadata creation inside the loader implementation only; make the constructor contract explicit at the base class.
 
-* TODO Fix TerminalNode constructor typos
+* DONE Fix TerminalNode constructor typos
+CLOSED: [2026-03-27 Fri 12:16]
 ** Overview of problem
 =TerminalNode= defines =__ini__= and calls =super().__ini__=, so its constructor never runs correctly. This breaks creation of the terminal node that marks simulation completion.
 
@@ -76,7 +81,8 @@ The concrete trace loader returns =Trace(self.obj_id, self.name, self.log, ...)=
 - Call =super().__init__(obj_id, name, compute_time_micros, args)=.
 - Avoid mutable default arguments; replace =args: dict[str, Any] | None = {}= with =args: dict[str, Any] | None = None= and normalize inside the constructor.
 
-* TODO Fix Trace validation to use correct Node fields
+* DONE Fix Trace validation to use correct Node fields
+CLOSED: [2026-03-27 Fri 12:16]
 ** Overview of problem
 The trace validator references non-existent node fields =id_input_tensors= and =id_output_tensors=. Actual node fields are =input_tensors= and =output_tensors=. This causes trace construction to fail immediately.
 
@@ -106,7 +112,8 @@ Trace validation currently misses parent/child node reference checks, and termin
   - Move terminal-node validation outside the per-node loop and run it once.
 - Keep =map_check()= focused on structural validation only.
 
-* TODO Fix Tensor metadata loss during construction
+* DONE Fix Tensor metadata loss during construction
+CLOSED: [2026-03-27 Fri 12:18]
 ** Overview of problem
 The =Tensor= constructor ignores the incoming =args= and always stores an empty dict. This discards loader-provided metadata such as tensor type hints.
 
@@ -119,7 +126,8 @@ The =Tensor= constructor ignores the incoming =args= and always stores an empty 
   - Set =self.args = args if args is not None else {}=.
 - Keep derived fields like =num_pages= computed in the constructor; only fix metadata preservation.
 
-* TODO Fix Node typing and minor data model inconsistencies
+* DONE Fix Node typing and minor data model inconsistencies
+CLOSED: [2026-03-27 Fri 12:18]
 ** Overview of problem
 The =Node= class annotates =name= as =int= although it is used as a string. This is not fatal, but it weakens the data model and makes later code harder to maintain.
 
@@ -130,7 +138,8 @@ The =Node= class annotates =name= as =int= although it is used as a string. This
 - Change =self.name: int= to =self.name: str=.
 - Keep node fields simple and consistent with how the loader and logger use them.
 
-* TODO Fix llama.cpp loader path handling and variable bugs
+* DONE Fix llama.cpp loader path handling and variable bugs
+CLOSED: [2026-03-27 Fri 12:21]
 ** Overview of problem
 The llama.cpp loader checks the wrong path variable when resolving =record_path= and also uses an undefined variable =tensor_id= when linking step transitions. These are direct runtime bugs.
 
@@ -143,7 +152,8 @@ The llama.cpp loader checks the wrong path variable when resolving =record_path=
   - Replace =new_node.add_input_tensor(tensor_id)= with =new_node.add_input_tensor(tid)=.
 - Keep path normalization local to the loader.
 
-* TODO Fix llama.cpp compute time unit conversion
+* DONE Fix llama.cpp compute time unit conversion
+CLOSED: [2026-03-27 Fri 12:22]
 ** Overview of problem
 The loader converts nanoseconds to microseconds by multiplying by 1000 instead of dividing by 1000. This makes node durations grossly incorrect.
 
@@ -155,7 +165,8 @@ The loader converts nanoseconds to microseconds by multiplying by 1000 instead o
   - =_node_compute_time_micros = _node_compute_time_ns / 1000=
 - Keep simulator time units consistently in microseconds across loader, jobs, and engine.
 
-* TODO Fix System.claim and ClaimJob constructor mismatch
+* DONE Fix System.claim and ClaimJob constructor mismatch
+CLOSED: [2026-03-27 Fri 12:23]
 ** Overview of problem
 =System.claim()= constructs =ClaimJob= using scalar fields, but =ClaimJob= expects a =Tensor= object. The two APIs disagree, so claim submission is broken.
 
@@ -170,7 +181,8 @@ The loader converts nanoseconds to microseconds by multiplying by 1000 instead o
   - Change the call to =ClaimJob(hw, tensor, page_idx_start)=.
 - Keep tensor-derived fields computed in =ClaimJob.__init__= so the call site stays simple.
 
-* TODO Fix DataRegion constructor contract across memory and storage regions
+* DONE Fix DataRegion constructor contract across memory and storage regions
+CLOSED: [2026-03-27 Fri 12:23]
 ** Overview of problem
 =DataRegion= requires =(hw, tensor_id)=, but =MemoryRegion= and =StorageRegion= call the base constructor with only =tensor_id=. Region creation is structurally inconsistent and will fail.
 
@@ -187,7 +199,8 @@ The loader converts nanoseconds to microseconds by multiplying by 1000 instead o
 - Update =MemorySpace.claim()= and =StorageSpace.claim()= to supply the owning hardware when creating regions.
 - If needed, give =MemorySpace= and =StorageSpace= a stored reference to their owning hardware to avoid leaking this responsibility to callers.
 
-* TODO Fix MemorySpace attribute name bugs and release logic
+* DONE Fix MemorySpace attribute name bugs and release logic
+CLOSED: [2026-03-27 Fri 12:26]
 ** Overview of problem
 =MemorySpace= uses several inconsistent attribute names and broken deletion logic. These issues prevent allocation checks, claims, and releases from working correctly.
 
@@ -208,7 +221,8 @@ The loader converts nanoseconds to microseconds by multiplying by 1000 instead o
   - Decrement =num_used_pages= before removing or while holding a reference to the region object.
 - Keep all region bookkeeping in one sorted map with one canonical attribute name.
 
-* TODO Unify hardware availability method naming
+* DONE Unify hardware availability method naming
+CLOSED: [2026-03-27 Fri 12:26]
 ** Overview of problem
 The hardware API mixes =is_avail()= and =is_available()=. Base and derived classes do not consistently implement the same method name, which creates a fragile contract.
 
@@ -227,7 +241,8 @@ The hardware API mixes =is_avail()= and =is_available()=. Base and derived class
 - Rename =BaseCompute.is_available()= to =is_avail()=.
 - Keep all internal calls using the same canonical name.
 
-* TODO Fix Engine scheduler callback typo
+* DONE Fix Engine scheduler callback typo
+CLOSED: [2026-03-27 Fri 12:27]
 ** Overview of problem
 The engine calls =self.sched.runetime(...)=, but the scheduler interface defines =runtime(...)=. This prevents runtime scheduling from executing.
 
@@ -242,7 +257,8 @@ The engine calls =self.sched.runetime(...)=, but the scheduler interface defines
   - Rename the call from =runetime= to =runtime=.
 - Keep the scheduler interface spelling exactly consistent across base class, engine, and implementations.
 
-* TODO Fix Engine cleanup report payload construction
+* DONE Fix Engine cleanup report payload construction
+CLOSED: [2026-03-27 Fri 12:28]
 ** Overview of problem
 The engine cleanup path appends to a non-existent key and records a set containing a dict instead of a dict. This makes final reporting fail even if the simulation reaches cleanup.
 
@@ -275,7 +291,8 @@ Current schedulers do not submit any jobs in =layout()= or =runtime()=. With the
   - Ensure at least one scheduler can submit initial jobs needed to start execution.
 - Avoid silent =pass= in core control paths.
 
-* TODO Tighten dynamic class loader error handling
+* DONE Tighten dynamic class loader error handling
+CLOSED: [2026-03-27 Fri 12:33]
 ** Overview of problem
 Dynamic loaders use =globals()[type_name]= with no validation. This works only when config type names match exported class names exactly, and current failure mode is a raw =KeyError=.
 
@@ -292,7 +309,8 @@ Dynamic loaders use =globals()[type_name]= with no validation. This works only w
   - Raise a descriptive exception listing the unknown type and available exported classes.
 - Do not introduce multiple plugin lookup mechanisms; keep one explicit convention based on package exports.
 
-* TODO Clean up misleading type hints in loader helpers
+* DONE Clean up misleading type hints in loader helpers
+CLOSED: [2026-03-27 Fri 12:33]
 ** Overview of problem
 The =LOAD_*_CLASS= helpers annotate returned values as instances like =BaseCompute= or =BaseStorage=, but they actually return class objects. This is misleading for maintenance and tooling.
 
@@ -307,7 +325,8 @@ The =LOAD_*_CLASS= helpers annotate returned values as instances like =BaseCompu
 - Update type hints and local variable names to reflect that these helpers return classes, not instances.
 - Keep helper behavior unchanged; only clarify the contract.
 
-* TODO Avoid mutable default arguments in constructors
+* DONE Avoid mutable default arguments in constructors
+CLOSED: [2026-03-27 Fri 12:34]
 ** Overview of problem
 Some constructors use ={}= as a default argument. This can cause shared mutable state across instances and makes object behavior harder to reason about.
 
@@ -321,7 +340,8 @@ Some constructors use ={}= as a default argument. This can cause shared mutable 
 - Normalize inside the constructor using =args if args is not None else {}=.
 - Apply this consistently to constructors only; keep call sites unchanged where possible.
 
-* TODO Normalize invalid tuple type annotations
+* DONE Normalize invalid tuple type annotations
+CLOSED: [2026-03-27 Fri 12:36]
 ** Overview of problem
 Several annotations use =list[(A, B)]= instead of =list[tuple[A, B]]=. This is inconsistent with modern typing and can cause confusion or evaluation issues.
 

@@ -35,7 +35,7 @@ class System:
         return
 
     def claim(self, hw: BaseMemory | BaseStorage, tensor: Tensor, page_idx_start: int = -1) -> None:
-        job = ClaimJob(hw, tensor.id, page_idx_start, tensor.num_pages)
+        job = ClaimJob(hw, tensor, page_idx_start)
         self.engine.submit(job)
         return
 
@@ -44,7 +44,7 @@ class System:
         self.engine.submit(job)
         return
 
-    def transfer(self, batch: list[(DataRegion, DataRegion)]) -> None:
+    def transfer(self, batch: list[tuple[DataRegion, DataRegion]]) -> None:
         job = TransferJob(batch)
         self.engine.submit(job)
         return

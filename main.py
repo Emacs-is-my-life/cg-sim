@@ -1,10 +1,12 @@
+import sys
 import argparse
 
 from sim.core import Simulator
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-i", "--input", required=True)
-args = parser.parse_args()
+args, remaining_args = parser.parse_known_args()
+sys.argv = [sys.argv[0]] + remaining_args
 
 input_config_path = args.input
 

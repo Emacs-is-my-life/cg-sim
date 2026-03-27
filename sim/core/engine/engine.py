@@ -119,7 +119,7 @@ class Engine(SimObject):
                 job.update_progress(self.time_elapsed)
 
             # Scheduler Decisions
-            self.sched.runetime(retired_jobs)
+            self.sched.runtime(retired_jobs)
 
             # Drain all runnable jobs from job_waiting to job_running, in FIFO manner
             while self.job_waiting:
@@ -154,12 +154,12 @@ class Engine(SimObject):
 
         for hw in self.sys.hw.values():
             if isinstance(hw, BaseMemory):
-                args["peak_memory_usage"].append({
+                args["memory"].append({
                     "id": hw.id,
                     "name": hw.name,
                     "peak_memory_usage_KB": 4 * hw.space.peak_num_used_pages
                 })
 
-        self.log.record({Log.engine(self.id, "SIMULATION_REPORT", self.timestamp_now, args)})
+        self.log.record(Log.engine(self.id, "SIMULATION_REPORT", self.timestamp_now, args))
         self.log.stop()
         return

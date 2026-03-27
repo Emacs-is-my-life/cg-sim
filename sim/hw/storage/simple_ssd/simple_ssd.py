@@ -52,7 +52,7 @@ class SimpleSSD(BaseStorage):
     @staticmethod
     def _get_total_io_size_KB(job: TransferJob) -> float:
         """When storage job is given, get a sum of IO size from it's batch"""
-        batch: list[(DataRegion, DataRegion)] = job.batch
+        batch: list[tuple[DataRegion, DataRegion]] = job.batch
 
         total_io_size_KB = float(0.0)
         for src_region, dest_region in batch:
@@ -91,7 +91,7 @@ class SimpleSSD(BaseStorage):
         if self.job_running:
             job = self.job_running[0]
             total_io_size_KB = SimpleSSD._get_total_io_size_KB(job)
-            batch: list[(DataRegion, DataRegion)] = job.batch
+            batch: list[tuple[DataRegion, DataRegion]] = job.batch
             src0, dest0 = batch[0]
 
             if src0.hw.id == self.id:     # Use Read IO curve

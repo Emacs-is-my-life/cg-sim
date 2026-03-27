@@ -13,7 +13,7 @@ class TransferJob(BaseJob):
     """
     Data Region -> Data Region, data transfer job
     """
-    def __init__(self, batch: list[(DataRegion, DataRegion)]):
+    def __init__(self, batch: list[tuple[DataRegion, DataRegion]]):
         work_total = 0
         for src_region, _ in batch:
             work_total += 4 * src_region.num_pages    # KB

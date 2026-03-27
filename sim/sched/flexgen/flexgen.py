@@ -15,7 +15,7 @@ class FlexGen(BaseScheduler):
     https://dl.acm.org/doi/abs/10.5555/3618408.3619696
     """
 
-    def __init__(self, obj_id: int, name: str, log: Log, sys: System, args: dict[str, Any] = {}):
+    def __init__(self, obj_id: int, name: str, log: Log, sys: System, args: dict[str, Any] | None = None):
         super().__init__(obj_id, name, log, sys)
         return
 

@@ -21,7 +21,7 @@ class Node:
         """Initialize a Node, with it's computation characteristics"""
         self.id: int = node_id
         self.is_custom: bool = False
-        self.name: int = node_name
+        self.name: str = node_name
         self.compute_time_micros: float = compute_time_micros
         self.status: NodeStatus = NodeStatus.TODO
         self.args: dict[str, Any] = args if args is not None else {}
@@ -88,6 +88,6 @@ class Node:
 
 class TerminalNode(Node):
     """Node that marks the end of simulation"""
-    def __ini__(self, obj_id: int, name: str, compute_time_micros: float = 0, args: dict[str, Any] | None = {}):
-        super().__ini__(obj_id, name, compute_time_micros, args)
+    def __init__(self, obj_id: int, name: str, compute_time_micros: float = 0, args: dict[str, Any] | None = None):
+        super().__init__(obj_id, name, compute_time_micros, args)
         return

@@ -20,7 +20,7 @@ class Tensor:
         self.id: int = tensor_id
         self.name: str = tensor_name
         self.size_bytes: int = size_bytes
-        self.args: dict[str, Any] = {}
+        self.args: dict[str, Any] = args if args is not None else {}
 
         align_bytes = 64        # 64 B in AMD64 for optimal performance
         page_size_bytes = 4096  # 4 kB in AMD64

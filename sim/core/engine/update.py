@@ -18,7 +18,7 @@ def update_running_jobs(sys: System, jobs_running: list[BaseJob], timestamp_now:
             new_work_rate = hw.max_rate.compute
             job_r.update_ETA(timestamp_now, new_work_rate)
         elif isinstance(job_r, TransferJob):
-            batch: list[(DataRegion, DataRegion)] = job_r.batch
+            batch: list[tuple[DataRegion, DataRegion]] = job_r.batch
             src0, dest0 = batch[0]
             src_hw: BaseHardware = src0.hw
             dest_hw: BaseHardware = dest0.hw
