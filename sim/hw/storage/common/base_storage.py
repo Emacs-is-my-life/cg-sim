@@ -11,7 +11,7 @@ class BaseStorage(BaseHardware):
 
     def __init__(self, obj_id: int, name: str, log: Log):
         super().__init__(obj_id, name, log)
-        self.space: StorageSpace = StorageSpace()
+        self.space: StorageSpace = StorageSpace(self)
         return
 
     # TODO: After defining storage job

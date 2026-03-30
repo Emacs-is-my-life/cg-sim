@@ -14,6 +14,9 @@ class TransferJob(BaseJob):
     Data Region -> Data Region, data transfer job
     """
     def __init__(self, batch: list[tuple[DataRegion, DataRegion]]):
+        if len(batch) == 0:
+            raise Exception("[Engine] batch size of TransferJob cannot be 0.")
+
         work_total = 0
         for src_region, _ in batch:
             work_total += 4 * src_region.num_pages    # KB

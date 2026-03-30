@@ -129,7 +129,7 @@ class MemorySpace:
         for mem_region in self._regions_by_page_idx_start.values():
             if mem_region.id == free_region.id:
                 self.num_used_pages -= mem_region.num_pages
-                del free_region
+                del mem_region
                 break
 
         return

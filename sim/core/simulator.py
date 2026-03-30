@@ -33,7 +33,7 @@ def parse_config(config_file_path: str):
 
 class SimID:
     def __init__(self):
-        self.counter = 0
+        self.counter = 10
         return
 
     def get(self):
@@ -61,7 +61,7 @@ class Simulator:
         # Trace
         cfg["trace"]["args"]["input_path"] = config_file_path  # Supply input_path
         TraceLoaderClass = LOAD_TRACE_CLASS(cfg["trace"]["type"])
-        trace_loader = TraceLoaderClass(cfg["trace"]["args"])
+        trace_loader = TraceLoaderClass(sim_id.get(), "Trace", log, cfg["trace"]["args"])
         trace = trace_loader.load()
 
         hw = {}

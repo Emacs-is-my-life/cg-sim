@@ -5,6 +5,10 @@ from sim.hw.common import DataRegionAccess, DataRegion
 
 
 def begin_mutation(job: TransferJob, sys: System) -> None:
+    # 0. Run jobs on running hardware
+    for hw in job.running_on:
+        hw.run(job)
+
     batch: list[(DataRegion, DataRegion)] = job.batch
     for src_region, dest_region in batch:
         # 0. Update Src Region
@@ -20,6 +24,10 @@ def begin_mutation(job: TransferJob, sys: System) -> None:
 
 
 def end_mutation(job: TransferJob, sys: System) -> None:
+    # 0. Retire job from hardware running slot
+    for hw in job.running_on:
+        hw.retire(job)
+
     batch: list[(DataRegion, DataRegion)] = job.batch
     for src_region, dest_region in batch:
         # 0. Update Src Region

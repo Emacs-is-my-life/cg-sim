@@ -22,11 +22,11 @@ def map_check(node_map: dict[int, Node], tensor_map: dict[int, Tensor]):
             if tensor_id not in tensor_map:
                 raise Exception(f"[Loader] Node {node.id}'s output tensor: Tensor {tensor_id} does not exist in the TensorMap.")
 
-        # Check if last node is present
-        last_node_id = next(reversed(node_map))
-        last_node = node_map[last_node_id]
-        if not isinstance(last_node, TerminalNode):
-            raise Exception(f"[Loader] The last node in node_map, is not TerminalNode. Simulation will either end prematurely, or never end.")
+    # Check if last node is present
+    last_node_id = next(reversed(node_map))
+    last_node = node_map[last_node_id]
+    if not isinstance(last_node, TerminalNode):
+        raise Exception(f"[Loader] The last node in node_map, is not TerminalNode. Simulation will either end prematurely, or never end.")
 
     return
 

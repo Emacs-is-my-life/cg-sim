@@ -15,7 +15,7 @@ class BaseMemory(BaseHardware):
             raise ValueError(f"[Memory] Memory size cannot be: {memory_size_KB}")
 
         super().__init__(obj_id, name, log)
-        self.space: MemorySpace = MemorySpace(KB_to_num_pages(memory_size_KB))
+        self.space: MemorySpace = MemorySpace(self, KB_to_num_pages(memory_size_KB))
         return
 
     def log_counters(self) -> dict[str, Any]:

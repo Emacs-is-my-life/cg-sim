@@ -26,7 +26,7 @@ class Llamacpp(TraceLoader):
 
         # Load profiled record data
         record_path = Path(self.args["record_path"])
-        if not dot_graph_path.is_absolute():
+        if not record_path.is_absolute():
             record_path = input_dir / record_path
 
         df_profile_records = pl.read_csv(record_path, has_header=True)
@@ -172,4 +172,4 @@ class Llamacpp(TraceLoader):
         NodeMap[node_id] = last_node
         node_id += 1
 
-        return Trace(self.obj_id, self.name, self.log, NodeMap, TensorMap)
+        return Trace(self.id, self.name, self.log, NodeMap, TensorMap)

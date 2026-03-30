@@ -12,7 +12,7 @@ class BaseJob(ABC):
     def __init__(self, work_total: float):
         # Basics
         self.id: uuid.UUID = fastuuid.uuid4()
-        self.running_on: list[BaseHardware] = []    # TODO: implement BaseHardware, then do type annotation
+        self.running_on: list[BaseHardware] = []
         self.args: dict[str, Any] = {}
 
         # Work
@@ -83,10 +83,6 @@ class BaseJob(ABC):
 
     def end(self, log: Log, sys: System, timestamp_now: float):
         self.timestamp_end = timestamp_now
-
-        # Retire this job from hardwares
-        for hw in self.running_on:
-            hw.retire(self)
 
         # Job finish hook
         self.end_mut(sys)

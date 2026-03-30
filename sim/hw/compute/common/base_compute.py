@@ -29,7 +29,7 @@ class BaseCompute(BaseHardware):
         """
 
         counters = {
-            "compute_speed": 0
+            "compute_speed_AUps": 0
         }
 
         if not self.is_avail():

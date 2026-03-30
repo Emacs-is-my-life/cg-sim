@@ -28,11 +28,11 @@ def begin_mutation(job: ComputeJob, sys: System) -> None:
 
     # 3. Output Tensors
     for o_tensor_id in node.output_tensors:
-        o_mem_region = memory.space.get_by_tensor_id(o_tensor_id)[0]
-        o_mem_region.access_status = DataRegionAccess.BEING_WRITTEN
-
         # Invalidate all tensors
         invalidate(sys, o_tensor_id)
+
+        o_mem_region = memory.space.get_by_tensor_id(o_tensor_id)[0]
+        o_mem_region.access_status = DataRegionAccess.BEING_WRITTEN
 
         o_mem_region.is_latest = True
         o_mem_region.is_ready = False

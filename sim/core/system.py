@@ -24,7 +24,7 @@ class System:
     """
 
     def __init__(self, trace: Trace, hw: dict[str, BaseHardware]):
-        self.engine: Engine = None   # Will be injected by engine
+        self.engine: Engine = None
         self.trace: Trace = trace
         self.hw: dict[str, BaseHardware] = hw
         return
@@ -38,6 +38,14 @@ class System:
         job = ClaimJob(hw, tensor, page_idx_start)
         self.engine.submit(job)
         return
+
+    def find(self, hw: BaseMemory | BaseStorage, tensor: Tensor | int) -> list[DataRegion]:
+        tensor_id = tensor
+        if isinstance(tensor, Tensor):
+            tensor_id = tensor.id
+
+        regions = hw.space.get_by_tensor_id(tensor_id)
+        return regions
 
     def release(self, region: DataRegion) -> None:
         job = ReleaseJob(region)

@@ -36,7 +36,7 @@ class TensorWithSign(Tensor):
         return
 
     def get_Tensor(self):
-        return Tensor(self._id, self.name, self.type, self.size_bytes, self.args)
+        return Tensor(self.id, self.name, self.size_bytes, self.args)
 
 
 def get_real_tensor_id(TensorWithSignMap: dict[int, TensorWithSign], tensor_sign: str) -> int:

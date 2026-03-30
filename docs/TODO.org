@@ -1,372 +1,438 @@
-* DONE Fix broken ABC import and circular import in trace loader
-CLOSED: [2026-03-27 Fri 12:09]
-** Overview of problem
-The trace loader base class imports =ABC= from a non-existent module and also introduces a circular import by importing =Trace= through the package namespace while that namespace imports the loader back. This can break simulator startup before initialization finishes.
-
-** Related =<file_name>:<function_name>=
-- =sim/core/trace/loader.py:= module import section
-- =sim/core/trace/__init__.py:= package export path
-
-** Proposed fix
-- In =sim/core/trace/loader.py=:
-  - Change =from ABC import ABC, abstractmethod= to =from abc import ABC, abstractmethod=.
-  - Change =from sim.core.trace import Trace= to =from .trace import Trace= to avoid package-level circular import.
-- Keep =sim/core/trace/__init__.py= exports as-is unless further circular imports appear elsewhere.
-
-* DONE Fix concrete hardware constructors to use __init__
-CLOSED: [2026-03-27 Fri 12:10]
-** Overview of problem
-Concrete hardware classes define =init(...)= instead of =__init__(...)=. As a result, Python uses inherited constructors, so subclass-specific configuration is never applied. This breaks initialization and causes argument mismatches.
-
-** Related =<file_name>:<function_name>=
-- =sim/hw/compute/simple_cpu/simple_cpu.py:SimpleCPU.init=
-- =sim/hw/memory/simple_ram/simple_ram.py:SimpleRAM.init=
-- =sim/hw/storage/simple_ssd/simple_ssd.py:SimpleSSD.init=
-
-** Proposed fix
-- Rename each =init(...)= method to =__init__(...)=.
-- Keep constructor signatures aligned with how =Simulator= instantiates them:
-  - compute/storage: =(obj_id, name, log, args)=
-  - memory: =(obj_id, name, log, args)= and parse =memory_size_KB= inside the constructor before calling =BaseMemory.__init__=
-- Preserve superclass initialization as the first step after validating/parsing constructor arguments where necessary.
-
-* DONE Fix scheduler construction order and argument mismatch
-CLOSED: [2026-03-27 Fri 12:12]
-** Overview of problem
-The simulator constructs the scheduler before the system object exists, but the scheduler base class requires a =System=. The current call also passes scheduler args into the =sys= position.
-
-** Related =<file_name>:<function_name>=
-- =sim/core/simulator.py:Simulator.__init__=
-- =sim/sched/common/base_scheduler.py:BaseScheduler.__init__=
-- =sim/sched/vanilla/vanilla.py:Vanilla.__init__=
-- =sim/sched/flexgen/flexgen.py:FlexGen.__init__=
-
-** Proposed fix
-- In =sim/core/simulator.py=:
-  - Construct =System(trace, hw)= before constructing the scheduler.
-  - Instantiate the scheduler with =(obj_id, name, log, sys, args)=.
-- Keep the scheduler constructor contract consistent across =BaseScheduler= and all implementations.
-- Do not special-case scheduler creation in multiple places; keep one clear constructor shape.
-
-* DONE Fix trace loader and trace object construction contract
-CLOSED: [2026-03-27 Fri 12:15]
-** Overview of problem
-The concrete trace loader returns =Trace(self.obj_id, self.name, self.log, ...)=, but the loader base class only stores =args=. The loader and trace construction APIs do not agree on ownership of trace metadata.
-
-** Related =<file_name>:<function_name>=
-- =sim/load/llamacpp/llamacpp.py:Llamacpp.load=
-- =sim/core/trace/loader.py:TraceLoader.__init__=
-- =sim/core/simulator.py:Simulator.__init__=
-- =sim/core/trace/trace.py:Trace.__init__=
-
-** Proposed fix
-- Choose one clean ownership model and apply it consistently:
-  - Preferred: keep =TraceLoader= as a pure loader that only knows =args= and returns a fully built =Trace= using metadata passed explicitly from =Simulator=.
-- Minimal clean change:
-  - Update =TraceLoader.__init__= to accept and store =(obj_id, name, log, args)=.
-  - Update =Simulator.__init__= to instantiate the loader with those values.
-  - Keep =Llamacpp.load()= returning =Trace(self.obj_id, self.name, self.log, ...)=.
-- Do not hide metadata creation inside the loader implementation only; make the constructor contract explicit at the base class.
-
-* DONE Fix TerminalNode constructor typos
-CLOSED: [2026-03-27 Fri 12:16]
-** Overview of problem
-=TerminalNode= defines =__ini__= and calls =super().__ini__=, so its constructor never runs correctly. This breaks creation of the terminal node that marks simulation completion.
-
-** Related =<file_name>:<function_name>=
-- =sim/core/trace/node.py:TerminalNode.__ini__=
-
-** Proposed fix
-- Rename =__ini__= to =__init__=.
-- Call =super().__init__(obj_id, name, compute_time_micros, args)=.
-- Avoid mutable default arguments; replace =args: dict[str, Any] | None = {}= with =args: dict[str, Any] | None = None= and normalize inside the constructor.
-
-* DONE Fix Trace validation to use correct Node fields
-CLOSED: [2026-03-27 Fri 12:16]
-** Overview of problem
-The trace validator references non-existent node fields =id_input_tensors= and =id_output_tensors=. Actual node fields are =input_tensors= and =output_tensors=. This causes trace construction to fail immediately.
-
-** Related =<file_name>:<function_name>=
-- =sim/core/trace/trace.py:map_check=
-- =sim/core/trace/node.py:Node.__init__=
-
-** Proposed fix
-- In =sim/core/trace/trace.py=:
-  - Replace =node.id_input_tensors= with =node.input_tensors=.
-  - Replace =node.id_output_tensors= with =node.output_tensors=.
-- Keep validation logic centralized in =map_check()= rather than duplicating it elsewhere.
-
-* TODO Strengthen Trace validation for graph consistency
-** Overview of problem
-Trace validation currently misses parent/child node reference checks, and terminal-node validation is placed inside the per-node loop. This weakens correctness and makes validation harder to reason about.
-
-** Related =<file_name>:<function_name>=
-- =sim/core/trace/trace.py:map_check=
-- =sim/core/trace/node.py:Node.add_parent_node=
-- =sim/core/trace/node.py:Node.add_child_node=
-
-** Proposed fix
-- In =map_check()=:
-  - Validate that every =parent_nodes= id exists in =node_map=.
-  - Validate that every =children_nodes= id exists in =node_map=.
-  - Move terminal-node validation outside the per-node loop and run it once.
-- Keep =map_check()= focused on structural validation only.
-
-* DONE Fix Tensor metadata loss during construction
-CLOSED: [2026-03-27 Fri 12:18]
-** Overview of problem
-The =Tensor= constructor ignores the incoming =args= and always stores an empty dict. This discards loader-provided metadata such as tensor type hints.
-
-** Related =<file_name>:<function_name>=
-- =sim/core/trace/tensor.py:Tensor.__init__=
-- =sim/load/llamacpp/llamacpp.py:Llamacpp.load=
-
-** Proposed fix
-- In =sim/core/trace/tensor.py=:
-  - Set =self.args = args if args is not None else {}=.
-- Keep derived fields like =num_pages= computed in the constructor; only fix metadata preservation.
-
-* DONE Fix Node typing and minor data model inconsistencies
-CLOSED: [2026-03-27 Fri 12:18]
-** Overview of problem
-The =Node= class annotates =name= as =int= although it is used as a string. This is not fatal, but it weakens the data model and makes later code harder to maintain.
-
-** Related =<file_name>:<function_name>=
-- =sim/core/trace/node.py:Node.__init__=
-
-** Proposed fix
-- Change =self.name: int= to =self.name: str=.
-- Keep node fields simple and consistent with how the loader and logger use them.
-
-* DONE Fix llama.cpp loader path handling and variable bugs
-CLOSED: [2026-03-27 Fri 12:21]
-** Overview of problem
-The llama.cpp loader checks the wrong path variable when resolving =record_path= and also uses an undefined variable =tensor_id= when linking step transitions. These are direct runtime bugs.
-
-** Related =<file_name>:<function_name>=
-- =sim/load/llamacpp/llamacpp.py:Llamacpp.load=
-
-** Proposed fix
-- In =Llamacpp.load()=:
-  - Change the =record_path= absolute-path check to use =record_path.is_absolute()=.
-  - Replace =new_node.add_input_tensor(tensor_id)= with =new_node.add_input_tensor(tid)=.
-- Keep path normalization local to the loader.
-
-* DONE Fix llama.cpp compute time unit conversion
-CLOSED: [2026-03-27 Fri 12:22]
-** Overview of problem
-The loader converts nanoseconds to microseconds by multiplying by 1000 instead of dividing by 1000. This makes node durations grossly incorrect.
-
-** Related =<file_name>:<function_name>=
-- =sim/load/llamacpp/llamacpp.py:Llamacpp.load=
-
-** Proposed fix
-- Replace =_node_compute_time_micros = 1000 * _node_compute_time_ns= with division-based conversion:
-  - =_node_compute_time_micros = _node_compute_time_ns / 1000=
-- Keep simulator time units consistently in microseconds across loader, jobs, and engine.
-
-* DONE Fix System.claim and ClaimJob constructor mismatch
-CLOSED: [2026-03-27 Fri 12:23]
-** Overview of problem
-=System.claim()= constructs =ClaimJob= using scalar fields, but =ClaimJob= expects a =Tensor= object. The two APIs disagree, so claim submission is broken.
-
-** Related =<file_name>:<function_name>=
-- =sim/core/system.py:System.claim=
-- =sim/core/job/claim_job.py:ClaimJob.__init__=
-
-** Proposed fix
-- Standardize on one API:
-  - Preferred: keep =ClaimJob= accepting a =Tensor= object and optional =page_idx_start=.
-- In =sim/core/system.py=:
-  - Change the call to =ClaimJob(hw, tensor, page_idx_start)=.
-- Keep tensor-derived fields computed in =ClaimJob.__init__= so the call site stays simple.
-
-* DONE Fix DataRegion constructor contract across memory and storage regions
-CLOSED: [2026-03-27 Fri 12:23]
-** Overview of problem
-=DataRegion= requires =(hw, tensor_id)=, but =MemoryRegion= and =StorageRegion= call the base constructor with only =tensor_id=. Region creation is structurally inconsistent and will fail.
-
-** Related =<file_name>:<function_name>=
-- =sim/hw/common/data_region.py:DataRegion.__init__=
-- =sim/hw/memory/common/memory_region.py:MemoryRegion.__init__=
-- =sim/hw/storage/common/storage_region.py:StorageRegion.__init__=
-- =sim/hw/memory/common/memory_region.py:MemorySpace.claim=
-- =sim/hw/storage/common/storage_region.py:StorageSpace.claim=
-
-** Proposed fix
-- Keep =DataRegion= owning its hardware reference.
-- Update =MemoryRegion= and =StorageRegion= constructors to accept =hw= and pass it to =DataRegion.__init__=.
-- Update =MemorySpace.claim()= and =StorageSpace.claim()= to supply the owning hardware when creating regions.
-- If needed, give =MemorySpace= and =StorageSpace= a stored reference to their owning hardware to avoid leaking this responsibility to callers.
-
-* DONE Fix MemorySpace attribute name bugs and release logic
-CLOSED: [2026-03-27 Fri 12:26]
-** Overview of problem
-=MemorySpace= uses several inconsistent attribute names and broken deletion logic. These issues prevent allocation checks, claims, and releases from working correctly.
-
-** Related =<file_name>:<function_name>=
-- =sim/hw/memory/common/memory_region.py:MemorySpace.check_avail=
-- =sim/hw/memory/common/memory_region.py:MemorySpace.claim=
-- =sim/hw/memory/common/memory_region.py:MemorySpace.release=
-- =sim/hw/memory/common/memory_region.py:MemoryRegion.__init__=
-
-** Proposed fix
-- In =check_avail()=:
-  - Replace =prev_region.end_page_idx= with =prev_region.page_idx_end=.
-  - Replace =next_region.start_page_idx= with =next_region.page_idx_start=.
-- In =claim()=:
-  - Replace =self._regions_by_start_page_idx= with =self._regions_by_page_idx_start=.
-- In =release()=:
-  - Delete the matching entry from =self._regions_by_page_idx_start= by key, not by deleting a local loop variable.
-  - Decrement =num_used_pages= before removing or while holding a reference to the region object.
-- Keep all region bookkeeping in one sorted map with one canonical attribute name.
-
-* DONE Unify hardware availability method naming
-CLOSED: [2026-03-27 Fri 12:26]
-** Overview of problem
-The hardware API mixes =is_avail()= and =is_available()=. Base and derived classes do not consistently implement the same method name, which creates a fragile contract.
-
-** Related =<file_name>:<function_name>=
-- =sim/hw/common/base_hardware.py:BaseHardware.is_avail=
-- =sim/hw/compute/common/base_compute.py:BaseCompute.is_available=
-- =sim/hw/compute/common/base_compute.py:BaseCompute.log_counters=
-- =sim/hw/compute/common/base_compute.py:BaseCompute.log_states=
-- =sim/hw/compute/simple_cpu/simple_cpu.py:SimpleCPU.is_avail=
-- =sim/hw/memory/simple_ram/simple_ram.py:SimpleRAM.is_avail=
-- =sim/hw/storage/simple_ssd/simple_ssd.py:SimpleSSD.is_avail=
-
-** Proposed fix
-- Standardize on a single method name across all hardware classes.
-  - Preferred: use =is_avail()= because that is already declared in =BaseHardware= and implemented in concrete classes.
-- Rename =BaseCompute.is_available()= to =is_avail()=.
-- Keep all internal calls using the same canonical name.
-
-* DONE Fix Engine scheduler callback typo
-CLOSED: [2026-03-27 Fri 12:27]
-** Overview of problem
-The engine calls =self.sched.runetime(...)=, but the scheduler interface defines =runtime(...)=. This prevents runtime scheduling from executing.
-
-** Related =<file_name>:<function_name>=
-- =sim/core/engine/engine.py:Engine._runtime=
-- =sim/sched/common/base_scheduler.py:BaseScheduler.runtime=
-- =sim/sched/vanilla/vanilla.py:Vanilla.runtime=
-- =sim/sched/flexgen/flexgen.py:FlexGen.runtime=
-
-** Proposed fix
-- In =sim/core/engine/engine.py=:
-  - Rename the call from =runetime= to =runtime=.
-- Keep the scheduler interface spelling exactly consistent across base class, engine, and implementations.
-
-* DONE Fix Engine cleanup report payload construction
-CLOSED: [2026-03-27 Fri 12:28]
-** Overview of problem
-The engine cleanup path appends to a non-existent key and records a set containing a dict instead of a dict. This makes final reporting fail even if the simulation reaches cleanup.
-
-** Related =<file_name>:<function_name>=
-- =sim/core/engine/engine.py:Engine._cleanup=
-- =sim/core/log/log.py:Log.record=
-- =sim/core/log/log.py:Log.engine=
-
-** Proposed fix
-- In =Engine._cleanup()=:
-  - Initialize the report payload with the exact key you append to, e.g. =peak_memory_usage=.
-  - Pass the event dict directly to =self.log.record(...)=, not wrapped in braces.
-- Keep report formatting centralized through =Log.engine(...)=.
-
-* TODO Ensure simulator can terminate when schedulers are still placeholders
-** Overview of problem
-Current schedulers do not submit any jobs in =layout()= or =runtime()=. With the current engine loop, this can lead to an infinite runtime loop with no forward progress.
-
-** Related =<file_name>:<function_name>=
-- =sim/core/engine/engine.py:Engine._runtime=
-- =sim/sched/vanilla/vanilla.py:Vanilla.layout=
-- =sim/sched/vanilla/vanilla.py:Vanilla.runtime=
-- =sim/sched/flexgen/flexgen.py:FlexGen.layout=
-- =sim/sched/flexgen/flexgen.py:FlexGen.runtime=
-
-** Proposed fix
-- Short term:
-  - Add explicit fail-fast behavior in placeholder schedulers, such as raising =NotImplementedError= in unimplemented methods.
-- Medium term:
-  - Ensure at least one scheduler can submit initial jobs needed to start execution.
-- Avoid silent =pass= in core control paths.
-
-* DONE Tighten dynamic class loader error handling
-CLOSED: [2026-03-27 Fri 12:33]
-** Overview of problem
-Dynamic loaders use =globals()[type_name]= with no validation. This works only when config type names match exported class names exactly, and current failure mode is a raw =KeyError=.
-
-** Related =<file_name>:<function_name>=
-- =sim/core/init/trace.py:LOAD_TRACE_CLASS=
-- =sim/core/init/compute.py:LOAD_COMPUTE_CLASS=
-- =sim/core/init/memory.py:LOAD_MEMORY_CLASS=
-- =sim/core/init/storage.py:LOAD_STORAGE_CLASS=
-- =sim/core/init/scheduler.py:LOAD_SCHEDULER_CLASS=
-
-** Proposed fix
-- Keep the dynamic loader design, but improve error clarity:
-  - Check whether =type_name= exists in =globals()= before lookup.
-  - Raise a descriptive exception listing the unknown type and available exported classes.
-- Do not introduce multiple plugin lookup mechanisms; keep one explicit convention based on package exports.
-
-* DONE Clean up misleading type hints in loader helpers
-CLOSED: [2026-03-27 Fri 12:33]
-** Overview of problem
-The =LOAD_*_CLASS= helpers annotate returned values as instances like =BaseCompute= or =BaseStorage=, but they actually return class objects. This is misleading for maintenance and tooling.
-
-** Related =<file_name>:<function_name>=
-- =sim/core/init/compute.py:LOAD_COMPUTE_CLASS=
-- =sim/core/init/memory.py:LOAD_MEMORY_CLASS=
-- =sim/core/init/storage.py:LOAD_STORAGE_CLASS=
-- =sim/core/init/scheduler.py:LOAD_SCHEDULER_CLASS=
-- =sim/core/init/trace.py:LOAD_TRACE_CLASS=
-
-** Proposed fix
-- Update type hints and local variable names to reflect that these helpers return classes, not instances.
-- Keep helper behavior unchanged; only clarify the contract.
-
-* DONE Avoid mutable default arguments in constructors
-CLOSED: [2026-03-27 Fri 12:34]
-** Overview of problem
-Some constructors use ={}= as a default argument. This can cause shared mutable state across instances and makes object behavior harder to reason about.
-
-** Related =<file_name>:<function_name>=
-- =sim/core/trace/node.py:TerminalNode.__init__= after typo fix
-- =sim/sched/vanilla/vanilla.py:Vanilla.__init__=
-- =sim/sched/flexgen/flexgen.py:FlexGen.__init__=
-
-** Proposed fix
-- Replace default ={}= values with =None=.
-- Normalize inside the constructor using =args if args is not None else {}=.
-- Apply this consistently to constructors only; keep call sites unchanged where possible.
-
-* DONE Normalize invalid tuple type annotations
-CLOSED: [2026-03-27 Fri 12:36]
-** Overview of problem
-Several annotations use =list[(A, B)]= instead of =list[tuple[A, B]]=. This is inconsistent with modern typing and can cause confusion or evaluation issues.
-
-** Related =<file_name>:<function_name>=
-- =sim/core/system.py:System.transfer=
-- =sim/core/job/transfer_job.py:TransferJob.__init__=
-- =sim/hw/storage/simple_ssd/simple_ssd.py:SimpleSSD._get_total_io_size_KB=
-- =sim/hw/storage/simple_ssd/simple_ssd.py:SimpleSSD.update_work_rate=
-- =sim/core/engine/update.py:update_running_jobs=
-
-** Proposed fix
-- Replace all =list[(A, B)]= annotations with =list[tuple[A, B]]=.
-- Keep this as a typing-only cleanup; do not change runtime behavior.
-
-* TODO Consider safer CLI override handling with Hydra
-** Overview of problem
-The simulator parses CLI arguments with =argparse= and then forwards all remaining =sys.argv[1:]= to Hydra as overrides. This can create confusing interactions between the two CLI layers.
-
-** Related =<file_name>:<function_name>=
-- =main.py:= module CLI parsing
-- =sim/core/simulator.py:parse_config=
-
-** Proposed fix
-- Keep one clear rule for override handling.
-- Minimal cleanup:
-  - Exclude the already-consumed =--input/-i= option from Hydra overrides, or
-  - Parse known args in =main.py= and pass only unknown args to config composition explicitly.
-- Keep =Simulator= focused on object initialization, not CLI parsing concerns.
+* Startup and initialization contract bugs
+
+** DONE Fix trace loader constructor call in simulator startup
+CLOSED: [2026-03-30 Mon 10:56]
+*** Overview of problem
+=Simulator.__init__= constructs the trace loader with only =cfg["trace"]["args"]=, but =TraceLoader.__init__= requires =(obj_id, name, log, args)=. This causes startup failure before trace loading begins.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/core/simulator.py:Simulator.__init__:52=
+- =sim/core/trace/loader.py:TraceLoader.__init__:9=
+
+*** Proposed fix
+- Construct the trace loader with explicit simulator-managed identity, name, and logger.
+- Keep all trace loader subclasses on the same constructor contract.
+
+** DONE Fix wrong trace loader identity field used by llama.cpp loader
+CLOSED: [2026-03-30 Mon 11:02]
+*** Overview of problem
+=TraceLoader= stores its identifier in =self.id=, but =Llamacpp.load()= constructs =Trace(...)= using =self.obj_id=. That attribute does not exist, so trace loading raises =AttributeError= even if loader construction is fixed.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/core/trace/loader.py:TraceLoader.__init__:10=
+- =sim/load/llamacpp/llamacpp.py:Llamacpp.load:145=
+
+*** Proposed fix
+- Replace =self.obj_id= with =self.id= in =Llamacpp.load()=.
+- Standardize object identity field naming across loader and sim objects.
+
+** DONE Fix memory hardware construction to pass owner into MemorySpace
+CLOSED: [2026-03-30 Mon 11:08]
+*** Overview of problem
+=MemorySpace.__init__= requires =(hw, num_total_pages)=, but =BaseMemory.__init__= passes only the page count. Any memory hardware instantiation fails during startup.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/hw/memory/common/base_memory.py:BaseMemory.__init__:16=
+- =sim/hw/memory/common/memory_region.py:MemorySpace.__init__:28=
+
+*** Proposed fix
+- Construct memory space as =MemorySpace(self, KB_to_num_pages(memory_size_KB))=.
+- Keep the owning hardware explicit in region-space objects.
+
+** DONE Fix storage hardware construction to pass owner into StorageSpace
+CLOSED: [2026-03-30 Mon 11:08]
+*** Overview of problem
+=StorageSpace.__init__= requires the owning storage hardware, but =BaseStorage.__init__= calls =StorageSpace()= with no arguments. Storage hardware instantiation fails during startup.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/hw/storage/common/base_storage.py:BaseStorage.__init__:13=
+- =sim/hw/storage/common/storage_region.py:StorageSpace.__init__:20=
+
+*** Proposed fix
+- Construct storage space as =StorageSpace(self)= in =BaseStorage.__init__=.
+- Keep region ownership centralized in =StorageSpace=.
+
+** DONE Avoid giving schedulers a partially wired System instance
+CLOSED: [2026-03-30 Mon 11:10]
+*** Overview of problem
+=System.engine= is initialized to =None= and only injected inside =Engine.__init__=. However, scheduler instances are constructed before the engine. Any scheduler constructor that submits work via =System= will fail because =self.engine.submit(...)= is unavailable.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/core/system.py:System.__init__:23=
+- =sim/core/simulator.py:Simulator.__init__:75=
+- =sim/core/simulator.py:Simulator.__init__:78=
+- =sim/core/engine/engine.py:Engine.__init__:26=
+- =sim/core/system.py:System.compute:28=
+- =sim/core/system.py:System.claim:33=
+- =sim/core/system.py:System.release:38=
+- =sim/core/system.py:System.transfer:43=
+
+*** Proposed fix
+- Instantiate =Engine= before constructing the scheduler, or inject the engine into =System= before any scheduler can use =System= submission APIs.
+- Keep scheduler constructors side-effect free if construction order must remain.
+
+* Engine and scheduling runtime bugs
+
+** TODO Prevent infinite runtime loop when built-in schedulers do nothing
+*** Overview of problem
+Both built-in schedulers leave =layout()= and =runtime()= as no-ops. In =Engine._runtime()=, when no jobs are submitted and no terminal job can ever retire, the loop never terminates and never raises.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/sched/vanilla/vanilla.py:Vanilla.layout:24=
+- =sim/sched/vanilla/vanilla.py:Vanilla.runtime:27=
+- =sim/sched/flexgen/flexgen.py:FlexGen.layout:23=
+- =sim/sched/flexgen/flexgen.py:FlexGen.runtime:26=
+- =sim/core/engine/engine.py:Engine._runtime:93=
+
+*** Proposed fix
+- Replace placeholder =pass= methods with =NotImplementedError= until a real scheduler is implemented.
+- Ensure at least one scheduler submits initial jobs required to reach the terminal node.
+
+** TODO Fix missing ETA assignment for instant claim/release jobs
+*** Overview of problem
+=ClaimJob= and =ReleaseJob= are instantaneous jobs with =work_total = 0=, but =update_running_jobs()= assigns ETAs only for =ComputeJob= and =TransferJob=. Instant jobs therefore keep =timestamp_ETA = None= after being appended to the running heap, which breaks ordering and time advancement.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/core/job/claim_job.py:ClaimJob.__init__:18=
+- =sim/core/job/release_job.py:ReleaseJob.__init__:16=
+- =sim/core/engine/update.py:update_running_jobs:11=
+- =sim/core/engine/engine.py:Engine._runtime:118=
+- =sim/core/job/job.py:BaseJob.__lt__:25=
+- =sim/core/engine/engine.py:Engine._runtime_forward:79=
+
+*** Proposed fix
+- In =update_running_jobs()=, explicitly assign ETA for instant jobs to =timestamp_now=.
+- Keep heap ordering valid for every job type.
+
+** TODO Make empty-engine runtime failure explicit instead of spinning forever
+*** Overview of problem
+=Engine._runtime()= loops forever even when both =job_waiting= and =job_running= are empty and the scheduler submitted nothing. This is a non-terminating execution state distinct from deadlock detection, because the current deadlock check only runs when a blocked waiting job exists.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/core/engine/engine.py:Engine._runtime:93=
+
+*** Proposed fix
+- Add an explicit failure path when both queues are empty after scheduler processing and no terminal node has completed.
+- Report this as a scheduler contract violation or invalid execution state.
+
+** TODO Clarify and implement layout-phase execution semantics
+*** Overview of problem
+The simulator exposes both =Engine._layout()= and =Engine._layout_forward()=. Scheduler APIs can submit jobs through =System= during layout, but =Engine._layout()= only calls =sched.layout()= and never drains or retires submitted jobs. Layout-submitted jobs therefore leak into runtime semantics unexpectedly.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/core/engine/engine.py:Engine._layout_forward:58=
+- =sim/core/engine/engine.py:Engine._layout:74=
+- =sim/sched/common/base_scheduler.py:BaseScheduler.layout:18=
+- =sim/core/system.py:System.claim:33=
+- =sim/core/system.py:System.release:38=
+- =sim/core/system.py:System.transfer:43=
+
+*** Proposed fix
+- Choose one model and enforce it:
+  - either layout is planning only and must not submit jobs, or
+  - layout is simulated execution and =Engine._layout()= must process submitted layout jobs deterministically.
+- Keep layout and runtime behavior separated by contract.
+
+** TODO Revisit strict FIFO waiting-queue semantics that create false deadlocks
+*** Overview of problem
+=Engine._runtime()= drains =job_waiting= strictly from the left and stops at the first blocked job. If that head job is unrunnable while no job is currently running, the engine raises deadlock even if later queued jobs are runnable and could make progress. This creates a hidden scheduler ordering constraint.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/core/engine/engine.py:Engine._runtime:106=
+- =sim/core/system.py:System.compute:28=
+- =sim/core/system.py:System.claim:33=
+- =sim/core/system.py:System.release:38=
+- =sim/core/system.py:System.transfer:43=
+
+*** Proposed fix
+- Either document strict submission order as part of the scheduler contract, or allow later runnable jobs to bypass blocked earlier jobs.
+- Prefer one explicit policy and enforce it consistently.
+
+* Job lifecycle and mutation bugs
+
+** DONE Remove duplicated hardware retirement in job end path
+CLOSED: [2026-03-30 Mon 12:49]
+*** Overview of problem
+=BaseJob.end()= retires the job from every hardware in =running_on= before calling =end_mut()=. Several mutation hooks also retire the same job again. This duplicates lifecycle responsibility and obscures who owns hardware bookkeeping.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/core/job/job.py:BaseJob.end:76=
+- =sim/core/job/mutation/claim_mutation.py:end_mutation:20=
+- =sim/core/job/mutation/compute_mutation.py:end_mutation:41=
+- =sim/core/job/mutation/release_mutation.py:end_mutation:16=
+
+*** Proposed fix
+- Keep generic hardware retirement only in =BaseJob.end()= and remove duplicate retire loops from mutation hooks.
+- Restrict mutation hooks to domain-state changes.
+
+** DONE Register transfer jobs on participating hardware
+CLOSED: [2026-03-30 Mon 12:50]
+*** Overview of problem
+Transfer mutation updates region access flags but never calls =hw.run(job)= on the source and destination hardware. As a result, hardware occupancy and bandwidth models never see active transfers, so ETA calculations can run against stale hardware state.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/core/job/mutation/transfer_mutation.py:begin_mutation:7=
+- =sim/hw/common/base_hardware.py:BaseHardware.run:28=
+- =sim/hw/storage/simple_ssd/simple_ssd.py:SimpleSSD.update_work_rate:75=
+
+*** Proposed fix
+- In =begin_mutation()=, call =hw.run(job)= for every hardware in =job.running_on= before changing region state.
+- Keep hardware retirement centralized in =BaseJob.end()=.
+
+** DONE Fix invalidation order for compute outputs
+CLOSED: [2026-03-30 Mon 12:50]
+*** Overview of problem
+=compute_mutation.begin_mutation()= marks the output memory region as =BEING_WRITTEN= and then immediately calls =invalidate(sys, o_tensor_id)= for the same tensor ID. If invalidation traverses all copies of that tensor, it can invalidate the very destination region that was just selected to receive the new output, corrupting freshness/readiness state for the active write target.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/core/job/mutation/compute_mutation.py:begin_mutation:26=
+- =sim/core/job/mutation/compute_mutation.py:begin_mutation:30=
+- =sim/core/job/mutation/utils.py:invalidate:<line not provided in chat>=
+
+*** Proposed fix
+- Exclude the destination output region from invalidation, or invalidate stale copies before marking the chosen destination region as the new write target.
+- Keep exactly one latest output copy after the write completes.
+
+** DONE Fix transfer job construction to reject empty batches
+CLOSED: [2026-03-30 Mon 12:51]
+*** Overview of problem
+=TransferJob.__init__= unconditionally reads =batch[0]=. An empty transfer batch therefore raises =IndexError= at job construction time.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/core/job/transfer_job.py:TransferJob.__init__:20=
+
+*** Proposed fix
+- Validate that =batch= is non-empty and raise a clear exception before dereferencing the first element.
+- Keep transfer job invariants explicit at construction.
+
+* Trace loading and trace-model correctness bugs
+
+** DONE Fix llama.cpp record path normalization check
+CLOSED: [2026-03-30 Mon 13:02]
+*** Overview of problem
+When normalizing the CSV record path, =Llamacpp.load()= checks =dot_graph_path.is_absolute()= instead of =record_path.is_absolute()=. Relative record paths can therefore be handled incorrectly.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/load/llamacpp/llamacpp.py:Llamacpp.load:24=
+
+*** Proposed fix
+- Change the condition to =if not record_path.is_absolute():= before joining with =input_dir=.
+
+** DONE Remove hardcoded llama.cpp step count
+CLOSED: [2026-03-30 Mon 13:01]
+*** Overview of problem
+The loader hardcodes =step_till = 10= and expands the compute graph for exactly 11 steps regardless of input data. This produces incorrect traces for any profile with a different step range.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/load/llamacpp/llamacpp.py:Llamacpp.load:95=
+
+*** Proposed fix
+- Derive the available steps from the CSV contents and iterate actual data instead of a fixed constant.
+
+** DONE Replace fragile positional CSV indexing in llama.cpp loader
+CLOSED: [2026-03-30 Mon 13:01]
+*** Overview of problem
+The loader extracts row fields from =iter_rows()= using hardcoded tuple offsets. If the CSV column order changes, node IDs, names, and timings are silently misparsed.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/load/llamacpp/llamacpp.py:Llamacpp.load:103=
+- =sim/load/llamacpp/llamacpp.py:Llamacpp.load:104=
+- =sim/load/llamacpp/llamacpp.py:Llamacpp.load:105=
+
+*** Proposed fix
+- Read named columns explicitly instead of positional tuple indices.
+- Validate required schema before expanding the trace.
+
+** DONE Fix incorrect tensor-type detection for canonical llama.cpp input labels
+CLOSED: [2026-03-30 Mon 13:03]
+*** Overview of problem
+=get_tensor_type()= checks =elif "inp_embd" == label:= only on the raw label string. Real labels are parsed elsewhere through canonicalization and often contain suffixes or metadata, so input tensors can be misclassified and the metadata becomes wrong at load time.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/load/llamacpp/utils.py:get_tensor_type:12=
+- =sim/load/llamacpp/utils.py:node_name_canonicalizer:7=
+- =sim/load/llamacpp/llamacpp.py:Llamacpp.load:38=
+
+*** Proposed fix
+- Derive tensor type from the canonicalized name or robust label parsing, not exact raw-label equality against one special string.
+- Keep type inference consistent with the label normalization pipeline.
+
+** TODO Review tensor identity policy across repeated llama.cpp steps
+*** Overview of problem
+During per-step node expansion, all copied nodes reuse the same tensor IDs taken from the virtual graph. That is valid only for truly persistent tensors. For step-local intermediates, values from different steps become indistinguishable and placement/invalidation semantics become incorrect.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/load/llamacpp/llamacpp.py:Llamacpp.load:127=
+- =sim/load/llamacpp/llamacpp.py:Llamacpp.load:130=
+- =sim/load/llamacpp/llamacpp.py:Llamacpp.load:133=
+- =sim/load/llamacpp/utils.py:get_tensor_type:13=
+- =sim/core/trace/tensor.py:Tensor.__init__:18=
+
+*** Proposed fix
+- Define tensor ID policy by tensor lifetime class:
+  - persistent tensors may reuse IDs across steps,
+  - step-local intermediates should receive distinct per-step IDs.
+- Use =tensor_type= metadata to drive this mapping explicitly.
+
+** DONE Strengthen Trace structural validation for parent and child node references
+CLOSED: [2026-03-30 Mon 13:04]
+*** Overview of problem
+=map_check()= validates tensor references and terminal-node placement, but does not verify that parent and child node IDs referenced by each node actually exist in =node_map=. Broken graph dependencies can therefore pass validation and fail later during scheduling or execution.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/core/trace/trace.py:map_check:10=
+- =sim/core/trace/node.py:Node.add_parent_node:37=
+- =sim/core/trace/node.py:Node.add_child_node:48=
+
+*** Proposed fix
+- Extend =map_check()= to validate that every parent and child node ID exists in =node_map=.
+- Keep terminal-node validation separate from per-node structural checks.
+
+** DONE Move terminal-node validation out of the per-node loop
+CLOSED: [2026-03-30 Mon 13:05]
+*** Overview of problem
+=map_check()= re-fetches and re-validates the last node inside the loop over every node. This repeats the same validation unnecessarily and mixes per-node checks with whole-graph termination checks.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/core/trace/trace.py:map_check:21=
+
+*** Proposed fix
+- Perform terminal-node validation once after the per-node loop completes.
+
+** DONE Fix invalid TensorWithSign conversion helper
+CLOSED: [2026-03-30 Mon 13:06]
+*** Overview of problem
+=TensorWithSign.get_Tensor()= returns =Tensor(self._id, self.name, self.type, self.size_bytes, self.args)=, but =Tensor= has no =_id= or =type= fields and its constructor does not accept that argument order. If this helper is ever called, it raises immediately.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/load/llamacpp/utils.py:TensorWithSign.get_Tensor:31=
+- =sim/core/trace/tensor.py:Tensor.__init__:18=
+
+*** Proposed fix
+- Either remove the unused helper or rewrite it to construct =Tensor(self.id, self.name, self.size_bytes, self.args)=.
+- Keep helper methods aligned with the current Tensor API.
+
+* Memory, storage, and hardware-state bugs
+
+** DONE Fix MemorySpace.release so it actually removes the allocation
+CLOSED: [2026-03-30 Mon 12:55]
+*** Overview of problem
+=MemorySpace.release()= decrements page usage but only deletes the local variable =free_region= instead of removing the matching entry from =_regions_by_page_idx_start=. Released memory remains allocated in the region map forever.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/hw/memory/common/memory_region.py:MemorySpace.release:108=
+
+*** Proposed fix
+- Remove the matching entry from =self._regions_by_page_idx_start= by key.
+- Update =num_used_pages= using the removed region’s page count.
+
+** TODO Reset SSD work-rate counters when device becomes idle
+*** Overview of problem
+=SimpleSSD.update_work_rate()= updates =read_from= and =write_to= only when a job is running. When the SSD becomes idle, prior values remain latched, leaking stale bandwidth into later ETA calculations and logs.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/hw/storage/simple_ssd/simple_ssd.py:SimpleSSD.update_work_rate:75=
+
+*** Proposed fix
+- In the idle path, explicitly reset =read_from= and =write_to= to zero.
+
+** DONE Align SSD model implementation with its documented fixed-latency behavior
+CLOSED: [2026-03-30 Mon 12:56]
+*** Overview of problem
+The =SimpleSSD= docstring says IO latency includes a fixed-latency term, but the implementation only derives throughput from the IO curve and never incorporates =fixed_latency_micros= into transfer timing. The documented model and runtime behavior do not match.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/hw/storage/simple_ssd/simple_ssd.py:SimpleSSD.__init__:19=
+- =sim/hw/storage/simple_ssd/simple_ssd.py:SimpleSSD.update_work_rate:75=
+- =sim/hw/storage/simple_ssd/simple_ssd.py:SimpleSSD._get_bandwidth_KBps:52=
+
+*** Proposed fix
+- Either incorporate fixed latency into transfer ETA calculation, or remove the fixed-latency claim from the storage model contract.
+- Keep documentation and simulated behavior consistent.
+
+** DONE Fix inconsistent compute counter key names
+CLOSED: [2026-03-30 Mon 12:57]
+*** Overview of problem
+=BaseCompute.log_counters()= returns ={"compute_speed": 0}= when idle, but emits =compute_speed_AUps= when busy. Counter consumers therefore see different schemas depending on runtime state.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/hw/compute/common/base_compute.py:BaseCompute.log_counters:23=
+
+*** Proposed fix
+- Use one stable counter key in both branches, such as =compute_speed_AUps=.
+
+* Logging and observability bugs
+
+** DONE Harden logger worker thread against serialization and IO failures
+CLOSED: [2026-03-30 Mon 12:59]
+*** Overview of problem
+The log writer thread performs queue draining, JSON serialization, and file IO with no exception handling. Any failure in =_flush()= or =_close_file()= can kill the worker thread silently while the simulation continues, producing incomplete or corrupt output without surfacing the failure.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/core/log/log.py:Log._flush:58=
+- =sim/core/log/log.py:Log._run:75=
+- =sim/core/log/log.py:Log.stop:109=
+
+*** Proposed fix
+- Capture worker thread exceptions, store them on the logger, and re-raise or surface them from =stop()=.
+- Protect final flush and file close in the shutdown path.
+
+** DONE Replace full-trace state snapshots with transition logging or gated debug snapshots
+CLOSED: [2026-03-30 Mon 12:59]
+*** Overview of problem
+=Trace.log_states()= serializes the status of every node into one snapshot. On large traces this creates oversized logs and expensive repeated serialization during normal execution, which becomes a real scalability problem.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/core/trace/trace.py:Trace.log_states:48=
+- =sim/core/job/mutation/compute_mutation.py:begin_mutation:18=
+- =sim/core/job/mutation/compute_mutation.py:end_mutation:43=
+
+*** Proposed fix
+- Log node status transitions as events when states change, and reserve full trace snapshots for debug mode only.
+
+* Type/import and dependency bugs
+
+** DONE Remove runtime circular imports used only for type annotations
+CLOSED: [2026-03-30 Mon 12:59]
+*** Overview of problem
+Several modules import each other at runtime only to express type annotations, creating circular import risk across =core=, =engine=, =memory=, =storage=, and region modules. Current examples include =data_region.py= importing both storage and memory base classes while those modules import region types back.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/core/system.py:=module import section:1=
+- =sim/core/engine/engine.py:=module import section:1=
+- =sim/hw/common/data_region.py:=module import section:1=
+- =sim/hw/memory/common/base_memory.py:=module import section:1=
+- =sim/hw/memory/common/memory_region.py:=module import section:1=
+- =sim/hw/storage/common/base_storage.py:=module import section:1=
+- =sim/hw/storage/common/storage_region.py:=module import section:1=
+
+*** Proposed fix
+- Move annotation-only imports behind =TYPE_CHECKING= and use postponed or string annotations where appropriate.
+- Keep runtime imports only where execution depends on them.
+
+** DONE Remove unnecessary NumPy dependency from Tensor page-count calculation
+CLOSED: [2026-03-30 Mon 12:59]
+*** Overview of problem
+=Tensor.__init__= imports NumPy solely to compute a ceiling over page-size division. This adds a heavyweight dependency to tensor creation and can fail otherwise valid environments that do not need NumPy.
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/core/trace/tensor.py:=module import section:2=
+- =sim/core/trace/tensor.py:Tensor.__init__:27=
+
+*** Proposed fix
+- Replace the NumPy ceiling call with integer ceiling division.
+- Remove the NumPy import from this module.
+
+* Determinism and ordering bugs
+
+** DONE Replace UUID-based heap tie-breaking with explicit monotonic sequence
+CLOSED: [2026-03-30 Mon 12:59]
+*** Overview of problem
+=BaseJob.__lt__= orders jobs by =(timestamp_ETA, id)=. When ETAs tie, the heap falls back to UUID ordering, which is effectively arbitrary and makes execution order non-deterministic across runs.a
+
+*** Related =<file_name>:<function_name>:<line>=
+- =sim/core/job/job.py:BaseJob.__lt__:25=
+
+*** Proposed fix
+- Add a monotonic creation sequence number to =BaseJob= and compare =(timestamp_ETA, sequence)= instead.
+- Keep heap behavior deterministic and simulator results reproducible.
