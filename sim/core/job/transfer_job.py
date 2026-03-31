@@ -26,6 +26,8 @@ class TransferJob(BaseJob):
 
         self.batch = batch
         src0, dest0 = batch[0]
+        self.hw_from = src0.hw
+        self.hw_to = dest0.hw
 
         self.running_on.append(src0.hw)
         self.running_on.append(dest0.hw)

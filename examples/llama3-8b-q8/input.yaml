@@ -19,8 +19,8 @@ hardware:
   compute:
     name: "cpu"
     type: "SimpleCPU"
-	memory_name: "ram"
 	args:
+	  memory: "ram"
 	  modifier: 1
 	  
   # Memory unit

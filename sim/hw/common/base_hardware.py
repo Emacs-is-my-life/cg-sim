@@ -3,14 +3,25 @@ from abc import abstractmethod
 from sim.core import SimObject
 from sim.core.log import Log, TrackID
 from sim.core.job import BaseJob
+from sim.hw.common import BaseHardware
 
 
+"""
 class WorkRate:
     def __init__(self):
         self.compute: float = 0    # AU / microsecond
         self.read_from: float = 0  # KB / microsecond
         self.write_to: float = 0   # KB / microsecond
         self.rw_total: float = 0   # KB / microsecond
+"""
+
+
+class WorkRatePerGroup:
+    def __init__(self, hw: BaseHardware, jobs: list[BaseJob], work_rate: float):
+        self.hw = hw
+        self.jobs = jobs
+        self.work_rate = work_rate
+        return
 
 
 class BaseHardware(SimObject):
@@ -19,7 +30,6 @@ class BaseHardware(SimObject):
         super().__init__(obj_id, name, log)
 
         self.job_running: list[BaseJob] = []
-        self.max_rate: WorkRate = WorkRate()
 
         # Create logging tracks
         log.record(Log.subtrack(TrackID.Event, self.id, self.name))
@@ -38,14 +48,15 @@ class BaseHardware(SimObject):
         return
 
     @abstractmethod
-    def is_avail(self) -> bool:
-        """Return if this hardware can accept a new job"""
+    def can_run(self, job: BaseJob) -> bool:
+        """Return if this hardware can accept this new job or not"""
         pass
 
+    # TODO: Should we move onto constraints based optimization?
     @abstractmethod
-    def update_work_rate(self) -> None:
+    def max_work_rate(self) -> None:
         """
         Based on current running jobs in self.job_running,
-        update self.max_rate based on hardware characteristics
+        return 
         """
         pass

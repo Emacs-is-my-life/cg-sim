@@ -31,15 +31,23 @@ def parse_config(config_file_path: str):
     return cfg_dict
 
 
-class SimID:
+class SimIdentityMgr:
     def __init__(self):
-        self.counter = 10
+        self.counter: int = 10
+        self.names: list[str] = []
         return
 
-    def get(self):
+    def get_id(self) -> int:
         num = self.counter
         self.counter += 10
         return num
+
+    def check_name(self, name: str) -> None:
+        if name in self.names:
+            raise Exception(f"[Simulator] SimObject with name: {name} exists!")
+
+        self.names.append(name)
+        return
 
 
 class Simulator:
@@ -51,46 +59,52 @@ class Simulator:
         # Read input file(input.yaml), and parse fields
         cfg = parse_config(config_file_path)
 
-        sim_id = SimID()
+        sim_id = SimIdentityMgr()
 
         # Logger
-        cfg["logger"]["args"]["input_path"] = config_file_path  # Supply input_path
-        log = Log(cfg["logger"]["args"])
+        l_cfg = cfg["logger"]
+        l_cfg["args"]["input_path"] = config_file_path  # Supply input_path
+        log = Log(l_cfg["args"])
         log.start()
 
         # Trace
-        cfg["trace"]["args"]["input_path"] = config_file_path  # Supply input_path
-        TraceLoaderClass = LOAD_TRACE_CLASS(cfg["trace"]["type"])
-        trace_loader = TraceLoaderClass(sim_id.get(), "Trace", log, cfg["trace"]["args"])
+        t_cfg = cfg["trace"]
+        t_cfg["args"]["input_path"] = config_file_path  # Supply input_path
+        TraceLoaderClass = LOAD_TRACE_CLASS(t_cfg["type"])
+        trace_loader = TraceLoaderClass(sim_id.get_id(), sim_id.check_name("Trace"), log, t_cfg["args"])
         trace = trace_loader.load()
 
+        # Hardware Dictionary
         hw = {}
+
         # Storage
-        StorageClass = LOAD_STORAGE_CLASS(cfg["storage"]["type"])
-        storage = StorageClass(sim_id.get(), cfg["storage"]["name"], log, cfg["storage"]["args"])
-        hw[storage.name] = storage
+        for s_cfg in cfg["storage"]:
+            StorageClass = LOAD_STORAGE_CLASS(s_cfg["type"])
+            storage_hw = StorageClass(sim_id.get_id(), sim_id.check_name(s_cfg["name"]), log, s_cfg["args"])
+            hw[storage_hw.name] = storage_hw
 
         # Memory
-        MemoryClass = LOAD_MEMORY_CLASS(cfg["memory"]["type"])
-        memory = MemoryClass(sim_id.get(), cfg["memory"]["name"], log, cfg["memory"]["args"])
-        hw[memory.name] = memory
+        for m_cfg in cfg["memory"]:
+            MemoryClass = LOAD_MEMORY_CLASS(m_cfg["type"])
+            memory_hw = MemoryClass(sim_id.get_id(), sim_id.check_name(m_cfg["name"]), log, m_cfg["args"])
+            hw[memory_hw.name] = memory_hw
 
         # Compute
-        ComputeClass = LOAD_COMPUTE_CLASS(cfg["compute"]["type"])
-        compute = ComputeClass(sim_id.get(), cfg["compute"]["name"], log, cfg["compute"]["args"])
-        compute.memory = memory
-        hw[compute.name] = compute
+        for c_cfg in cfg["compute"]:
+            ComputeClass = LOAD_COMPUTE_CLASS(c_cfg["type"])
+            compute_hw = ComputeClass(sim_id.get_id(), sim_id.check_name(c_cfg["name"]), log, c_cfg["args"])
+            hw[compute_hw.name] = compute_hw
 
         # System
         sys = System(trace, hw)
 
         # Scheduler
-        SchedulerClass = LOAD_SCHEDULER_CLASS(cfg["scheduler"]["type"])
-        sched = SchedulerClass(sim_id.get(), "Scheduler", log, sys, cfg["scheduler"]["args"])
+        sched_cfg = cfg["scheduler"]
+        SchedulerClass = LOAD_SCHEDULER_CLASS(sched_cfg["type"])
+        sched = SchedulerClass(sim_id.get_id(), sim_id.check_name("Scheduler"), log, sys, sched_cfg["args"])
 
         # Engine
-        self.engine = Engine(sim_id.get(), "Engine", log, sys, sched)
-
+        self.engine = Engine(sim_id.get(), sim_id.check_name("Engine"), log, sys, sched)
         return
 
     def run(self):
