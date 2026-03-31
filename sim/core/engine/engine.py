@@ -123,9 +123,10 @@ class Engine(SimObject):
 
             # Drain all runnable jobs from job_waiting to job_running, in FIFO manner
             while self.job_waiting:
-                job_w = self.job_waiting.popleft()
+                job_w = self.job_waiting[0]
                 # Start runnable jobs
                 if job_w.is_runnable(self.sys):
+                    self.job_waiting.popleft()
                     job_w.begin(self.log, self.sys, self.timestamp_now)
                     self.job_running.append(job_w)  # Use append here, as ETA are None for new jobs
                 else:
@@ -136,11 +137,7 @@ class Engine(SimObject):
                         # Respect strict FIFO order
                         break
 
-            # Update hardware performances, as running jobs are changed
-            for hw in self.sys.hw.values():
-                hw.update_work_rate()
-
-            # Update ETA of running jobs
+            # Update work_rate and ETA of running jobs
             update_running_jobs(self.sys, self.job_running, self.timestamp_now)
 
         return
@@ -148,7 +145,7 @@ class Engine(SimObject):
     def _cleanup(self) -> None:
         """Write a report"""
         args = {
-            "simulation_time": self.timestamp_now,
+            "total_simulation_time": self.timestamp_now,
             "memory": []
         }
 
