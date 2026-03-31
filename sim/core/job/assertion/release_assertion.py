@@ -9,7 +9,7 @@ from sim.hw.storage.common import BaseStorage
 def assertion(job: ReleaseJob, sys: System) -> bool:
     # 0. Hardware Availability
     hw: BaseMemory | BaseStorage = job.running_on[0]
-    if not hw.is_avail():
+    if not hw.can_run(job):
         return False
 
     data_region: DataRegion = job.region

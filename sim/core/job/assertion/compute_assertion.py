@@ -7,7 +7,7 @@ from sim.hw.common import DataRegionAccess
 def assertion(job: ComputeJob, sys: System) -> bool:
     # 0. Hardware Availability
     hw = job.running_on[0]
-    if not hw.is_avail():
+    if not hw.can_run(job):
         return False
 
     node = job.node
@@ -26,10 +26,15 @@ def assertion(job: ComputeJob, sys: System) -> bool:
         if len(candidates) == 0:
             return False
 
-        i_mem_region = candidates[0]
-        OK = i_mem_region.is_ready and i_mem_region.is_latest and \
-            (i_mem_region.access_status in (DataRegionAccess.IDLE, DataRegionAccess.BEING_READ))
-        if not OK:
+        FOUND = False
+        for i_mem_region in candidates:
+            OK = i_mem_region.is_ready and i_mem_region.is_latest and \
+                (i_mem_region.access_status in (DataRegionAccess.IDLE, DataRegionAccess.BEING_READ))
+            if OK:
+                FOUND = True
+                break
+
+        if not FOUND:
             return False
 
     # Output Tensors
@@ -38,9 +43,14 @@ def assertion(job: ComputeJob, sys: System) -> bool:
         if len(candidates) == 0:
             return False
 
-        o_mem_region = candidates[0]
-        OK = o_mem_region.access_status == DataRegionAccess.IDLE
-        if not OK:
+        FOUND = False
+        for o_mem_region in candidates:
+            OK = o_mem_region.access_status == DataRegionAccess.IDLE
+            if OK:
+                FOUND = True
+                break
+
+        if not FOUND:
             return False
 
     return True

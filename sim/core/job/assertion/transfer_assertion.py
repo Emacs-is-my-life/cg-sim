@@ -9,7 +9,7 @@ from sim.hw.storage.common import BaseStorage
 def assertion(job: TransferJob, sys: System) -> bool:
     # 0. Hardware Availability
     for hw in job.running_on:
-        if not hw.is_avail():
+        if not hw.can_run(job):
             return False
 
     batch: list[(DataRegion, DataRegion)] = job.batch
