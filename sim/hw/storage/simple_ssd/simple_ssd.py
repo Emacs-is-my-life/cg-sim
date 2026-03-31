@@ -1,7 +1,7 @@
 from typing import Any
 
 from sim.core.log import Log
-from sim.core.job import TransferJob
+from sim.core.job import BaseJob, TransferJob
 from sim.hw.common import DataRegion
 from sim.hw.storage.common import BaseStorage
 
@@ -84,10 +84,10 @@ class SimpleSSD(BaseStorage):
 
         raise ValueError("[Storage] IO characteristic curve is not properly sorted!")
 
-    def is_avail(self) -> bool:
+    def can_run(self, job: BaseJob) -> bool:
         return len(self.job_running) == 0
 
-    def update_work_rate(self) -> None:
+    def max_work_rate(self) -> float:
         if self.job_running:
             job = self.job_running[0]
             total_io_size_KB = SimpleSSD._get_total_io_size_KB(job)
@@ -96,11 +96,9 @@ class SimpleSSD(BaseStorage):
 
             if src0.hw.id == self.id:     # Use Read IO curve
                 io_bandwidth_KBps = SimpleSSD._get_bandwidth_KBps(total_io_size_KB, self.read_io_curve_KBps)
-                self.max_rate.read_from = (io_bandwidth_KBps / 1_000_000)  # KB per microsecond
-                self.max_rate.write_to = 0
+                return (io_bandwidth_KBps / 1_000_000)  # KB per microsecond
             elif dest0.hw.id == self.id:  # Use Write IO curve
                 io_bandwidth_KBps = SimpleSSD._get_bandwidth_KBps(total_io_size_KB, self.write_io_curve_KBps)
-                self.max_rate.read_from = 0
-                self.max_rate.write_to = (io_bandwidth_KBps / 1_000_000)   # KB per microsecond
+                return (io_bandwidth_KBps / 1_000_000)   # KB per microsecond
 
-        return
+        return 0

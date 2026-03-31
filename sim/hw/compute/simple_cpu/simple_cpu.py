@@ -1,7 +1,9 @@
 from typing import Any
 
 from sim.core.log import Log
+from sim.core.job import BaseJob
 from sim.hw.compute.common import BaseCompute
+from sim.hw.memory.common import BaseMemory
 
 
 class SimpleCPU(BaseCompute):
@@ -13,8 +15,8 @@ class SimpleCPU(BaseCompute):
     Latency = node.compute_time_micros / modifier
     """
 
-    def __init__(self, obj_id: int, name: str, log: Log, args: dict[str, Any]):
-        super().__init__(obj_id, name, log)
+    def __init__(self, obj_id: int, name: str, log: Log, memory: BaseMemory, args: dict[str, Any]):
+        super().__init__(obj_id, name, log, memory)
 
         modifier: float = args["modifier"]
         if modifier <= 0:
@@ -23,9 +25,11 @@ class SimpleCPU(BaseCompute):
         self.modifier = modifier
         return
 
-    def is_avail(self) -> bool:
+    def can_run(self, job: BaseJob) -> bool:
         return len(self.job_running) == 0
 
-    def update_work_rate(self) -> None:
-        self.max_rate.compute = self.modifier
-        return
+    def max_work_rate(self) -> float:
+        if self.job_running:
+            return self.modifier
+        else:
+            return 0

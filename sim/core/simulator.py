@@ -92,7 +92,8 @@ class Simulator:
         # Compute - Compute units must be initialized after memory units
         for c_cfg in cfg["compute"]:
             ComputeClass = LOAD_COMPUTE_CLASS(c_cfg["type"])
-            compute_hw = ComputeClass(sim_id.get_id(), sim_id.check_name(c_cfg["name"]), log, c_cfg["args"])
+            local_memory = hw[c_cfg["args"]["memory"]]
+            compute_hw = ComputeClass(sim_id.get_id(), sim_id.check_name(c_cfg["name"]), log, local_memory, c_cfg["args"])
             hw[compute_hw.name] = compute_hw
 
         # System

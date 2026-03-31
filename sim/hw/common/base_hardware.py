@@ -3,7 +3,6 @@ from abc import abstractmethod
 from sim.core import SimObject
 from sim.core.log import Log, TrackID
 from sim.core.job import BaseJob
-from sim.hw.common import BaseHardware
 
 
 """
@@ -14,14 +13,6 @@ class WorkRate:
         self.write_to: float = 0   # KB / microsecond
         self.rw_total: float = 0   # KB / microsecond
 """
-
-
-class WorkRatePerGroup:
-    def __init__(self, hw: BaseHardware, jobs: list[BaseJob], work_rate: float):
-        self.hw = hw
-        self.jobs = jobs
-        self.work_rate = work_rate
-        return
 
 
 class BaseHardware(SimObject):
@@ -54,9 +45,9 @@ class BaseHardware(SimObject):
 
     # TODO: Should we move onto constraints based optimization?
     @abstractmethod
-    def max_work_rate(self) -> None:
+    def max_work_rate(self) -> float:
         """
         Based on current running jobs in self.job_running,
-        return 
+        return the max work_rate this hardware can provide to them in total.
         """
         pass

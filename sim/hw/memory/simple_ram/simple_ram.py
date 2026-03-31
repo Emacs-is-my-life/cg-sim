@@ -1,6 +1,7 @@
 from typing import Any
 
 from sim.core.log import Log
+from sim.core.job import BaseJob
 from sim.hw.memory.common import BaseMemory
 
 
@@ -18,9 +19,11 @@ class SimpleRAM(BaseMemory):
         self.memory_bandwidth_KBps = float(args["memory_bandwidth_KBps"])
         return
 
-    def is_avail(self) -> bool:
+    def can_run(self, job: BaseJob) -> bool:
         return len(self.job_running) < 4
 
-    def update_work_rate(self) -> None:
-        self.max_rate.rw_total = (self.memory_bandwidth_KBps / 1_000_000)   # KB per microsecond
-        return
+    def max_work_rate(self) -> float:
+        if self.job_running: 
+            return (self.memory_bandwidth_KBps / 1_000_000)   # KB per microsecond
+        else:
+            return 0

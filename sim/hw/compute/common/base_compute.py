@@ -9,9 +9,9 @@ from sim.hw.memory.common import BaseMemory
 class BaseCompute(BaseHardware):
     """Base class for compute hardwares"""
 
-    def __init__(self, obj_id: int, name: str, log: Log):
+    def __init__(self, obj_id: int, name: str, log: Log, memory: BaseMemory):
         super().__init__(obj_id, name, log)
-        self.memory: BaseMemory | None = None       # Assign later
+        self.memory: BaseMemory = memory
         return
 
     def is_avail(self) -> bool:
