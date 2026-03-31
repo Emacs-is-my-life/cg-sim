@@ -19,6 +19,8 @@ def update_running_jobs(sys: System, jobs_running: list[BaseJob], timestamp_now:
         elif isinstance(job, TransferJob):
             # Transfer Jobs must be updated in wholistic manner
             transfer_jobs.append(job)
+        else:
+            job.update_ETA(timestamp_now, 1)  # Claim/Release jobs are instant
 
     # Process transfer jobs using water filling algorithm
     update_transfer_jobs(transfer_jobs, timestamp_now)
