@@ -98,7 +98,7 @@ class Engine(SimObject):
             job.end(self.log, self.sys, self.timestamp_now)
             retired_jobs.append(job)
 
-            while self.job_running and self.job_running[0].timestamp_ETA == self.timestamp_now:
+            while self.job_running and (abs(self.job_running[0].timestamp_ETA - self.timestamp_now < 1e-12)):
                 job = heapq.heappop(self.job_running)
                 job.end(self.log, self.sys, self.timestamp_now)
                 retired_jobs.append(job)
