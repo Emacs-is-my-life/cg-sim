@@ -4,7 +4,7 @@ from collections import deque
 import heapq
 
 from sim.core import SimObject, System
-from sim.core.log import Log, TrackID
+from sim.core.log import Log, TrackID, Level
 from sim.core.trace import TerminalNode
 from sim.core.job import BaseJob, ComputeJob, TransferJob
 from sim.hw.memory.common import BaseMemory
@@ -62,9 +62,15 @@ class Engine(SimObject):
         return
 
     def run(self) -> None:
+        self.log(Log.engine(self.id, "COMPILE_STAGE_START", self.timestamp_now))
         self._compile()
+
+        self.log(Log.engine(self.id, "LAYOUT_STAGE_START", self.timestamp_now))
         self._layout()
+
+        self.log(Log.engine(self.id, "RUNTIME_STAGE_START", self.timestamp_now))
         self._runtime()
+
         self._cleanup()
         return
 
@@ -99,7 +105,6 @@ class Engine(SimObject):
         # Turn off logging in placement step
         self.log.on = False
 
-        # TODO: Main Loop, implement signal job for signaling!
         while not (self.signal_abort or (self.signal_end_stage and len(self.job_running) == 0 and len(self.job_waiting) == 0)):
             retired_jobs = self._layout_forward()
 
@@ -154,6 +159,15 @@ class Engine(SimObject):
                 job = heapq.heappop(self.job_running)
                 job.end(self.log, self.sys, self.timestamp_now)
                 retired_jobs.append(job)
+
+        # Counter and States logging
+        hw_affected = set(hw for job in retired_jobs for hw in job.running_on)
+        for hw in hw_affected:
+            if self.log.level.value >= Level.COUNTER:
+                self.log.record(Log.counter(hw.id, "HW Counter", self.timestamp_now, hw.log_counters()))
+
+            if self.log.level.value >= Level.STATE:
+                self.log.recrod(Log.state(hw.id, "HW State", self.timestamp_now, hw.log_states()))
 
         return retired_jobs
 

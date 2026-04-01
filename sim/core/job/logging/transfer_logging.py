@@ -36,10 +36,12 @@ def end_log(job: TransferJob, log: Log) -> None:
     for src_region, dest_region in batch:
         total_transfer += 4 * src_region.num_pages    # KB
 
+    avg_rate = total_transfer / (1_000_000 * (job.timestamp_end - job.timestamp_begin))
     args = {
         "from": src0.hw.name,
         "to": dest0.hw.name,
         "size_KB": total_transfer,
+        "tranfer_KBps": avg_rate
     }
 
     timestamp = job.timestamp_begin

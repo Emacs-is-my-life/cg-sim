@@ -15,26 +15,23 @@ class BaseStorage(BaseHardware):
         self.fixed_latency_micros: float = 0.0
         return
 
-    # TODO: After defining storage job
     def log_counters(self) -> dict[str, Any]:
+        total_transfers = 0
+        for job in self.job_running:
+            total_transfers += job.work_rate
 
         counters = {
-            "read_bandwidth_KBps": -1,
-            "write_bandwidth_KBps": -1
+            "transfer_KBps": 1_000_000 * total_transfers
         }
+
         return counters
 
     def log_states(self) -> dict[str, Any]:
         states = {
-            "regions": []
+            "tensors": []
         }
 
         for stor_region in self.space._regions:
-            states["regions"].append({
-                "tensor_id": stor_region.tensor_id,
-                "access_status": stor_region.access_status.name,
-                "is_latest": stor_region.is_latest,
-                "is_ready": stor_region.is_ready
-            })
+            states["tensors"].append(stor_region.tensor_id)
 
         return states

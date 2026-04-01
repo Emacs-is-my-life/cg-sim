@@ -14,15 +14,6 @@ class BaseCompute(BaseHardware):
         self.memory: BaseMemory = memory
         return
 
-    def is_avail(self) -> bool:
-        """
-        Compute Hardware Invariant:
-
-        - Only able to process one Node at a time.
-        """
-
-        return len(self.job_running) == 0
-
     def log_counters(self) -> dict[str, Any]:
         """
         Log processing speed of currently running job
@@ -32,7 +23,7 @@ class BaseCompute(BaseHardware):
             "compute_speed_AUps": 0
         }
 
-        if not self.is_avail():
+        if self.job_running():
             job = self.job_running[0]
             counters["compute_speed_AUps"] = 1_000_000 * job.work_rate  # AU / second
 
@@ -47,9 +38,9 @@ class BaseCompute(BaseHardware):
             "computing_now": {}
         }
 
-        if not self.is_avail():
+        if self.job_running:
             job = self.job_running[0]
-            node = job.node
+            node: Node = job.node
             states["computing_now"] = {
                 "id": node.id,
                 "name": node.name,
