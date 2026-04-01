@@ -1,8 +1,9 @@
 from collections import defaultdict
 
-from sim.core import System
-from sim.core.job import BaseJob, ComputeJob, TransferJob
-from sim.hw.common import DataRegion, BaseHardware
+from sim.core.job import TransferJob
+
+from sim.hw.common.data_region import DataRegion
+from sim.hw.common.base_hardware import BaseHardware
 
 from sim.hw.memory.common import BaseMemory
 from sim.hw.storage.common import BaseStorage

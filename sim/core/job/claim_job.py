@@ -1,7 +1,10 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from sim.core.log import Log
-from sim.core import System
 from sim.core.trace import Tensor
-from sim.hw.common import DataRegion
+from sim.hw.common.data_region import DataRegion
 from sim.hw.memory.common import BaseMemory
 from sim.hw.storage.common import BaseStorage
 
@@ -10,6 +13,9 @@ from .job import BaseJob
 from .assertion.claim_assertion import assertion
 from .mutation.claim_mutation import begin_mutation, end_mutation
 from .logging.claim_logging import begin_log, end_log
+
+if TYPE_CHECKING:
+    from sim.core.system import System
 
 
 class ClaimJob(BaseJob):

@@ -1,8 +1,13 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from sortedcontainers import SortedDict
 
-from sim.hw.common import DataRegion
+from sim.hw.common.data_region import DataRegion
 
-from .base_memory import BaseMemory
+if TYPE_CHECKING:
+    from .base_memory import BaseMemory
 
 
 class MemoryRegion(DataRegion):

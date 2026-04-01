@@ -1,5 +1,11 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from sim.core.log import Log
-from sim.core.job import ClaimJob
+
+if TYPE_CHECKING:
+    from ..claim_job import ClaimJob
 
 
 def begin_log(job: ClaimJob, log: Log) -> None:

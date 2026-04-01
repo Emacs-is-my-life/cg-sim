@@ -1,11 +1,17 @@
-from sim.core import System
-from sim.core.job import ComputeJob
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from sim.core.trace import NodeStatus, Node
 
-from sim.hw.common import DataRegionAccess
+from sim.hw.common.data_region import DataRegionAccess
 from sim.hw.memory.common import BaseMemory
 
 from .utils import invalidate
+
+if TYPE_CHECKING:
+    from sim.core.system import System
+    from ..compute_job import ComputeJob
 
 
 def begin_mutation(job: ComputeJob, sys: System) -> None:

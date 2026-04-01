@@ -1,10 +1,15 @@
-from abc import abstractmethod
-from typing import Any
+from __future__ import annotations
 
-from sim.core import SimObject, System
+from abc import abstractmethod
+from typing import Any, TYPE_CHECKING
+
+from sim.core.sim_object import SimObject
 from sim.core.trace import Trace
 from sim.core.log import Log
 from sim.core.job import BaseJob
+
+if TYPE_CHECKING:
+    from sim.core.system import System
 
 
 class BaseScheduler(SimObject):

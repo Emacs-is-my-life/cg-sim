@@ -1,7 +1,12 @@
-from sim.core import System
-from sim.core.job import TransferJob
+from __future__ import annotations
 
-from sim.hw.common import DataRegionAccess, DataRegion
+from typing import TYPE_CHECKING
+
+from sim.hw.common.data_region import DataRegionAccess, DataRegion
+
+if TYPE_CHECKING:
+    from sim.core.system import System
+    from ..transfer_job import TransferJob
 
 
 def begin_mutation(job: TransferJob, sys: System) -> None:

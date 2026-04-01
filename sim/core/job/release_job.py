@@ -1,12 +1,18 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from sim.core.log import Log
-from sim.core import System
-from sim.hw.common import DataRegion
+from sim.hw.common.data_region import DataRegion
 
 from .job import BaseJob
 
 from .assertion.release_assertion import assertion
 from .mutation.release_mutation import begin_mutation, end_mutation
 from .logging.release_logging import begin_log, end_log
+
+if TYPE_CHECKING:
+    from sim.core.system import System
 
 
 class ReleaseJob(BaseJob):

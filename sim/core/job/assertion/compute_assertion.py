@@ -1,7 +1,13 @@
-from sim.core import System
-from sim.core.job import ComputeJob
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from sim.core.trace import NodeStatus
-from sim.hw.common import DataRegionAccess
+from sim.hw.common.data_region import DataRegionAccess
+
+if TYPE_CHECKING:
+    from sim.core.system import System
+    from ..compute_job import ComputeJob
 
 
 def assertion(job: ComputeJob, sys: System) -> bool:

@@ -1,8 +1,13 @@
-from sim.core import System
-from sim.core.job import ClaimJob
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from sim.hw.memory.common import BaseMemory
 from sim.hw.storage.common import BaseStorage
+
+if TYPE_CHECKING:
+    from sim.core.system import System
+    from ..claim_job import ClaimJob
 
 
 def assertion(job: ClaimJob, sys: System) -> bool:

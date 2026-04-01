@@ -1,9 +1,10 @@
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from sim.core.log import Log
-from sim.hw.common import BaseHardware
+from sim.hw.common.base_hardware import BaseHardware
 
-from .storage_region import StorageSpace
+if TYPE_CHECKING:
+    from .storage_region import StorageSpace
 
 
 class BaseStorage(BaseHardware):
@@ -11,6 +12,7 @@ class BaseStorage(BaseHardware):
 
     def __init__(self, obj_id: int, name: str, log: Log):
         super().__init__(obj_id, name, log)
+        from .storage_region import StorageSpace
         self.space: StorageSpace = StorageSpace(self)
         self.fixed_latency_micros: float = 0.0
         return

@@ -1,6 +1,9 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from sim.core.log import Log
 from sim.core.trace import Node
-from sim.core import System
 from sim.hw.compute.common import BaseCompute
 from sim.hw.memory.common import MemoryRegion
 
@@ -9,6 +12,9 @@ from .job import BaseJob
 from .assertion.compute_assertion import assertion
 from .mutation.compute_mutation import begin_mutation, end_mutation
 from .logging.compute_logging import begin_log, end_log
+
+if TYPE_CHECKING:
+    from sim.core.system import System
 
 
 class ComputeJob(BaseJob):

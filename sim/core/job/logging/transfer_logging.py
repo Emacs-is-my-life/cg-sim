@@ -1,6 +1,12 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from sim.core.log import Log
-from sim.core.job import TransferJob
 from sim.hw.common import DataRegion
+
+if TYPE_CHECKING:
+    from ..transfer_job import TransferJob
 
 
 def begin_log(job: TransferJob, log: Log) -> None:

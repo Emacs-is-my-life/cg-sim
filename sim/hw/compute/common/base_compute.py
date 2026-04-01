@@ -2,7 +2,7 @@ from typing import Any
 
 from sim.core.log import Log
 from sim.core.trace import Node
-from sim.hw.common import BaseHardware
+from sim.hw.common.base_hardware import BaseHardware
 from sim.hw.memory.common import BaseMemory
 
 

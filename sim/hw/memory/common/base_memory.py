@@ -1,10 +1,12 @@
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from sim.core.log import Log
-from sim.hw.common import BaseHardware
+from sim.hw.common.base_hardware import BaseHardware
 
-from .memory_region import MemorySpace
 from .utils import KB_to_num_pages
+
+if TYPE_CHECKING:
+    from .memory_region import MemorySpace
 
 
 class BaseMemory(BaseHardware):
@@ -15,6 +17,7 @@ class BaseMemory(BaseHardware):
             raise ValueError(f"[Memory] Memory size cannot be: {memory_size_KB}")
 
         super().__init__(obj_id, name, log)
+        from .memory_region import MemorySpace
         self.space: MemorySpace = MemorySpace(self, KB_to_num_pages(memory_size_KB))
         return
 

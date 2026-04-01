@@ -4,7 +4,8 @@ from typing import Any
 from sim.core.log import Log
 from sim.core.trace import Trace, Node, Tensor
 from sim.core.engine import EngineSignal, Engine
-from sim.hw.common import BaseHardware, DataRegion
+from sim.hw.common.base_hardware import BaseHardware
+from sim.hw.common.data_region import DataRegion
 from sim.hw.compute.common import BaseCompute
 from sim.hw.memory.common import BaseMemory
 from sim.hw.storage.common import BaseStorage

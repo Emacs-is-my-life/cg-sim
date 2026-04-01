@@ -1,15 +1,20 @@
-from typing import Any
+from __future__ import annotations
+
+from typing import Any, TYPE_CHECKING
 from enum import Enum, auto
 from collections import deque
 import heapq
 
-from sim.core import SimObject, System
+from sim.core.sim_object import SimObject
 from sim.core.log import Log, TrackID, Level
 from sim.core.trace import TerminalNode
 from sim.core.job import BaseJob, ComputeJob, TransferJob
 from sim.hw.memory.common import BaseMemory
 
 from .update import update_running_jobs
+
+if TYPE_CHECKING:
+    from sim.core.system import System
 
 
 class EngineSignal(Enum):

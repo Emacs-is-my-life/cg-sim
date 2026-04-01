@@ -1,18 +1,22 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, TYPE_CHECKING
 import uuid
 import fastuuid
 
-from sim.core import System
 from sim.core.log import Log
-from sim.hw.common import BaseHardware
+
+if TYPE_CHECKING:
+    from sim.core.system import System
+    from sim.hw.common.base_hardware import BaseHardware
 
 
 class BaseJob(ABC):
     def __init__(self, work_total: float):
         # Basics
         self.id: uuid.UUID = fastuuid.uuid4()
-        self.running_on: list[BaseHardware] = []
+        self.running_on: list["BaseHardware"] = []
         self.args: dict[str, Any] = {}
 
         # Work

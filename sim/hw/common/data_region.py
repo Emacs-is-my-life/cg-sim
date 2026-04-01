@@ -1,10 +1,14 @@
+from __future__ import annotations
+
 from enum import Enum, auto
 from abc import ABC
+from typing import TYPE_CHECKING
 import uuid
 import fastuuid
 
-from sim.hw.memory.common import BaseMemory
-from sim.hw.storage.common import BaseStorage
+if TYPE_CHECKING:
+    from sim.hw.memory.common.base_memory import BaseMemory
+    from sim.hw.storage.common.base_storage import BaseStorage
 
 
 class DataRegionAccess(Enum):
@@ -28,9 +32,9 @@ class DataRegion(ABC):
     where tensor can reside.
     """
 
-    def __init__(self, hw: BaseMemory | BaseStorage, num_pages: int, tensor_id: int):
+    def __init__(self, hw: "BaseMemory | BaseStorage", num_pages: int, tensor_id: int):
         self.id: uuid.UUID = fastuuid.uuid4()
-        self.hw: BaseMemory | BaseStorage = hw
+        self.hw: "BaseMemory | BaseStorage" = hw
         self.num_pages: int = num_pages
         self.tensor_id: int = tensor_id    # Data(tensor) stored in this region
 

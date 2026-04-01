@@ -1,6 +1,6 @@
 from typing import Any
 
-from sim.core import SimObject
+from sim.core.sim_object import SimObject
 from sim.core.log import Log, TrackID
 
 from .node import Node, TerminalNode

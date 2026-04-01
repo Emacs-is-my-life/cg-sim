@@ -3,7 +3,7 @@ from hydra import initialize, compose
 from omegaconf import OmegaConf
 from pathlib import Path
 
-from sim.core import System
+from sim.core.system import System
 from sim.core.log import Log
 from sim.core.engine import Engine
 

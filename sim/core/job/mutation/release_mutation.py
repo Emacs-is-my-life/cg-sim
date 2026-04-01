@@ -1,5 +1,10 @@
-from sim.core import System
-from sim.core.job import ReleaseJob
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sim.core.system import System
+    from ..release_job import ReleaseJob
 
 
 def begin_mutation(job: ReleaseJob, sys: System) -> None:

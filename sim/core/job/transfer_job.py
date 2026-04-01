@@ -1,6 +1,9 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from sim.core.log import Log
-from sim.core import System
-from sim.hw.common import DataRegion
+from sim.hw.common.data_region import DataRegion
 from sim.hw.storage.common import BaseStorage
 
 from .job import BaseJob
@@ -8,6 +11,9 @@ from .job import BaseJob
 from .assertion.transfer_assertion import assertion
 from .mutation.transfer_mutation import begin_mutation, end_mutation
 from .logging.transfer_logging import begin_log, end_log
+
+if TYPE_CHECKING:
+    from sim.core.system import System
 
 
 class TransferJob(BaseJob):

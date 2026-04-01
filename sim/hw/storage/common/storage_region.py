@@ -1,6 +1,11 @@
-from sim.hw.common import DataRegion
+from __future__ import annotations
 
-from .base_storage import BaseStorage
+from typing import TYPE_CHECKING
+
+from sim.hw.common.data_region import DataRegion
+
+if TYPE_CHECKING:
+    from .base_storage import BaseStorage
 
 
 class StorageRegion(DataRegion):

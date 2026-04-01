@@ -1,12 +1,11 @@
 import heapq
 
-from sim.core import System
 from sim.core.job import BaseJob, ComputeJob, TransferJob
 
 from .update_transfer import update_transfer_jobs
 
 
-def update_running_jobs(sys: System, jobs_running: list[BaseJob], timestamp_now: float) -> None:
+def update_running_jobs(sys, jobs_running: list[BaseJob], timestamp_now: float) -> None:
     """Update ETA of all jobs, based on new system state"""
 
     transfer_jobs = []

@@ -1,13 +1,17 @@
-from typing import Any
+from __future__ import annotations
+
+from typing import Any, TYPE_CHECKING
 
 from sim.sched.common import BaseScheduler
 from sim.core.log import Log
 from sim.core.trace import Trace
-from sim.core import System
 from sim.core.job import BaseJob
 from sim.hw.compute.common import BaseCompute
 from sim.hw.memory.common import BaseMemory
 from sim.hw.storage.common import BaseStorage
+
+if TYPE_CHECKING:
+    from sim.core.system import System
 
 
 class Vanilla(BaseScheduler):
