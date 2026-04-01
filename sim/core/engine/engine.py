@@ -216,12 +216,18 @@ class Engine(SimObject):
         args = {
             "simulation_success": str(not self.signal_abort),
             "simulation_time": self.timestamp_now,
-            "memory": []
+            "obj_id": {},
+            "hardware": {
+                "memory": []
+            }
         }
 
         for hw in self.sys.hw.values():
+            args["obj_id"][hw.id] = hw.name
+
+        for hw in self.sys.hw.values():
             if isinstance(hw, BaseMemory):
-                args["memory"].append({
+                args["hardware"]["memory"].append({
                     "id": hw.id,
                     "name": hw.name,
                     "peak_memory_usage_KB": 4 * hw.space.peak_num_used_pages
