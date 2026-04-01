@@ -1,4 +1,5 @@
 from sim.core import System
+from sim.hw.common import DataRegion
 from sim.hw.memory.common import BaseMemory
 from sim.hw.storage.common import BaseStorage
 

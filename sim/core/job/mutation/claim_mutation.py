@@ -10,12 +10,8 @@ def begin_mutation(job: ClaimJob, sys: System) -> None:
     for hw in job.running_on:
         hw.run(job)
 
-    hw = job.running_on[0]
-    if isinstance(hw, BaseMemory):
-        hw.space.claim(job.tensor_id, job.page_idx_start, job.num_pages)
-    elif isinstance(hw, BaseStorage):
-        hw.space.claim(job.tensor_id, job.num_pages)
-
+    hw: BaseMemory | BaseStorage = job.running_on[0]
+    hw.space.claim(job.tensor_id, job.page_idx_start, job.num_pages)
     return
 
 

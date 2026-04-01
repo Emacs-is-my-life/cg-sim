@@ -1,0 +1,182 @@
+* TODO Startup and initialization contract bugs
+** Summary
+The simulator cannot initialize reliably because the startup path contains broken object-construction logic and a config-shape mismatch. The example input uses ~hardware.compute/memory/storage~, while ~Simulator~ expects top-level ~compute/memory/storage~. In addition, object names are lost because ~check_name()~ is used as if it returns the validated name, and engine construction calls a nonexistent identity method. These are not architectural redesign items; they are concrete startup-contract bugs that prevent the simulator from booting.
+
+** Related codes
+- ~examples/llama3-8b-q8/input.yaml~
+- ~sim/core/simulator.py:parse_config~
+- ~sim/core/simulator.py:SimIdentityMgr.check_name~
+- ~sim/core/simulator.py:Simulator.__init__~
+
+** Proposed fix
+Normalize the startup contract in one place: make ~Simulator.__init__~ read hardware config from ~cfg["hardware"]["storage"]~, ~cfg["hardware"]["memory"]~, and ~cfg["hardware"]["compute"]~ to match the example input format. Change ~SimIdentityMgr.check_name()~ usage so validation and value passing are separate: call ~sim_id.check_name(name)~ for validation, then pass the original ~name~ string into constructors. Replace ~sim_id.get()~ with ~sim_id.get_id()~ for engine construction. This keeps the initialization logic simple and explicit, restores stable object identity, and aligns the actual config contract with the documented example without adding compatibility hacks.
+
+* TODO Scheduler interface and built-in scheduler runtime contract bugs
+** Summary
+The engine, base scheduler, and built-in schedulers do not agree on method signatures, and the bundled schedulers do not currently drive execution at all. This breaks the core pluggable-scheduler contract that the simulator depends on. Even after startup is fixed, engine execution will fail immediately or stall forever because the scheduler interface is not implemented consistently.
+
+** Related codes
+- ~sim/core/engine/engine.py:Engine._compile~
+- ~sim/core/engine/engine.py:Engine._layout~
+- ~sim/core/engine/engine.py:Engine._runtime~
+- ~sim/sched/common/base_scheduler.py:BaseScheduler.compile~
+- ~sim/sched/common/base_scheduler.py:BaseScheduler.layout~
+- ~sim/sched/common/base_scheduler.py:BaseScheduler.runtime~
+- ~sim/sched/vanilla/vanilla.py:Vanilla.compile~
+- ~sim/sched/vanilla/vanilla.py:Vanilla.layout~
+- ~sim/sched/vanilla/vanilla.py:Vanilla.runtime~
+- ~sim/sched/flexgen/flexgen.py:FlexGen.compile~
+- ~sim/sched/flexgen/flexgen.py:FlexGen.layout~
+- ~sim/sched/flexgen/flexgen.py:FlexGen.runtime~
+
+** Proposed fix
+Make the scheduler contract uniform and minimal: all schedulers must implement ~compile(trace)~, ~layout(retired_jobs)~, and ~runtime(retired_jobs)~ exactly as the engine expects. Update both built-in schedulers to match that API. Then implement at least a minimal runnable ~Vanilla~ policy that claims required tensors into memory, submits compute jobs in dependency order, and explicitly ends layout/runtime when done. This is the cleanest fix because it restores one clear interface boundary between engine and scheduler, instead of adding adapter logic or special cases in the engine.
+
+* TODO Engine stage-control and event-loop correctness bugs
+** Summary
+The engine’s control flow has several concrete correctness bugs: stage-end signaling uses inconsistent attribute names, layout uses heap operations on a non-heap list, and same-time job retirement uses a malformed floating-point comparison. Together these can cause failed termination, incorrect job ordering, or infinite loops. These are core event-loop bugs, not policy choices.
+
+** Related codes
+- ~sim/core/engine/engine.py:Engine.__init__~
+- ~sim/core/engine/engine.py:Engine.signal~
+- ~sim/core/engine/engine.py:Engine._layout_forward~
+- ~sim/core/engine/engine.py:Engine._layout~
+- ~sim/core/engine/engine.py:Engine._runtime_forward~
+- ~sim/core/engine/engine.py:Engine._runtime~
+- ~sim/core/engine/update.py:update_running_jobs~
+- ~sim/core/job/job.py:BaseJob.__lt__~
+
+** Proposed fix
+Unify stage-end state under a single attribute name, e.g. ~signal_end_stage~, and use it consistently in ~__init__~, ~signal()~, and loop conditions. In layout phase, do not use ~heapq~ at all; since layout jobs are intended to be instant and time does not advance, process them with simple FIFO/list draining rather than pretending they are ETA-ordered. In runtime phase, fix the equal-ETA comparison to ~abs(job.timestamp_ETA - self.timestamp_now) < 1e-12~. Keep heap ordering only for runtime jobs after ETA assignment. This makes the event-loop logic explicit and correct, instead of mixing two queue disciplines in one structure.
+
+* TODO Abort and failure-reporting path bugs
+** Summary
+The simulator cannot reliably abort on invariant violations because the abort path itself is broken. Several assertion failures try to call ~sys.abort(...)~, but ~System.abort()~ references a nonexistent timestamp field and therefore crashes while trying to report the error. This defeats fail-fast behavior and makes debugging much harder.
+
+** Related codes
+- ~sim/core/system.py:System.abort~
+- ~sim/core/engine/engine.py:Engine._log_abort~
+- ~sim/core/job/assertion/claim_assertion.py:assertion~
+- ~sim/core/job/assertion/transfer_assertion.py:assertion~
+
+** Proposed fix
+Make ~System.abort()~ a thin, correct delegator to the engine: use ~self.engine.timestamp_now~ for the timestamp, log through the engine once, and then signal ~EngineSignal.ABORT~. Keep all abort logging in one path so there is a single source of truth for simulation failure reporting. This fixes the broken control plane cleanly without duplicating abort behavior across assertions and engine code.
+
+* TODO Compute-job region binding correctness bug
+** Summary
+Compute-job execution is not bound to the actual data-region copies validated for use. Assertions search candidate regions, but compute mutation later just fetches the first region for each tensor. In a simulator that supports multiple copies of the same tensor across hardware tiers, this is logically wrong: a compute job must use the exact source/output regions chosen when it became runnable, not an arbitrary first match.
+
+** Related codes
+- ~sim/core/job/assertion/compute_assertion.py:assertion~
+- ~sim/core/job/mutation/compute_mutation.py:begin_mutation~
+- ~sim/core/job/mutation/compute_mutation.py:end_mutation~
+- ~sim/core/job/compute_job.py:ComputeJob.__init__~
+- ~sim/core/system.py:System.compute~
+
+** Proposed fix
+Extend ~ComputeJob~ so it stores explicit input-region and output-region bindings selected at scheduling or runnable-check time. Update compute assertion logic to resolve and validate concrete regions, and pass those bindings into the job. Then make compute mutation operate only on the bound regions rather than re-looking them up by tensor ID. This is the cleanest correction because it aligns scheduler intent, runnable validation, and state mutation under one explicit contract, which is essential for a placement simulator with replicated data.
+
+* TODO Compute assertion and mutation runtime bugs
+** Summary
+Beyond the region-binding issue, the current compute path also contains direct implementation bugs: compute assertion calls ~get_by_tensor_id~ incorrectly using subscription syntax, and output invalidation crashes because of an invalid ~isinstance~ expression. These failures prevent compute jobs from being validated or started even before higher-level scheduling logic matters.
+
+** Related codes
+- ~sim/core/job/assertion/compute_assertion.py:assertion~
+- ~sim/core/job/mutation/compute_mutation.py:begin_mutation~
+- ~sim/core/job/mutation/utils.py:invalidate~
+
+** Proposed fix
+Fix ~compute_assertion~ to call ~memory.space.get_by_tensor_id(tensor_id)~ as a method, not as a subscripted object. Fix ~invalidate()~ to test hardware types correctly with ~isinstance(hw, (BaseMemory, BaseStorage))~. Keep invalidation logic centralized in that helper so compute mutation remains simple. These changes directly repair the broken compute path without changing the intended state model.
+
+* TODO Claim-job allocation correctness bugs
+** Summary
+Claim jobs can complete without actually allocating any region because claim mutation ignores allocator return values. That allows the engine to treat placement as successful while later compute or transfer code fails when it assumes the region exists. This breaks the basic invariant that a completed claim job must have created the claimed region.
+
+** Related codes
+- ~sim/core/job/assertion/claim_assertion.py:assertion~
+- ~sim/core/job/mutation/claim_mutation.py:begin_mutation~
+- ~sim/core/system.py:System.claim~
+- ~sim/hw/memory/common/memory_region.py:MemorySpace.claim~
+- ~sim/hw/storage/common/storage_region.py:StorageSpace.claim~
+
+** Proposed fix
+Make claim mutation capture the return value of ~hw.space.claim(...)~ and treat a ~None~ result as a hard invariant failure via ~sys.abort(...)~ or an exception, depending on the existing error-handling style. Optionally store the claimed region on the ~ClaimJob~ itself for downstream use and debugging. This ensures claim completion and allocator state stay consistent, which is a foundational invariant for all later jobs.
+
+* TODO Memory release and allocator-state corruption bugs
+** Summary
+Memory release updates accounting but does not actually remove the released region from the allocator’s backing map. This corrupts allocator state: memory appears freed in counters but still exists in placement queries, overlap checks, and state logs. Since tensor placement is central to the simulator’s purpose, allocator correctness is critical.
+
+** Related codes
+- ~sim/hw/memory/common/memory_region.py:MemorySpace.release~
+- ~sim/core/job/mutation/release_mutation.py:begin_mutation~
+- ~sim/core/job/assertion/release_assertion.py:assertion~
+- ~sim/hw/memory/common/base_memory.py:BaseMemory.log_states~
+
+** Proposed fix
+Rewrite ~MemorySpace.release()~ to remove the region from ~_regions_by_page_idx_start~ by key, not by deleting a loop variable. The simplest clean approach is to locate the matching start index for the region object, delete that dictionary entry, and then update ~num_used_pages~. This restores consistency between allocator contents, accounting, overlap checks, and logs without changing the allocator design.
+
+* TODO Storage model implementation mismatch bug
+** Summary
+The SSD model’s documented behavior says IO latency is ~fixed_latency + size / bandwidth~, but the implementation ignores fixed latency entirely and models only throughput. That creates a direct contradiction between documented hardware semantics and actual simulation results, especially for small IOs where fixed latency matters most.
+
+** Related codes
+- ~sim/hw/storage/simple_ssd/simple_ssd.py:SimpleSSD.__init__~
+- ~sim/hw/storage/simple_ssd/simple_ssd.py:SimpleSSD.max_work_rate~
+
+** Proposed fix
+Incorporate fixed latency into transfer completion time instead of ignoring it. The cleanest approach is to keep bandwidth-based work rate for the size-dependent transfer portion, but add the fixed latency as an explicit constant-time component in ETA computation for storage-involved transfer jobs. This preserves the current bandwidth model while making the SSD implementation match its own documented contract.
+
+* TODO Trace loading and graph-validation correctness bugs
+** Summary
+The trace layer validates only a small subset of the invariants that runtime code assumes. It checks tensor references and that the last node is a terminal node, but it does not verify node-reference validity or parent/child consistency. The llama.cpp loader also hard-codes the number of steps instead of deriving it from input data or configuration. These issues make trace execution less trustworthy and less configurable than intended.
+
+** Related codes
+- ~sim/core/trace/trace.py:map_check~
+- ~sim/core/trace/trace.py:Trace.__init__~
+- ~sim/load/llamacpp/llamacpp.py:Llamacpp.load~
+
+** Proposed fix
+Strengthen ~map_check()~ so it validates parent-node references, child-node references, and parent/child reciprocity in addition to tensor references and terminal-node placement. In the llama.cpp loader, derive the step range from the profile records or explicit config instead of using a hard-coded constant. This keeps trace validation focused and local to the trace layer, which is the cleanest place to enforce graph correctness before simulation begins.
+
+* TODO Logging and observability consistency bugs
+** Summary
+The logger core is mostly functional, but there are remaining observability inconsistencies: counter events are labeled with the wrong category, and some job event names are inconsistent. These are not engine blockers, but they reduce trace readability and make downstream analysis less clean.
+
+** Related codes
+- ~sim/core/log/log.py:Log.counter~
+- ~sim/core/job/logging/claim_logging.py:begin_log~
+- ~sim/core/job/logging/release_logging.py:begin_log~
+- ~sim/core/job/logging/compute_logging.py:end_log~
+- ~sim/core/job/logging/transfer_logging.py:end_log~
+
+** Proposed fix
+Set the counter-event category to ~"Counter"~ in ~Log.counter()~ and normalize job event naming so all job records follow one predictable scheme, e.g. ~CLAIM_JOB~, ~RELEASE_JOB~, ~COMPUTE_JOB~, and ~TRANSFER_JOB~. This improves log coherence without changing logging architecture or adding extra event complexity.
+
+* TODO Type/import and dependency hygiene bugs
+** Summary
+The codebase has several fragile import relationships and type-contract edge cases that are not necessarily the root cause of current failures, but they increase the chance of runtime surprises. In particular, some helper paths return ~None~ where a boolean contract is expected, and the code relies heavily on package import side effects for plugin availability.
+
+** Related codes
+- ~sim/core/job/assertion/claim_assertion.py:assertion~
+- ~sim/core/init/compute.py:LOAD_COMPUTE_CLASS~
+- ~sim/core/init/memory.py:LOAD_MEMORY_CLASS~
+- ~sim/core/init/storage.py:LOAD_STORAGE_CLASS~
+- ~sim/core/init/scheduler.py:LOAD_SCHEDULER_CLASS~
+- ~sim/core/init/trace.py:LOAD_TRACE_CLASS~
+
+** Proposed fix
+Make assertion helpers return explicit booleans on every path, even when they also abort. Keep the dynamic loader mechanism, but treat the ~LOAD_*_CLASS~ functions as the single runtime registry boundary and ensure their failure messages remain precise. This avoids silent contract drift while preserving the existing lightweight plugin-loading design.
+
+* TODO Determinism and ordering robustness bugs
+** Summary
+Several parts of the runtime rely on incidental ordering rather than explicit, stable rules. ETA ordering depends on jobs being heap-safe only after update, and region selection currently depends on lookup ordering instead of scheduler-selected bindings. While some of this is addressed by the compute-region binding fix, the engine and job model still need clearer deterministic behavior.
+
+** Related codes
+- ~sim/core/job/job.py:BaseJob.__lt__~
+- ~sim/core/engine/engine.py:Engine._layout~
+- ~sim/core/engine/engine.py:Engine._runtime~
+- ~sim/hw/memory/common/memory_region.py:MemorySpace.get_by_tensor_id~
+- ~sim/core/job/mutation/compute_mutation.py:begin_mutation~
+
+** Proposed fix
+Ensure heap ordering is used only after ETA assignment, keep layout processing FIFO and non-heap-based, and remove reliance on lookup order by using explicit region bindings for compute jobs. This yields deterministic execution decisions from explicit policy and state, rather than from container ordering side effects.
