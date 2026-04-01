@@ -178,10 +178,14 @@ class Engine(SimObject):
                 job.end(self.log, self.sys, self.timestamp_now)
                 retired_jobs.append(job)
 
-            while self.job_running and (self.job_running[0].timestamp_ETA - self.timestamp_now < 1e-12):
-                job = heapq.heappop(self.job_running)
-                job.end(self.log, self.sys, self.timestamp_now)
-                retired_jobs.append(job)
+            # Don't retire multiple jobs, as this might cause overlap issue in perfetto UI viewer.
+            # while self.job_running and (self.job_running[0].timestamp_ETA == self.timestamp_now):
+            #     job = heapq.heappop(self.job_running)
+            #     job.end(self.log, self.sys, self.timestamp_now)
+            #     retired_jobs.append(job)
+
+        # Add a bit of time, to make events not overlap
+        self.timestamp_now += 0.001  # 1/1000 microsecond
 
         # Counter and States logging
         hw_affected = set(hw for job in retired_jobs for hw in job.running_on)

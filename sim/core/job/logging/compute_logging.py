@@ -42,7 +42,7 @@ def end_log(job: ComputeJob, log: Log) -> None:
     for hw in job.running_on:
         log.record(Log.event_complete(
             hw.id,
-            "COMPUTE_JOB",
+            f"COMPUTE_JOB[Node {node.id}]",
             timestamp,
             duration,
             args

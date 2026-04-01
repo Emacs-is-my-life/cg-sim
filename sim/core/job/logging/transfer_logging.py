@@ -62,7 +62,7 @@ def end_log(job: TransferJob, log: Log) -> None:
     for hw in job.running_on:
         log.record(Log.event_complete(
             hw.id,
-            "TRANSFER_JOB",
+            f"TRANSFER_JOB[{src0.hw.name} -> {dest0.hw.name}]",
             timestamp,
             duration,
             args
