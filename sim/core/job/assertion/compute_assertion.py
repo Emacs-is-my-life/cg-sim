@@ -5,6 +5,11 @@ from sim.hw.common import DataRegionAccess
 
 
 def assertion(job: ComputeJob, sys: System) -> bool:
+    """
+    Warning: assertion and mutation should not be 'system-state-modification' apart.
+    Have to perform system state mutation(job begin) right after the assertion.
+    Otherwise, assertion assumptions might not hold any longer.
+    """
     # 0. Hardware Availability
     hw = job.running_on[0]
     if not hw.can_run(job):
@@ -22,7 +27,7 @@ def assertion(job: ComputeJob, sys: System) -> bool:
     # 2. Data Dependency
     # Input Tensors
     for i_tensor_id in node.input_tensors:
-        candidates = memory.space.get_by_tensor_id[i_tensor_id]
+        candidates = memory.space.get_by_tensor_id(i_tensor_id)
         if len(candidates) == 0:
             return False
 
@@ -31,6 +36,7 @@ def assertion(job: ComputeJob, sys: System) -> bool:
             OK = i_mem_region.is_ready and i_mem_region.is_latest and \
                 (i_mem_region.access_status in (DataRegionAccess.IDLE, DataRegionAccess.BEING_READ))
             if OK:
+                job.input_regions.append(i_mem_region)
                 FOUND = True
                 break
 
@@ -39,7 +45,7 @@ def assertion(job: ComputeJob, sys: System) -> bool:
 
     # Output Tensors
     for o_tensor_id in node.output_tensors:
-        candidates = memory.space.get_by_tensor_id[o_tensor_id]
+        candidates = memory.space.get_by_tensor_id(o_tensor_id)
         if len(candidates) == 0:
             return False
 
@@ -47,6 +53,7 @@ def assertion(job: ComputeJob, sys: System) -> bool:
         for o_mem_region in candidates:
             OK = o_mem_region.access_status == DataRegionAccess.IDLE
             if OK:
+                job.output_regions.append(o_mem_region)
                 FOUND = True
                 break
 

@@ -70,6 +70,6 @@ class System:
     def abort(self, args: dict[str, Any] | None = None) -> None:
         args = args if args is not None else {}
 
-        self.engine.log.record(Log.engine(self.engine.id, "SIMULATION_ABORT", self.timestamp_now, args))
+        self.engine._log_abort(args)
         self.engine.signal(EngineSignal.ABORT)
         return

@@ -26,7 +26,10 @@ class BaseJob(ABC):
         self.timestamp_ETA: float | None = None    # Simulation time, when job is expected to end
 
     def __lt__(self, other: "BaseJob") -> bool:
-        return (self.timestamp_ETA, self.id) < (other.timestamp_ETA, other.id)
+        my_ETA = self.timestamp_ETA if self.timestamp_ETA is not None else float("inf")
+        other_ETA = other.timestamp_ETA if other.timestamp_ETA is not None else float("inf")
+
+        return (my_ETA, self.id) < (other_ETA, other.id)
 
     """
     Job Lifecycle:
@@ -77,7 +80,7 @@ class BaseJob(ABC):
         if self.work_rate is None or self.work_rate == 0:
             raise Exception(f"[Job] Job ID: {self.id}, work_rate is: {self.work_rate}")
 
-        work_left = self.work_total - self.work_done
+        work_left = max(self.work_total - self.work_done, 0.0)
         self.timestamp_ETA = timestamp_now + (work_left / self.work_rate)
         return
 

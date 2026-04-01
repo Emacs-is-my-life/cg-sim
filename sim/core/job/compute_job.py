@@ -2,6 +2,7 @@ from sim.core.log import Log
 from sim.core.trace import Node
 from sim.core import System
 from sim.hw.compute.common import BaseCompute
+from sim.hw.memory.common import MemoryRegion
 
 from .job import BaseJob
 
@@ -19,6 +20,9 @@ class ComputeJob(BaseJob):
         super().__init__(work_total)
         self.running_on.append(compute_hw)
         self.node = node
+
+        self.input_regions: list[MemoryRegion] = []
+        self.output_regions: list[MemoryRegion] = []
         return
 
     def is_runnable(self, sys: System) -> bool:

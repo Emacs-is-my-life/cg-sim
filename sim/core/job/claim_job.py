@@ -1,6 +1,7 @@
 from sim.core.log import Log
 from sim.core import System
 from sim.core.trace import Tensor
+from sim.hw.common import DataRegion
 from sim.hw.memory.common import BaseMemory
 from sim.hw.storage.common import BaseStorage
 
@@ -24,6 +25,8 @@ class ClaimJob(BaseJob):
         self.tensor_id = tensor.id
         self.num_pages = tensor.num_pages
         self.page_idx_start = page_idx_start
+
+        self.region: DataRegion | None = None
         return
 
     def is_runnable(self, sys: System) -> bool:

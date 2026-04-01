@@ -26,6 +26,7 @@ class SimpleSSD(BaseStorage):
         fixed_latency_micros = float(args["fixed_latency_micros"])
         if fixed_latency_micros < 0:
             raise ValueError(f"[Storage] Fixed latency cannot be: {fixed_latency_micros} micro-seconds")
+        self.fixed_latency_micros = fixed_latency_micros
 
         # Load io performance curve
         read_io_curve_KBps: list[tuple[float, float]] = [(float(io_size), float(bandwidth)) for io_size, bandwidth in args["read_io_curve_KBps"]]

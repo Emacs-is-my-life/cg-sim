@@ -12,6 +12,7 @@ class BaseStorage(BaseHardware):
     def __init__(self, obj_id: int, name: str, log: Log):
         super().__init__(obj_id, name, log)
         self.space: StorageSpace = StorageSpace(self)
+        self.fixed_latency_micros: float = 0.0
         return
 
     # TODO: After defining storage job

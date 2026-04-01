@@ -6,7 +6,7 @@ import heapq
 from sim.core import SimObject, System
 from sim.core.log import Log, TrackID
 from sim.core.trace import TerminalNode
-from sim.core.job import BaseJob, ComputeJob
+from sim.core.job import BaseJob, ComputeJob, TransferJob
 from sim.hw.memory.common import BaseMemory
 
 from .update import update_running_jobs
@@ -56,7 +56,7 @@ class Engine(SimObject):
     def signal(self, signal: EngineSignal) -> None:
         match signal:
             case EngineSignal.END_STAGE:
-                self.signal_stage_end = True
+                self.signal_end_stage = True
             case EngineSignal.ABORT:
                 self.signal_abort = True
         return
@@ -80,7 +80,7 @@ class Engine(SimObject):
 
         # Pop everything w/o advancing time
         while self.job_running:
-            job = heapq.heappop(self.job_running)
+            job = self.job_running.pop(0)
             if isinstance(job, ComputeJob):
                 args = {
                     "from": self.name,
@@ -95,7 +95,6 @@ class Engine(SimObject):
 
         return retired_jobs
 
-    # TODO: Implement properly asserted _layout routine.
     def _layout(self) -> None:
         # Turn off logging in placement step
         self.log.on = False
@@ -135,13 +134,19 @@ class Engine(SimObject):
 
         if self.job_running:
             job = heapq.heappop(self.job_running)
-
             self.time_elapsed = job.timestamp_ETA - self.timestamp_now
             self.timestamp_now = job.timestamp_ETA
-            job.end(self.log, self.sys, self.timestamp_now)
-            retired_jobs.append(job)
 
-            while self.job_running and (abs(self.job_running[0].timestamp_ETA - self.timestamp_now < 1e-12)):
+            # Handle fixed_latency of TransferJob
+            if isinstance(job, TransferJob):
+                if not job.bw_work_complete:
+                    job.bw_work_complete = True
+                    heapq.heappush(self.job_running, job)
+            else:
+                job.end(self.log, self.sys, self.timestamp_now)
+                retired_jobs.append(job)
+
+            while self.job_running and (self.job_running[0].timestamp_ETA - self.timestamp_now < 1e-12):
                 job = heapq.heappop(self.job_running)
                 job.end(self.log, self.sys, self.timestamp_now)
                 retired_jobs.append(job)

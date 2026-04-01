@@ -25,3 +25,4 @@ def assertion(job: ClaimJob, sys: System) -> bool:
             "msg": f"Cannot claim a data region from {hw.name}."
         }
         sys.abort(args)
+        return False

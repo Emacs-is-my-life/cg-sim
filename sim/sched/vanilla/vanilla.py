@@ -2,6 +2,7 @@ from typing import Any
 
 from sim.sched.common import BaseScheduler
 from sim.core.log import Log
+from sim.core.trace import Trace
 from sim.core import System
 from sim.core.job import BaseJob, ComputeJob, ClaimJob, ReleaseJob, TransferJob
 from sim.hw.compute.common import BaseCompute
@@ -19,11 +20,11 @@ class Vanilla(BaseScheduler):
         super().__init__(obj_id, name, log, sys)
         return
 
-    def compile(self) -> None:
+    def compile(self, trace: Trace) -> None:
         """No compilation"""
         return
 
-    def layout(self) -> None:
+    def layout(self, retired_jobs: list[BaseJob]) -> None:
         pass
 
     def runtime(self, retired_jobs: list[BaseJob]) -> None:

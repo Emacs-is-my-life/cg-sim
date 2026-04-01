@@ -125,11 +125,15 @@ class MemorySpace:
         Release a MemoryRegion reserved for certain tensor,
         freeing space for other tensors
         """
+        free_key = None
 
-        for mem_region in self._regions_by_page_idx_start.values():
+        for page_idx_start, mem_region in self._regions_by_page_idx_start.items():
             if mem_region.id == free_region.id:
-                self.num_used_pages -= mem_region.num_pages
-                del mem_region
+                free_key = page_idx_start
                 break
+
+            if free_key is not None:
+                self.num_used_pages -= self._regions_by_page_idx_start[free_key].num_pages
+                del self._regions_by_page_idx_start[free_key]
 
         return

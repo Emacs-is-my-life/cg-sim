@@ -71,29 +71,37 @@ class Simulator:
         t_cfg = cfg["trace"]
         t_cfg["args"]["input_path"] = config_file_path  # Supply input_path
         TraceLoaderClass = LOAD_TRACE_CLASS(t_cfg["type"])
-        trace_loader = TraceLoaderClass(sim_id.get_id(), sim_id.check_name("Trace"), log, t_cfg["args"])
+        name = "Trace"
+        sim_id.check_name(name)
+        trace_loader = TraceLoaderClass(sim_id.get_id(), name, log, t_cfg["args"])
         trace = trace_loader.load()
 
         # Hardware Dictionary
         hw = {}
 
         # Storage
-        for s_cfg in cfg["storage"]:
+        for s_cfg in cfg["hardware"]["storage"]:
             StorageClass = LOAD_STORAGE_CLASS(s_cfg["type"])
-            storage_hw = StorageClass(sim_id.get_id(), sim_id.check_name(s_cfg["name"]), log, s_cfg["args"])
+            name = s_cfg["name"]
+            sim_id.check_name(name)
+            storage_hw = StorageClass(sim_id.get_id(), name, log, s_cfg["args"])
             hw[storage_hw.name] = storage_hw
 
         # Memory
-        for m_cfg in cfg["memory"]:
+        for m_cfg in cfg["hardware"]["memory"]:
             MemoryClass = LOAD_MEMORY_CLASS(m_cfg["type"])
-            memory_hw = MemoryClass(sim_id.get_id(), sim_id.check_name(m_cfg["name"]), log, m_cfg["args"])
+            name = m_cfg["name"]
+            sim_id.check_name(name)
+            memory_hw = MemoryClass(sim_id.get_id(), name, log, m_cfg["args"])
             hw[memory_hw.name] = memory_hw
 
         # Compute - Compute units must be initialized after memory units
-        for c_cfg in cfg["compute"]:
+        for c_cfg in cfg["hardware"]["compute"]:
             ComputeClass = LOAD_COMPUTE_CLASS(c_cfg["type"])
             local_memory = hw[c_cfg["args"]["memory"]]
-            compute_hw = ComputeClass(sim_id.get_id(), sim_id.check_name(c_cfg["name"]), log, local_memory, c_cfg["args"])
+            name = c_cfg["name"]
+            sim_id.check_name(name)
+            compute_hw = ComputeClass(sim_id.get_id(), name, log, local_memory, c_cfg["args"])
             hw[compute_hw.name] = compute_hw
 
         # System
@@ -102,10 +110,14 @@ class Simulator:
         # Scheduler
         sched_cfg = cfg["scheduler"]
         SchedulerClass = LOAD_SCHEDULER_CLASS(sched_cfg["type"])
-        sched = SchedulerClass(sim_id.get_id(), sim_id.check_name("Scheduler"), log, sys, sched_cfg["args"])
+        name = "Scheduler"
+        sim_id.check_name(name)
+        sched = SchedulerClass(sim_id.get_id(), name, log, sys, sched_cfg["args"])
 
         # Engine
-        self.engine = Engine(sim_id.get(), sim_id.check_name("Engine"), log, sys, sched)
+        name = "Engine"
+        sim_id.check_name(name)
+        self.engine = Engine(sim_id.get(), name, log, sys, sched)
         return
 
     def run(self):
