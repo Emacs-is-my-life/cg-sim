@@ -19,14 +19,26 @@ def assertion(job: TransferJob, sys: System) -> bool:
     for src_region, dest_region in batch:
         # 1. Check Src Regions
         if src_region.hw != src_hw:
-            raise Exception("[Engine] Source Data Regions in a transfer batch should be from the single device.")
+            args = {
+                "from": sys.engine.name,
+                "error": "Job Pre-Execution Assertion Failure",
+                "job_type": "TransferJob",
+                "msg": "Batch in a TransferJob must be of 'One Hardware' -> 'Another Hardware'"
+            }
+            sys.abort(args)
 
         if (not src_region.is_ready) or src_region.access_status == DataRegionAccess.BEING_WRITTEN:
             return False
 
         # 2. Check Dest Regions
         if dest_region.hw != dest_hw:
-            raise Exception("[Engine] Destination Data Regions in a transfer batch should be from the single device.")
+            args = {
+                "from": sys.engine.name,
+                "error": "Job Pre-Execution Assertion Failure",
+                "job_type": "TransferJob",
+                "msg": "Batch in a TransferJob must be of 'One Hardware' -> 'Another Hardware'"
+            }
+            sys.abort(args)
 
         if dest_region.access_status != DataRegionAccess.IDLE:
             return False

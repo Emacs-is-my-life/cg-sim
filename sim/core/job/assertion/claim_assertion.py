@@ -18,4 +18,10 @@ def assertion(job: ClaimJob, sys: System) -> bool:
     elif isinstance(hw, BaseStorage):
         return hw.space.check_avail()
     else:
-        raise Exception(f"[Engine] Cannot request claim job to {hw.name}.")
+        args = {
+            "from": sys.engine.name,
+            "error": "Job Pre-Execution Assertion Failure",
+            "job_type": "ClaimJob",
+            "msg": f"Cannot claim a data region from {hw.name}."
+        }
+        sys.abort(args)

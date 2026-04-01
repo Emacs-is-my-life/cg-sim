@@ -69,7 +69,7 @@ class Engine(SimObject):
         return
 
     def _compile(self) -> None:
-        self.sched.compile()
+        self.sched.compile(self.sys.trace)
 
         # Advance time a little bit
         self.timestamp_now += 10
@@ -82,7 +82,13 @@ class Engine(SimObject):
         while self.job_running:
             job = heapq.heappop(self.job_running)
             if isinstance(job, ComputeJob):
-                raise Exception("[Engine] You cannot perform compute job in layout stage.")
+                args = {
+                    "from": self.name,
+                    "msg": "Cannot execute compute job in layout phase."
+                }
+                self._log_abort(args)
+                self.signal_abort = True
+                break
 
             job.end(self.log, self.sys, self.timestamp_now)
             retired_jobs.append(job)
@@ -108,9 +114,14 @@ class Engine(SimObject):
                     self.job_running.append(job_w)
                 else:
                     if len(self.job_running) == 0:
-                        raise Exception("[Engine] Deadlock detected.")
-                    else:
-                        break
+                        args = {
+                            "from": self.name,
+                            "msg": "Deadlock detected."
+                        }
+                        self._log_abort(args)
+                        self.signal_abort = True
+
+                    break
 
         # Turn on logging
         self.log.on = True
@@ -164,10 +175,14 @@ class Engine(SimObject):
                 else:
                     # Head-of-the-line blocking w/ no running job now
                     if len(self.job_running) == 0:
-                        raise Exception("[Engine] Deadlock detected.")
-                    else:
-                        # Respect strict FIFO order
-                        break
+                        args = {
+                            "from": self.name,
+                            "msg": "Deadlock detected."
+                        }
+                        self._log_abort(args)
+                        self.signal_abort = True
+
+                    break
 
             # Update work_rate and ETA of running jobs
             update_running_jobs(self.sys, self.job_running, self.timestamp_now)
@@ -176,7 +191,8 @@ class Engine(SimObject):
     def _cleanup(self) -> None:
         """Write a report"""
         args = {
-            "total_simulation_time": self.timestamp_now,
+            "simulation_success": str(not self.signal_abort),
+            "simulation_time": self.timestamp_now,
             "memory": []
         }
 
@@ -190,4 +206,9 @@ class Engine(SimObject):
 
         self.log.record(Log.engine(self.id, "SIMULATION_REPORT", self.timestamp_now, args))
         self.log.stop()
+        return
+
+    def _log_abort(self, args: dict[str, Any] | None = None) -> None:
+        args = args if args is not None else {}
+        self.log.record(Log.engine(self.id, "SIMULATION_ABORT", self.timestamp_now, args))
         return

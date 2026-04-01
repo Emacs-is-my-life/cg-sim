@@ -191,7 +191,7 @@ class Log:
         return {
             "pid": TrackID.Engine.value,
             "tid": obj_id,
-            "cat": "Event",
+            "cat": "Engine",
             "name": title,
             "ph": "i",
             "ts": timestamp,

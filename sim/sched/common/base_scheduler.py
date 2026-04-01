@@ -1,6 +1,7 @@
 from abc import abstractmethod
 
 from sim.core import SimObject, System
+from sim.core.trace import Trace
 from sim.core.log import Log
 from sim.core.job import BaseJob
 
@@ -14,11 +15,11 @@ class BaseScheduler(SimObject):
         return
 
     @abstractmethod
-    def compile(self) -> None:
+    def compile(self, trace: Trace) -> None:
         pass
 
     @abstractmethod
-    def layout(self) -> None:
+    def layout(self, retired_jobs: list[BaseJob]) -> None:
         pass
 
     @abstractmethod

@@ -21,7 +21,8 @@ This simulator has following characteristics:
 git clone https://github.com/Emacs-is-my-life/cg-sim.git
 cd cg-sim
 uv pip install docs/requirements.txt
-python main.py --input gogo --output gaga -o "It's not complete yet"
+
+python main.py -i <path-to-input.yaml>
 ```
 
 # Codebase Overview

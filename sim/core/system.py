@@ -1,6 +1,7 @@
 import uuid
 from typing import Any
 
+from sim.core.log import Log
 from sim.core.trace import Trace, Node, Tensor
 from sim.core.engine import EngineSignal, Engine
 from sim.hw.common import BaseHardware, DataRegion
@@ -67,7 +68,8 @@ class System:
         return
 
     def abort(self, args: dict[str, Any] | None = None) -> None:
-        # TODO: add loging by log.record(args)
+        args = args if args is not None else {}
 
+        self.engine.log.record(Log.engine(self.engine.id, "SIMULATION_ABORT", self.timestamp_now, args))
         self.engine.signal(EngineSignal.ABORT)
         return
