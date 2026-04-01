@@ -30,8 +30,8 @@ class Node:
         tensor_input:  To check if tensors are in memory for execution of this node
         tensor_output: Same as above
         """
-        self.input_tensors: [int] = []  # Data Dependency
-        self.output_tensors: [int] = []
+        self.input_tensors: list[int] = []  # Data Dependency
+        self.output_tensors: list[int] = []
 
         """
         node_parents:  Required to check if previous jobs are finished
@@ -39,8 +39,8 @@ class Node:
 
         These will be initialized through Node.add_parent(Node) method.
         """
-        self.parent_nodes: [int] = []   # Control Dependency
-        self.children_nodes: [int] = []
+        self.parent_nodes: list[int] = []   # Control Dependency
+        self.children_nodes: list[int] = []
         return
 
     def add_parent_node(self, node_id: int):

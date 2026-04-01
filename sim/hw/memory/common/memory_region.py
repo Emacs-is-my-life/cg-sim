@@ -132,8 +132,8 @@ class MemorySpace:
                 free_key = page_idx_start
                 break
 
-            if free_key is not None:
-                self.num_used_pages -= self._regions_by_page_idx_start[free_key].num_pages
-                del self._regions_by_page_idx_start[free_key]
+        if free_key is not None:
+            self.num_used_pages -= self._regions_by_page_idx_start[free_key].num_pages
+            del self._regions_by_page_idx_start[free_key]
 
         return

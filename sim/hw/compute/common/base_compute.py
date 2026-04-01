@@ -23,7 +23,7 @@ class BaseCompute(BaseHardware):
             "compute_speed_AUps": 0
         }
 
-        if self.job_running():
+        if self.job_running:
             job = self.job_running[0]
             counters["compute_speed_AUps"] = 1_000_000 * job.work_rate  # AU / second
 

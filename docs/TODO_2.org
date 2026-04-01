@@ -1,0 +1,613 @@
+#+TITLE: Simulator Audit TODOs
+#+STARTUP: overview
+#+OPTIONS: toc:2 num:nil
+
+* Purpose
+
+This file records concrete bugs and design flaws found while
+auditing the simulator from =main.py= through initialization,
+trace loading, engine runtime, jobs, and hardware models.
+
+It is intended as a practical engineering TODO list, not a
+high-level roadmap.
+
+* P0: Immediate crash and corruption fixes
+
+** DONE Fix engine logging calls in =sim/core/engine/engine.py=
+CLOSED: [2026-04-01 Wed 21:06]
+
+The engine currently calls the logger object like a function:
+
+#+begin_src python
+self.log(Log.engine(self.id, "COMPILE_STAGE_START", self.timestamp_now))
+#+end_src
+
+But =self.log= is a =Log= instance, not a callable.
+
+This affects:
+- =COMPILE_STAGE_START=
+- =LAYOUT_STAGE_START=
+- =RUNTIME_STAGE_START=
+
+Required fix:
+- replace each =self.log(...)= with =self.log.record(...)=
+
+Impact if unfixed:
+- simulator crashes immediately when =Engine.run()= starts
+
+** DONE Fix typo =recrod= -> =record= in =sim/core/engine/engine.py=
+CLOSED: [2026-04-01 Wed 21:06]
+
+The runtime state logging path contains:
+
+#+begin_src python
+self.log.recrod(Log.state(hw.id, "HW State",
+                          self.timestamp_now,
+                          hw.log_states()))
+#+end_src
+
+Required fix:
+- rename =recrod= to =record=
+
+Impact if unfixed:
+- runtime crashes when state logging is enabled and jobs retire
+
+** DONE Fix compute counter logging in
+CLOSED: [2026-04-01 Wed 21:07]
+   =sim/hw/compute/common/base_compute.py=
+
+The code treats =job_running= like a function:
+
+#+begin_src python
+if self.job_running():
+#+end_src
+
+But =job_running= is a list.
+
+Required fix:
+- change it to:
+
+#+begin_src python
+if self.job_running:
+#+end_src
+
+Impact if unfixed:
+- compute counter logging crashes
+
+** DONE Fix broken memory release in
+CLOSED: [2026-04-01 Wed 21:08]
+   =sim/hw/memory/common/memory_region.py=
+
+Current =MemorySpace.release()= has deletion logic nested under the
+wrong indentation level:
+
+#+begin_src python
+for page_idx_start, mem_region in
+    self._regions_by_page_idx_start.items():
+    if mem_region.id == free_region.id:
+        free_key = page_idx_start
+        break
+
+    if free_key is not None:
+        self.num_used_pages -=
+            self._regions_by_page_idx_start[free_key].num_pages
+        del self._regions_by_page_idx_start[free_key]
+#+end_src
+
+Because the loop breaks before the delete block runs, releases do
+not actually free memory.
+
+Required fix:
+- search for the matching region key
+- after the loop, if found:
+  - decrement =num_used_pages=
+  - delete the entry from
+    =_regions_by_page_idx_start=
+
+Impact if unfixed:
+- memory is never really freed
+- false OOM
+- false deadlock
+- corrupted memory usage accounting
+
+* P0: Compute job state consistency fixes
+
+** DONE Stop mutating region selections inside
+CLOSED: [2026-04-01 Wed 21:13]
+   =sim/core/job/assertion/compute_assertion.py=
+
+Current compute assertion appends selected regions directly into:
+
+- =job.input_regions=
+- =job.output_regions=
+
+This happens during =is_runnable()=, which may be called multiple
+times before the job actually begins.
+
+Current pattern:
+
+#+begin_src python
+job.input_regions.append(i_mem_region)
+job.output_regions.append(o_mem_region)
+#+end_src
+
+Required minimum fix:
+- clear =job.input_regions= and =job.output_regions= at the start of
+  assertion before repopulating them
+
+Better fix:
+- make assertion side-effect free
+- move exact region binding into begin mutation or another explicit
+  reservation step
+
+Impact if unfixed:
+- duplicate region entries
+- duplicate access count increments
+- duplicate decrements
+- corrupted access bookkeeping
+- possible negative =access_count=
+
+** DONE Fix compute end mutation to release only the regions actually
+CLOSED: [2026-04-01 Wed 21:14]
+   used by the job
+
+In =sim/core/job/mutation/compute_mutation.py=, begin mutation uses:
+
+- =job.input_regions=
+- =job.output_regions=
+
+But end mutation scans by tensor id across all regions in local
+memory:
+
+#+begin_src python
+candidates = memory.space.get_by_tensor_id(i_tensor_id)
+for i_mem_region in candidates:
+    i_mem_region.access_count -= 1
+#+end_src
+
+Required fix:
+- replace tensor-id-wide scans with iteration over:
+  - =job.input_regions=
+  - =job.output_regions=
+- decrement and unlock only those exact regions selected for the job
+
+Impact if unfixed:
+- unrelated copies of the same tensor get unlocked
+- access counts drift out of sync
+- multi-copy placement becomes incorrect
+
+** DONE Redesign compute runnable check so assertion is a pure predicate
+CLOSED: [2026-04-01 Wed 21:14]
+
+The file already contains this warning:
+
+#+begin_src python
+Warning: assertion and mutation should not be
+'system-state-modification' apart.
+#+end_src
+
+That warning is correct.
+
+Required design change:
+- keep =is_runnable()= read-only
+- perform actual reservation / binding atomically in begin mutation
+- if reservation fails, do not start the job
+
+Why this matters:
+- current correctness depends on assertion and mutation happening
+  back-to-back with no interference
+- this becomes fragile as queueing or scheduler logic evolves
+
+* P1: Trace loader correctness fixes
+
+** DONE Remove hardcoded step count from
+CLOSED: [2026-04-01 Wed 21:15]
+   =sim/load/llamacpp/llamacpp.py=
+
+Current loader code hardcodes:
+
+#+begin_src python
+step_till = 10
+for step in range(step_till+1):
+#+end_src
+
+Required fix:
+- derive steps from the profile CSV contents
+- iterate over actual unique step values
+- preserve ordering explicitly
+
+Impact if unfixed:
+- traces with fewer steps create empty iterations
+- traces with more steps are silently truncated
+- generated compute graph can be wrong
+
+** DONE Fix likely input tensor misclassification in
+CLOSED: [2026-04-01 Wed 21:16]
+   =sim/load/llamacpp/utils.py=
+
+Current code uses exact string equality:
+
+#+begin_src python
+elif "inp_embd" == label:
+    return "INPUT"
+#+end_src
+
+Required fix:
+- replace exact equality with robust matching, likely:
+
+#+begin_src python
+elif "inp_embd" in label:
+    return "INPUT"
+#+end_src
+
+If needed, canonicalize first and then classify.
+
+Impact if unfixed:
+- input tensors may be mislabeled
+- scheduler logic based on tensor type can behave incorrectly
+
+** DONE Add loader-side validation for required DOT attributes in
+CLOSED: [2026-04-01 Wed 21:16]
+   =sim/load/llamacpp/llamacpp.py=
+
+The loader directly assumes the following keys exist:
+
+- =label=
+- =addr=
+- =size=
+
+Example:
+
+#+begin_src python
+v_label = v_attr["label"]
+tensor_sign = v_attr["addr"]
+tensor_size_bytes = int(v_attr["size"])
+#+end_src
+
+Required fix:
+- validate attribute presence explicitly
+- raise a clear loader-specific exception with file context
+- validate =size= conversion before using it
+
+Impact if unfixed:
+- malformed input raises raw =KeyError= or =ValueError=
+- debugging bad traces is harder than necessary
+
+* P1: Logging and observability fixes
+
+** DONE Fix transfer bandwidth calculation and typo in
+CLOSED: [2026-04-01 Wed 21:18]
+   =sim/core/job/logging/transfer_logging.py=
+
+Current code:
+
+#+begin_src python
+avg_rate = total_transfer /
+    (1_000_000 * (job.timestamp_end - job.timestamp_begin))
+args = {
+    "tranfer_KBps": avg_rate
+}
+#+end_src
+
+If transfer size is in KB and time is in microseconds, the correct
+KB/s formula is:
+
+#+begin_src python
+avg_rate = total_transfer * 1_000_000 / duration_micros
+#+end_src
+
+Required fix:
+- compute bandwidth using multiplication by =1_000_000=
+- rename key from =tranfer_KBps= to =transfer_KBps=
+- guard against zero-duration instant cases if needed
+
+Impact if unfixed:
+- logged transfer bandwidth is wrong by a huge factor
+- output field name is misspelled
+
+** DONE Guard memory/storage counter logging against =None= work rates
+CLOSED: [2026-04-01 Wed 21:19]
+
+Files:
+- =sim/hw/memory/common/base_memory.py=
+- =sim/hw/storage/common/base_storage.py=
+
+Current code sums =job.work_rate= directly:
+
+#+begin_src python
+total_transfers += job.work_rate
+#+end_src
+
+Required fix:
+- treat =None= as =0=
+- example pattern:
+
+#+begin_src python
+total_transfers += (job.work_rate or 0)
+#+end_src
+
+Impact if unfixed:
+- counter logging can raise =TypeError=
+- bug may appear depending on exact runtime ordering
+
+* P1: Engine and scheduling correctness fixes
+
+** DONE Address head-of-line blocking in
+CLOSED: [2026-04-01 Wed 21:19]
+   =sim/core/engine/engine.py=
+
+Current waiting-queue handling checks only the front job:
+
+#+begin_src python
+job_w = self.job_waiting[0]
+if job_w.is_runnable(self.sys):
+    ...
+else:
+    break
+#+end_src
+
+This exists in both layout and runtime paths.
+
+Required fix options:
+- either document strict FIFO as an intentional simulator policy
+- or scan the waiting queue for runnable jobs instead of stopping at
+  the first blocked one
+
+Impact if unfixed:
+- blocked front job prevents later runnable jobs from starting
+- creates artificial underutilization
+- can distort scheduler evaluation results
+
+** DONE Prevent false deadlock reports caused by FIFO blocking
+CLOSED: [2026-04-01 Wed 21:19]
+
+Current code reports deadlock when:
+- first waiting job is blocked
+- no running jobs exist
+
+But later waiting jobs may still be runnable.
+
+Required fix:
+- only declare deadlock after checking whether any waiting job can run
+- this depends on resolving or explicitly defining FIFO semantics
+
+Impact if unfixed:
+- simulator can abort even though executable work exists
+
+** DONE Strengthen scheduler / engine contract for layout phase
+CLOSED: [2026-04-01 Wed 21:19]
+
+Engine layout phase aborts if a compute job appears:
+
+#+begin_src python
+"Cannot execute compute job in layout phase."
+#+end_src
+
+Required improvement:
+- make the scheduler interface or job submission path explicitly
+  separate placement-stage jobs from runtime-stage jobs
+- avoid relying only on runtime checks inside engine
+
+Impact if not improved:
+- phase violations are caught late
+- scheduler API remains underspecified
+
+* P1: Memory and transfer model fixes
+
+** DONE Improve memory claim API so default claim behavior is usable
+CLOSED: [2026-04-01 Wed 21:20]
+
+Current =ClaimJob= defaults to:
+
+#+begin_src python
+page_idx_start = -1
+#+end_src
+
+But memory claims reject negative page indices.
+
+Required design choice:
+- either require explicit address placement and remove the invalid
+  default
+- or implement automatic allocation for memory claims when
+  =page_idx_start < 0=
+
+Impact if unfixed:
+- naive scheduler code will submit impossible memory claims
+- built-in scheduling is harder than necessary
+
+** DONE Reject or explicitly define same-hardware transfers
+CLOSED: [2026-04-01 Wed 21:21]
+
+Current transfer assertion verifies consistent source hardware and
+consistent destination hardware, but does not reject the case where
+source and destination are the same hardware.
+
+Required fix:
+- if same-hardware copies are invalid, reject them in
+  =transfer_assertion.py=
+- otherwise document semantics and ensure bandwidth accounting in
+  =update_transfer.py= is correct for that case
+
+Impact if unfixed:
+- self-copy semantics are ambiguous
+- transfer bandwidth allocation may behave oddly
+
+** DONE Validate SSD performance curve ordering in
+CLOSED: [2026-04-01 Wed 21:21]
+   =sim/hw/storage/simple_ssd/simple_ssd.py=
+
+Current constructor validates positivity only.
+
+But interpolation logic assumes sorted tuples.
+
+Required fix:
+- during initialization, validate that IO sizes are strictly
+  increasing, or at least nondecreasing in a supported way
+- fail early with a clear config error
+
+Impact if unfixed:
+- configuration errors fail later at runtime
+- error messages are less actionable
+
+* P1: Trace validation fixes
+
+** DONE Expand =Trace.map_check()= to validate node references
+CLOSED: [2026-04-01 Wed 21:21]
+
+Current =sim/core/trace/trace.py= validates tensor references and
+checks that the last node is =TerminalNode=.
+
+It does not validate:
+- parent node ids exist
+- child node ids exist
+- parent/child relations are symmetric
+
+Required fix:
+- for every node:
+  - verify each parent id exists in =node_map=
+  - verify each child id exists in =node_map=
+  - verify reciprocal links are present
+
+Impact if unfixed:
+- malformed graphs survive loading
+- failures appear later in engine/runtime in harder-to-debug ways
+
+** DONE Fix malformed list type annotations in
+CLOSED: [2026-04-01 Wed 21:22]
+   =sim/core/trace/node.py=
+
+Current examples:
+
+#+begin_src python
+self.input_tensors: [int] = []
+self.parent_nodes: [int] = []
+#+end_src
+
+Required fix:
+- replace with proper generic types:
+
+#+begin_src python
+self.input_tensors: list[int] = []
+self.parent_nodes: list[int] = []
+#+end_src
+
+Impact if unfixed:
+- no immediate runtime failure
+- weaker static analysis and editor support
+
+* P2: Import and architecture cleanup
+
+** DONE Replace wildcard-import dynamic loaders with explicit registries
+CLOSED: [2026-04-01 Wed 21:22]
+
+Files:
+- =sim/core/init/trace.py=
+- =sim/core/init/compute.py=
+- =sim/core/init/memory.py=
+- =sim/core/init/storage.py=
+- =sim/core/init/scheduler.py=
+
+Current pattern:
+
+#+begin_src python
+from sim.hw.compute import *
+...
+globals()[compute_type]
+#+end_src
+
+Required improvement:
+- define explicit registry dictionaries
+- look up classes through those registries
+- keep error messages explicit and local
+
+Benefits:
+- avoids hidden name collisions
+- reduces import side effects
+- improves discoverability and tooling support
+
+** DONE Reduce circular import pressure across core modules
+CLOSED: [2026-04-01 Wed 21:22]
+
+Current package structure has substantial cross-importing among:
+- =sim.core=
+- =sim.core.engine=
+- =sim.core.system=
+- =sim.core.job=
+- hardware packages
+
+Required improvement:
+- use =TYPE_CHECKING= for type-only imports where possible
+- replace package-level re-export dependencies with more direct imports
+- avoid importing heavy modules through =sim.core= when only one class
+  is needed
+
+Impact if not improved:
+- future refactors may trigger import loops
+- module boundaries remain fragile
+
+* P2: Scheduler completeness
+
+** DONE Implement runnable built-in schedulers
+CLOSED: [2026-04-01 Wed 21:22]
+
+Files:
+- =sim/sched/vanilla/vanilla.py=
+- =sim/sched/flexgen/flexgen.py=
+
+Current state:
+- =layout()= is =pass=
+- =runtime()= is =pass=
+
+Required work:
+- implement at least one end-to-end runnable scheduler
+- ensure it:
+  - submits layout jobs
+  - submits compute jobs
+  - advances through terminal node
+  - handles memory constraints consistently
+
+Impact if unfixed:
+- simulator core exists, but there is no usable policy to execute a
+  real trace
+- deadlock or no-progress behavior may simply reflect missing
+  scheduler logic
+
+* Suggested fix order
+
+** P0 first
+1. engine logger call bug
+2. =recrod= typo
+3. compute counter logging bug
+4. broken memory release
+5. compute assertion region accumulation
+6. compute end-mutation wrong-region release
+7. transfer logging math and typo
+
+** Then P1
+1. remove hardcoded llama.cpp step count
+2. improve trace validation
+3. validate SSD curve sorting
+4. define same-hardware transfer behavior
+5. guard counter logs against =None=
+6. improve deadlock detection / queue semantics
+
+** Then P2
+1. make compute assertion pure
+2. add optional automatic allocation
+3. replace wildcard dynamic loading
+4. reduce circular imports
+5. implement built-in schedulers
+
+* Bottom line
+
+The simulator architecture is promising, but current implementation
+still has several correctness landmines:
+
+- immediate engine logging crashes
+- broken memory release
+- compute job access-state corruption risk
+- hardcoded trace expansion behavior
+- false deadlock potential from FIFO queue handling
+- no usable built-in scheduler yet
+
+This TODO file should be treated as the short-term stabilization plan.

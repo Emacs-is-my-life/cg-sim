@@ -62,13 +62,13 @@ class Engine(SimObject):
         return
 
     def run(self) -> None:
-        self.log(Log.engine(self.id, "COMPILE_STAGE_START", self.timestamp_now))
+        self.log.record(Log.engine(self.id, "COMPILE_STAGE_START", self.timestamp_now))
         self._compile()
 
-        self.log(Log.engine(self.id, "LAYOUT_STAGE_START", self.timestamp_now))
+        self.log.record(Log.engine(self.id, "LAYOUT_STAGE_START", self.timestamp_now))
         self._layout()
 
-        self.log(Log.engine(self.id, "RUNTIME_STAGE_START", self.timestamp_now))
+        self.log.record(Log.engine(self.id, "RUNTIME_STAGE_START", self.timestamp_now))
         self._runtime()
 
         self._cleanup()
@@ -167,7 +167,7 @@ class Engine(SimObject):
                 self.log.record(Log.counter(hw.id, "HW Counter", self.timestamp_now, hw.log_counters()))
 
             if self.log.level.value >= Level.STATE:
-                self.log.recrod(Log.state(hw.id, "HW State", self.timestamp_now, hw.log_states()))
+                self.log.record(Log.state(hw.id, "HW State", self.timestamp_now, hw.log_states()))
 
         return retired_jobs
 

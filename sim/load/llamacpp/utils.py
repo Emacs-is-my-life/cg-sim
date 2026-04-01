@@ -18,7 +18,7 @@ def get_tensor_type(label: str) -> str:
             return "WEIGHT"
         elif ("cache_k" in label) or ("cache_v" in label) or ("leaf" in label):
             return "KVCACHE"
-        elif "inp_embd" == label:
+        elif "inp_embd" in label:
             return "INPUT"
     else:
         return "INTERMEDIATE"

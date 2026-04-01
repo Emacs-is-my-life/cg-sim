@@ -18,7 +18,7 @@ class BaseJob(ABC):
         # Work
         self.work_total = work_total          # Total amount of work done
         self.work_done: float = 0             # Amount of work processed so far
-        self.work_rate: float | None = None   # Work being processed per microsecond
+        self.work_rate: float = 0   # Work being processed per microsecond
 
         # Timestamp
         self.timestamp_begin: float | None = None  # Simulation time, that job started execution
