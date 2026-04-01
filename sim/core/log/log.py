@@ -254,7 +254,7 @@ class Log:
         return {
             "pid": TrackID.Counter.value,
             "tid": obj_id,
-            "cat": "State",
+            "cat": "Counter",
             "name": title,
             "ph": "C",
             "ts": timestamp,

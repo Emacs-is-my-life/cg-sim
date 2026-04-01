@@ -11,7 +11,7 @@ def begin_log(job: ReleaseJob, log: Log) -> None:
     for hw in job.running_on:
         log.record(Log.event_instant(
             hw.id,
-            "RELEASED_JOB",
+            "RELEASE_JOB",
             job.timestamp_begin,
             args
         ))

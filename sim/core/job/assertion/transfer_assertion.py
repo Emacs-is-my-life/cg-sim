@@ -26,6 +26,7 @@ def assertion(job: TransferJob, sys: System) -> bool:
                 "msg": "Batch in a TransferJob must be of 'One Hardware' -> 'Another Hardware'"
             }
             sys.abort(args)
+            return False
 
         if (not src_region.is_ready) or src_region.access_status == DataRegionAccess.BEING_WRITTEN:
             return False
@@ -39,6 +40,7 @@ def assertion(job: TransferJob, sys: System) -> bool:
                 "msg": "Batch in a TransferJob must be of 'One Hardware' -> 'Another Hardware'"
             }
             sys.abort(args)
+            return False
 
         if dest_region.access_status != DataRegionAccess.IDLE:
             return False

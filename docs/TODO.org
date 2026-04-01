@@ -694,7 +694,8 @@ for step in range(max_step + 1):
 
 This makes trace validation stricter and loader behavior data-driven.
 
-* TODO Logging and observability consistency bugs
+* DONE Logging and observability consistency bugs
+CLOSED: [2026-04-01 Wed 17:22]
 ** Summary
 The logger core is mostly functional, but there are remaining observability inconsistencies: counter events are labeled with the wrong category, and some job event names are inconsistent. These are not engine blockers, but they reduce trace readability and make downstream analysis less clean.
 
@@ -738,7 +739,8 @@ log.record(Log.event_instant(
 That keeps event naming consistent with ~CLAIM_JOB~, ~COMPUTE_JOB~, and
 ~TRANSFER_JOB~.
 
-* TODO Type/import and dependency hygiene bugs
+* DONE Type/import and dependency hygiene bugs
+CLOSED: [2026-04-01 Wed 17:27]
 ** Summary
 The codebase has several fragile import relationships and type-contract edge cases that are not necessarily the root cause of current failures, but they increase the chance of runtime surprises. In particular, some helper paths return ~None~ where a boolean contract is expected, and the code relies heavily on package import side effects for plugin availability.
 
@@ -781,7 +783,8 @@ Apply the same local-variable pattern to:
 This keeps the existing plugin mechanism while making function contracts more
 explicit.
 
-* TODO Determinism and ordering robustness bugs
+* DONE Determinism and ordering robustness bugs
+CLOSED: [2026-04-01 Wed 17:31]
 ** Summary
 Several parts of the runtime rely on incidental ordering rather than explicit, stable rules. ETA ordering depends on jobs being heap-safe only after update, and region selection currently depends on lookup ordering instead of scheduler-selected bindings. While some of this is addressed by the compute-region binding fix, the engine and job model still need clearer deterministic behavior.
 
