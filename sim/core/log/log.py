@@ -149,6 +149,7 @@ class Log:
             self.worker.join()
 
         self.worker = None
+        self.file_ptr = None
 
         return
 

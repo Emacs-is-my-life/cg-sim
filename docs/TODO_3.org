@@ -1,0 +1,364 @@
+#+TITLE: Simulator Audit TODOs (Round 3)
+#+STARTUP: overview
+#+OPTIONS: toc:2 num:nil
+
+* Purpose
+
+This file records remaining concrete bugs and robustness issues found
+after removing items that are intentional simulator design choices:
+
+- fixed llama.cpp trace expansion assumptions
+- strict FIFO waiting queue semantics in engine
+- unimplemented built-in schedulers
+
+Only actionable correctness and interface issues are listed below.
+
+* P0: State integrity and crash-prevention fixes
+
+** DONE Fix mutation ordering in =sim/core/job/mutation/claim_mutation.py=
+CLOSED: [2026-04-01 Wed 21:30]
+
+Current code adds the job to hardware running slots before confirming
+that allocation succeeds:
+
+#+begin_src python
+for hw in job.running_on:
+    hw.run(job)
+
+region = hw.space.claim(job.tensor_id, job.page_idx_start, job.num_pages)
+if region is None:
+    sys.abort(args)
+#+end_src
+
+Required fix:
+- perform =hw.space.claim(...)= first
+- if claim fails:
+  - abort the simulation
+  - do not leave the job in any hardware =job_running= list
+- only after successful allocation:
+  - set =job.region=
+  - add the job to hardware running slots
+
+Impact if unfixed:
+- failed claim jobs can leave inconsistent hardware running state
+- abort paths become harder to reason about
+
+** DONE Clear stale region bindings at start of
+CLOSED: [2026-04-01 Wed 21:31]
+   =sim/core/job/mutation/compute_mutation.py=
+
+Current begin mutation appends into:
+
+- =job.input_regions=
+- =job.output_regions=
+
+without clearing them first.
+
+Required fix:
+- at the beginning of =begin_mutation(...)=, before scanning memory:
+  - call =job.input_regions.clear()=
+  - call =job.output_regions.clear()=
+
+Impact if unfixed:
+- future retries, test reuse, or partial-failure paths can duplicate
+  bindings
+- stale region references can corrupt access bookkeeping
+
+** DONE Validate full input/output region binding in
+CLOSED: [2026-04-01 Wed 21:31]
+   =sim/core/job/mutation/compute_mutation.py=
+
+Current begin mutation assumes assertion already guaranteed success and
+silently proceeds with whatever regions it finds.
+
+Required fix:
+- after collecting candidate input regions, verify:
+
+#+begin_src python
+len(job.input_regions) == len(node.input_tensors)
+#+end_src
+
+- after collecting candidate output regions, verify:
+
+#+begin_src python
+len(job.output_regions) == len(node.output_tensors)
+#+end_src
+
+- if either check fails:
+  - abort with a clear engine/system error
+  - do not continue mutating region access state
+
+Recommended implementation detail:
+- collect all bindings first
+- validate counts
+- only then mutate:
+  - hardware running slots
+  - node status
+  - region access flags/counts
+
+Impact if unfixed:
+- unexpected assertion/mutation divergence can leave partially mutated
+  job or region state
+
+** DONE Strengthen release correctness in
+CLOSED: [2026-04-01 Wed 21:31]
+   =sim/core/job/mutation/release_mutation.py= and
+   =sim/hw/memory/common/memory_region.py=
+
+Current release mutation always runs the job and calls =hw.space.release(region)=,
+but release does not report success or failure.
+
+Required fix:
+- make =MemorySpace.release(...)= return a boolean indicating whether a
+  region was actually removed
+- in =release_mutation.begin_mutation(...)=:
+  - validate the release succeeded
+  - if not, abort with a clear error
+- apply the same pattern to storage release if needed for consistency
+
+Recommended invariant checks inside memory release:
+- verify =free_region.hw is self.hw=
+- prefer checking the keyed region by =page_idx_start= when possible
+- confirm the stored region object matches the requested one
+
+Impact if unfixed:
+- double release or stale-region release can silently do nothing
+- debugging allocator corruption becomes harder
+
+** DONE Guard zero-duration transfers in
+CLOSED: [2026-04-01 Wed 21:32]
+   =sim/core/job/logging/transfer_logging.py=
+
+Current code computes:
+
+#+begin_src python
+avg_rate = (1_000_000 * total_transfer) / (job.timestamp_end - job.timestamp_begin)
+#+end_src
+
+Required fix:
+- store duration in a local variable
+- if duration <= 0:
+  - set =transfer_KBps= to 0 (or another explicitly chosen sentinel)
+- otherwise compute the normal rate
+
+Impact if unfixed:
+- logging can crash on zero-duration transfers
+- log code can obscure the real execution bug
+
+** DONE Harden transfer counter logging in
+CLOSED: [2026-04-01 Wed 21:32]
+   =sim/hw/memory/common/base_memory.py= and
+   =sim/hw/storage/common/base_storage.py=
+
+Current code sums =job.work_rate= directly:
+
+#+begin_src python
+total_transfers += job.work_rate
+#+end_src
+
+Required fix:
+- treat missing or falsey work rates as zero, e.g.:
+
+#+begin_src python
+total_transfers += (job.work_rate or 0)
+#+end_src
+
+Impact if unfixed:
+- counter logging can fail if a running job has not yet received its
+  updated rate
+
+** DONE Expand node-graph validation in =sim/core/trace/trace.py=
+CLOSED: [2026-04-01 Wed 21:33]
+
+Current =map_check(...)= validates tensor references and the final
+terminal node, but not node-to-node graph consistency.
+
+Required fix:
+- for every node:
+  - verify each parent id exists in =node_map=
+  - verify each child id exists in =node_map=
+  - verify each parent lists this node as a child
+  - verify each child lists this node as a parent
+
+Impact if unfixed:
+- malformed graphs survive loading and fail later in less obvious ways
+
+** DONE Validate IO curve ordering in
+CLOSED: [2026-04-01 Wed 21:33]
+   =sim/hw/storage/simple_ssd/simple_ssd.py=
+
+Current constructor checks only positivity of each tuple, while
+interpolation later assumes the list is properly sorted by IO size.
+
+Required fix:
+- during initialization, verify each curve's IO sizes are strictly
+  increasing
+- raise a clear configuration error if ordering is invalid
+
+Impact if unfixed:
+- invalid SSD configs are accepted and fail later at runtime with worse
+  diagnostics
+
+** DONE Align scheduler base constructor with simulator init contract
+CLOSED: [2026-04-01 Wed 21:38]
+
+Files:
+- =sim/sched/common/base_scheduler.py=
+- concrete scheduler classes if needed
+
+Current simulator initialization passes scheduler args:
+
+#+begin_src python
+SchedulerClass(..., log, sys, sched_cfg["args"])
+#+end_src
+
+But =BaseScheduler.__init__()= does not accept or store =args=.
+
+Required fix:
+- update =BaseScheduler.__init__()= to accept:
+
+#+begin_src python
+args: dict[str, Any] | None = None
+#+end_src
+
+- store =self.args=
+- update subclass constructors and =super()= calls accordingly
+
+Impact if unfixed:
+- the public scheduler construction contract is split between simulator
+  code and subclass conventions
+- future scheduler implementations are easier to get wrong
+
+** DONE Replace private engine abort reach-through in =sim/core/system.py=
+CLOSED: [2026-04-01 Wed 21:38]
+
+Current code does:
+
+#+begin_src python
+self.engine._log_abort(args)
+self.engine.signal(EngineSignal.ABORT)
+#+end_src
+
+Required fix:
+- add a public engine method such as =abort(args: dict[str, Any] | None = None)=
+  that:
+  - logs the abort
+  - raises the abort signal
+- change =System.abort()= to call that public method
+
+Impact if unfixed:
+- =System= depends on engine private internals
+- engine abort behavior is harder to refactor safely
+
+** DONE Clamp progress accumulation in =sim/core/job/job.py=
+CLOSED: [2026-04-01 Wed 21:39]
+
+Current code does:
+
+#+begin_src python
+self.work_done += self.work_rate * time_elapsed
+#+end_src
+
+Required fix:
+- clamp =work_done= so it never exceeds =work_total=, e.g.:
+
+#+begin_src python
+self.work_done = min(self.work_total,
+                     self.work_done + self.work_rate * time_elapsed)
+#+end_src
+
+Impact if unfixed:
+- floating-point overshoot can leak into progress reporting and later
+  debugging
+
+** DONE Reset logger file handle state in =sim/core/log/log.py=
+CLOSED: [2026-04-01 Wed 21:39]
+
+After =stop()= joins the worker thread, the logger clears =self.worker=
+but leaves =self.file_ptr= non-=None=.
+
+Required fix:
+- after shutdown completes, set:
+
+#+begin_src python
+self.file_ptr = None
+#+end_src
+
+Recommended additional cleanup:
+- consider resetting =self.stop_event= if the logger is intended to be
+  restartable
+
+Impact if unfixed:
+- a stopped =Log= instance cannot be safely restarted
+- object lifecycle is internally inconsistent
+
+* P1: Robustness and contract-hardening fixes
+
+** DONE Add explicit DOT attribute validation in
+CLOSED: [2026-04-01 Wed 21:40]
+   =sim/load/llamacpp/llamacpp.py=
+
+Current loader directly indexes required fields such as:
+
+- =label=
+- =addr=
+- =size=
+
+Required fix:
+- validate attribute presence before use
+- raise a clear loader-specific error with file/path context
+- validate =size= conversion before constructing tensors
+
+Impact if unfixed:
+- malformed input produces raw =KeyError= / =ValueError= failures with
+  poor diagnostics
+
+** DONE Validate node-ID mapping assumptions in
+CLOSED: [2026-04-01 Wed 21:40]
+   =sim/load/llamacpp/llamacpp.py=
+
+Current code assumes profiled CSV node ids can be used directly to index
+the virtual node map:
+
+#+begin_src python
+virtual_node = vNodeMap[_node_id]
+#+end_src
+
+Required fix:
+- before use, verify =_node_id= exists in =vNodeMap=
+- if not, raise a clear loader error describing the mismatch between
+  CSV node ids and DOT-derived node ids
+- optionally document this loader-specific assumption explicitly
+
+Impact if unfixed:
+- loader failures appear as raw key lookup errors
+- mismatched trace inputs are harder to diagnose
+
+* Suggested fix order
+
+** P0 first
+1. claim mutation ordering
+2. compute mutation stale bindings
+3. compute mutation full-binding validation
+4. release success/failure reporting
+5. zero-duration transfer logging
+6. counter logging hardening
+7. trace node-reference validation
+8. SSD curve ordering validation
+9. scheduler constructor contract
+10. public engine abort API
+11. progress clamping
+12. logger shutdown reset
+
+** Then P1
+1. DOT attribute validation
+2. CSV-to-virtual-node mapping validation
+
+* Bottom line
+
+The remaining issues are mostly about state integrity,
+defensive validation, and cleaner cross-module contracts rather than
+high-level simulator policy.
+
+The most important fixes are the ones that prevent partially mutated
+runtime state or secondary crashes during logging and shutdown.

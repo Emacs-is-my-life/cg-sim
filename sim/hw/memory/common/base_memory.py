@@ -21,7 +21,7 @@ class BaseMemory(BaseHardware):
     def log_counters(self) -> dict[str, Any]:
         total_transfers = 0
         for job in self.job_running:
-            total_transfers += job.work_rate
+            total_transfers += (job.work_rate or 0)
 
         counters = {
             "memory_used_KB": 4 * self.space.num_used_pages,

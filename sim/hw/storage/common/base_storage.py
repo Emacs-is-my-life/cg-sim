@@ -18,7 +18,7 @@ class BaseStorage(BaseHardware):
     def log_counters(self) -> dict[str, Any]:
         total_transfers = 0
         for job in self.job_running:
-            total_transfers += job.work_rate
+            total_transfers += (job.work_rate or 0)
 
         counters = {
             "transfer_KBps": 1_000_000 * total_transfers

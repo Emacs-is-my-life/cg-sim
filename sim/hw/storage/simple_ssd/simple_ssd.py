@@ -6,6 +6,10 @@ from sim.hw.common import DataRegion
 from sim.hw.storage.common import BaseStorage
 
 
+def is_sorted_by_first(lst):
+    return all(lst[i][0] <= lst[i+1][0] for i in range(len(lst)-1))
+
+
 class SimpleSSD(BaseStorage):
     """
     Simple model of SSD.
@@ -25,12 +29,16 @@ class SimpleSSD(BaseStorage):
         # Load fixed_latency_micros
         fixed_latency_micros = float(args["fixed_latency_micros"])
         if fixed_latency_micros < 0:
-            raise ValueError(f"[Storage] Fixed latency cannot be: {fixed_latency_micros} micro-seconds")
+            raise ValueError(f"[Storage] {self.name}: Fixed latency cannot be: {fixed_latency_micros} micro-seconds")
         self.fixed_latency_micros = fixed_latency_micros
 
         # Load io performance curve
         read_io_curve_KBps: list[tuple[float, float]] = [(float(io_size), float(bandwidth)) for io_size, bandwidth in args["read_io_curve_KBps"]]
         write_io_curve_KBps: list[tuple[float, float]] = [(float(io_size), float(bandwidth)) for io_size, bandwidth in args["write_io_curve_KBps"]]
+
+        if not (is_sorted_by_first(read_io_curve_KBps) and is_sorted_by_first(write_io_curve_KBps)):
+            raise ValueError(f"[Storage] {self.name}: IO Curve is not ordered by IO size. Check config file again.")
+
         SimpleSSD._check_list_of_tuples(read_io_curve_KBps)
         SimpleSSD._check_list_of_tuples(write_io_curve_KBps)
 

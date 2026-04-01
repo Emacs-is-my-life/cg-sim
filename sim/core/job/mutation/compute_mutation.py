@@ -19,6 +19,9 @@ def begin_mutation(job: ComputeJob, sys: System) -> None:
 
     # 1. Mark node as running
     node.status = NodeStatus.RUNNING
+    # Clear binding regions (just in case)
+    job.input_regions = []
+    job.output_regions = []
 
     # 2. Regions holding input Tensors
     for i_tensor_id in node.input_tensors:
