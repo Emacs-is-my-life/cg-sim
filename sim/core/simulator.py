@@ -117,7 +117,7 @@ class Simulator:
         # Engine
         name = "Engine"
         sim_id.check_name(name)
-        self.engine = Engine(sim_id.get(), name, log, sys, sched)
+        self.engine = Engine(sim_id.get_id(), name, log, sys, sched)
         return
 
     def run(self):

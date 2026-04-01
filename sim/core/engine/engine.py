@@ -138,10 +138,14 @@ class Engine(SimObject):
             self.timestamp_now = job.timestamp_ETA
 
             # Handle fixed_latency of TransferJob
-            if isinstance(job, TransferJob):
+            if isinstance(job, TransferJob) and (job.fixed_latency_micros > 0.0):
                 if not job.bw_work_complete:
                     job.bw_work_complete = True
                     heapq.heappush(self.job_running, job)
+                else:
+                    # Fixed latency is handled, so retire this TransferJob
+                    job.end(self.log, self.sys, self.timestamp_now)
+                    retired_jobs.append(job)
             else:
                 job.end(self.log, self.sys, self.timestamp_now)
                 retired_jobs.append(job)
