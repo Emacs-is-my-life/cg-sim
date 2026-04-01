@@ -44,8 +44,8 @@ def end_log(job: TransferJob, log: Log) -> None:
 
     avg_rate = (1_000_000 * total_transfer) / (job.timestamp_end - job.timestamp_begin)
     args = {
-        "from_id": src0.id,
-        "to_id": dest0.id,
+        "from_id": src0.hw.id,
+        "to_id": dest0.hw.id,
         "from": src0.hw.name,
         "to": dest0.hw.name,
         "size_KB": total_transfer,

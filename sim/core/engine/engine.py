@@ -176,10 +176,10 @@ class Engine(SimObject):
         # Counter and States logging
         hw_affected = set(hw for job in retired_jobs for hw in job.running_on)
         for hw in hw_affected:
-            if self.log.level.value >= Level.COUNTER:
+            if self.log.level.value >= Level.COUNTER.value:
                 self.log.record(Log.counter(hw.id, "HW Counter", self.timestamp_now, hw.log_counters()))
 
-            if self.log.level.value >= Level.STATE:
+            if self.log.level.value >= Level.STATE.value:
                 self.log.record(Log.state(hw.id, "HW State", self.timestamp_now, hw.log_states()))
 
         return retired_jobs
