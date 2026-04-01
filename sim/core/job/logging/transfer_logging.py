@@ -29,7 +29,7 @@ def begin_log(job: TransferJob, log: Log) -> None:
 
 
 def end_log(job: TransferJob, log: Log) -> None:
-    batch: list[(DataRegion, DataRegion)] = job.batch
+    batch: list[tuple(DataRegion, DataRegion)] = job.batch
 
     src0, dest0 = batch[0]
     total_transfer = 0

@@ -70,7 +70,7 @@ class BaseJob(ABC):
         if self.work_rate is None or self.work_rate == 0:
             raise Exception(f"[Job] Job ID: {self.id}, work_rate is: {self.work_rate}")
 
-        self.work_done += min(self.work_rate * time_elapsed, self.work_total)
+        self.work_done = min(self.work_done + self.work_rate * time_elapsed, self.work_total)
         return
 
     def update_ETA(self, timestamp_now: float, new_work_rate: float | None = None) -> None:

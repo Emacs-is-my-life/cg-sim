@@ -17,7 +17,7 @@ class Vanilla(BaseScheduler):
     """
 
     def __init__(self, obj_id: int, name: str, log: Log, sys: System, args: dict[str, Any] | None = None):
-        super().__init__(obj_id, name, log, sys)
+        super().__init__(obj_id, name, log, sys, args)
         return
 
     def compile(self, trace: Trace) -> None:

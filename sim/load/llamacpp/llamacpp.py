@@ -1,10 +1,8 @@
-import yaml
 from pathlib import Path
 import networkx as nx
 from networkx.drawing.nx_agraph import read_dot
 import polars as pl
-import re
-from typing import Any
+
 
 from sim.core.trace import Node, TerminalNode, Tensor, Trace, TraceLoader
 

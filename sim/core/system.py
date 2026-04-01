@@ -29,7 +29,7 @@ class System:
     """
 
     def __init__(self, trace: Trace, hw: dict[str, BaseHardware]):
-        self.engine: Engine = None
+        self.engine: Engine | None = None
         self.trace: Trace = trace
         self.hw: dict[str, BaseHardware] = hw
         return

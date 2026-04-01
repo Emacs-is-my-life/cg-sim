@@ -9,7 +9,7 @@ def begin_mutation(job: TransferJob, sys: System) -> None:
     for hw in job.running_on:
         hw.run(job)
 
-    batch: list[(DataRegion, DataRegion)] = job.batch
+    batch: list[tuple(DataRegion, DataRegion)] = job.batch
     for src_region, dest_region in batch:
         # 0. Update Src Region
         src_region.access_status = DataRegionAccess.BEING_READ
@@ -28,7 +28,7 @@ def end_mutation(job: TransferJob, sys: System) -> None:
     for hw in job.running_on:
         hw.retire(job)
 
-    batch: list[(DataRegion, DataRegion)] = job.batch
+    batch: list[tuple(DataRegion, DataRegion)] = job.batch
     for src_region, dest_region in batch:
         # 0. Update Src Region
         src_region.access_count -= 1
