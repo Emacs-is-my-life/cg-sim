@@ -47,6 +47,24 @@ def assertion(job: TransferJob, sys: System) -> bool:
 
         # 3. Check if both are intended for the same tensor
         if src_region.tensor_id != dest_region.tensor_id:
+            args = {
+                "from": sys.engine.name,
+                "error": "Job Pre-Execution Assertion Failure",
+                "job_type": "TransferJob",
+                "msg": f"Src Tensor: {src_region.tensor_id}, Dest Tensor: {dest_region.tensor_id}"
+            }
+            sys.abort(args)
+            return False
+
+        # 4. Check src_size <= dest_size
+        if src_region.num_pages > dest_region.num_pages:
+            args = {
+                "from": sys.engine.name,
+                "error": "Job Pre-Execution Assertion Failure",
+                "job_type": "TransferJob",
+                "msg": f"Src size: {src_region.num_pages} pages, Dest Tensor: {dest_region.num_pages} pages."
+            }
+            sys.abort(args)
             return False
 
     return True

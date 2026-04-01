@@ -35,7 +35,7 @@ class DataRegion(ABC):
         self.tensor_id: int = tensor_id    # Data(tensor) stored in this region
 
         self.is_latest: bool = False       # Is this copy of tensor, up-to-date value?
-        self.is_ready: bool = False        # Is value ready to be used? (not in the middle of transfer)
+        self.is_ready: bool = False        # Is value ready to be used? (not unitialized, or in the middle of data transfer)
 
         self.access_status: DataRegionAccess = DataRegionAccess.IDLE
         self.access_count: int = 0         # How many jobs are accessing this region now?
