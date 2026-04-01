@@ -11,6 +11,10 @@ from sim.hw.storage.common import BaseStorage
 
 from sim.core.job import ComputeJob, ClaimJob, ReleaseJob, TransferJob
 
+from sim.core.job.assertion import claim_assertion, release_assertion
+from sim.core.job.mutation import claim_mutation, release_mutation
+from sim.core.job.logging import claim_log, release_log
+
 
 class System:
     """
@@ -21,11 +25,14 @@ class System:
 
     and API for scheduler
 
+    # Job: takes time to execute
     - compute()
-    - claim()
-    - find()     # This is not a job dispatch. Just a helper method.
-    - release()
     - transfer()
+
+    # Immediate Actions: returns to Scheduler immediately
+    - claim()
+    - release()
+    - find()
     """
 
     def __init__(self, trace: Trace, hw: dict[str, BaseHardware]):
@@ -39,10 +46,20 @@ class System:
         self.engine.submit(job)
         return job.id
 
-    def claim(self, hw: BaseMemory | BaseStorage, tensor: Tensor, page_idx_start: int = -1) -> uuid.UUID:
+    def claim(self, hw: BaseMemory | BaseStorage, tensor: Tensor, page_idx_start: int = -1) -> DataRegion:
         job = ClaimJob(hw, tensor, page_idx_start)
-        self.engine.submit(job)
-        return job.id
+        if not claim_assertion(job):
+            args = {
+                "from": self.engine.name,
+                "error": "Job Pre-Execution Assertion Failure",
+                "job_type": "ClaimJob",
+                "msg": f"Cannot claim a data region from {hw.name}."
+            }
+            self.abort(args)
+
+        claim_mutation(job, self)
+        claim_log(job, self.log)
+        return job.region
 
     def find(self, hw: BaseMemory | BaseStorage, tensor: Tensor | int) -> list[DataRegion]:
         tensor_id = tensor
@@ -52,10 +69,20 @@ class System:
         regions = hw.space.get_by_tensor_id(tensor_id)
         return regions
 
-    def release(self, region: DataRegion) -> uuid.UUID:
+    def release(self, region: DataRegion) -> None:
         job = ReleaseJob(region)
-        self.engine.submit(job)
-        return job.id
+        if not release_assertion(job):
+            args = {
+                "from": self.engine.name,
+                "error": "Job Pre-Execution Assertion Failure",
+                "job_type": "ReleaseJob",
+                "msg": f"Cannot release a data region from {region.hw.name}, access_status: {region.access_status.name}"
+            }
+            self.abort(args)
+
+        release_mutation(job, self)
+        release_log(job, self.log)
+        return
 
     def transfer(self, batch: list[tuple[DataRegion, DataRegion]]) -> uuid.UUID:
         job = TransferJob(batch)
