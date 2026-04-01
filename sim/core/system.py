@@ -46,7 +46,7 @@ class System:
         self.engine.submit(job)
         return job.id
 
-    def claim(self, hw: BaseMemory | BaseStorage, tensor: Tensor, page_idx_start: int = -1) -> DataRegion:
+    def claim(self, hw: BaseMemory | BaseStorage, tensor: Tensor, page_idx_start: int = -1) -> DataRegion | None:
         job = ClaimJob(hw, tensor, page_idx_start)
         if not claim_assertion(job):
             args = {
@@ -56,7 +56,9 @@ class System:
                 "msg": f"Cannot claim a data region from {hw.name}."
             }
             self.abort(args)
+            return None
 
+        job.timestamp_begin = self.engine.timestamp_now
         claim_mutation(job, self)
         claim_log(job, self.log)
         return job.region
@@ -79,7 +81,9 @@ class System:
                 "msg": f"Cannot release a data region from {region.hw.name}, access_status: {region.access_status.name}"
             }
             self.abort(args)
+            return
 
+        job.timestamp_begin = self.engine.timestamp_now
         release_mutation(job, self)
         release_log(job, self.log)
         return

@@ -16,6 +16,7 @@ def begin_mutation(job: ClaimJob, sys: System) -> None:
             "msg": f"Allocation: [{job.page_idx_start}, {job.page_idx_start+job.num_pages}) failed on {hw.name}."
         }
         sys.abort(args)
+        return
 
     job.region = region
     return
