@@ -28,14 +28,14 @@ class ComputeJob(BaseJob):
         begin_mutation(self, sys)
         return
 
-    def begin_log(self, log: Log, timestamp: float) -> None:
-        begin_log(self, log, timestamp)
+    def begin_log(self, log: Log) -> None:
+        begin_log(self, log)
         return
 
     def end_mut(self, sys: System) -> None:
         end_mutation(self, sys)
         return
 
-    def end_log(self, log: Log, timestamp: float) -> None:
-        end_log(self, log, timestamp)
+    def end_log(self, log: Log) -> None:
+        end_log(self, log)
         return

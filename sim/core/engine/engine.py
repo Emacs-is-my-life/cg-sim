@@ -12,12 +12,9 @@ from sim.hw.memory.common import BaseMemory
 from .update import update_running_jobs
 
 
-class SimStage(Enum):
-    """Simulation stage"""
-    COMPILE = auto()    # Scheduler modifies the compute graph
-    LAYOUT = auto()     # Scheduler places tensors in storage/memory
-    RUNTIME = auto()    # Scheduler makes runtime decisions
-    FINISHED = auto()
+class EngineSignal(Enum):
+    END_STAGE = auto()
+    ABORT = auto()
 
 
 class Engine(SimObject):
@@ -33,11 +30,13 @@ class Engine(SimObject):
         self.log = log
         self.sys = sys
         self.sys.engine = self
-
         self.sched = sched
 
+        # Signals
+        self.signal_end_stage: bool = False
+        self.signal_abort: bool = False
+
         # Simulation states
-        self.stage = SimStage.COMPILE   # Simulation Stage
         self.timestamp_now: float = 0   # Simulation time, in microseconds
         self.time_elapsed: float = 0    # Time elapsed between the last job finish and the current
 
@@ -54,6 +53,14 @@ class Engine(SimObject):
         self.job_waiting.append(job)
         return
 
+    def signal(self, signal: EngineSignal) -> None:
+        match signal:
+            case EngineSignal.END_STAGE:
+                self.signal_stage_end = True
+            case EngineSignal.ABORT:
+                self.signal_abort = True
+        return
+
     def run(self) -> None:
         self._compile()
         self._layout()
@@ -63,28 +70,53 @@ class Engine(SimObject):
 
     def _compile(self) -> None:
         self.sched.compile()
+
+        # Advance time a little bit
+        self.timestamp_now += 10
         return
 
     def _layout_forward(self) -> list[BaseJob]:
         retired_jobs: list[BaseJob] = []
 
-        # Turn off logging
-        self.log.on = False
-
         # Pop everything w/o advancing time
         while self.job_running:
             job = heapq.heappop(self.job_running)
+            if isinstance(job, ComputeJob):
+                raise Exception("[Engine] You cannot perform compute job in layout stage.")
+
             job.end(self.log, self.sys, self.timestamp_now)
             retired_jobs.append(job)
-
-        # Turn on logging
-        self.log.on = True
 
         return retired_jobs
 
     # TODO: Implement properly asserted _layout routine.
     def _layout(self) -> None:
-        self.sched.layout()
+        # Turn off logging in placement step
+        self.log.on = False
+
+        # TODO: Main Loop, implement signal job for signaling!
+        while not (self.signal_abort or (self.signal_end_stage and len(self.job_running) == 0 and len(self.job_waiting) == 0)):
+            retired_jobs = self._layout_forward()
+
+            # Scheduler Placement
+            self.sched.layout(retired_jobs)
+            while self.job_waiting:
+                job_w = self.job_waiting[0]
+                if job_w.is_runnable(self.sys):
+                    self.job_waiting.popleft()
+                    job_w.begin(self.log, self.sys, self.timestamp_now)
+                    self.job_running.append(job_w)
+                else:
+                    if len(self.job_running) == 0:
+                        raise Exception("[Engine] Deadlock detected.")
+                    else:
+                        break
+
+        # Turn on logging
+        self.log.on = True
+
+        # Advance time a little bit
+        self.timestamp_now += 10
         return
 
     def _runtime_forward(self) -> list[BaseJob]:
@@ -106,7 +138,7 @@ class Engine(SimObject):
         return retired_jobs
 
     def _runtime(self) -> None:
-        while True:
+        while not self.signal_abort:
             # Inspect retired jobs
             retired_jobs = self._runtime_forward()
             for job in retired_jobs:
@@ -139,7 +171,6 @@ class Engine(SimObject):
 
             # Update work_rate and ETA of running jobs
             update_running_jobs(self.sys, self.job_running, self.timestamp_now)
-
         return
 
     def _cleanup(self) -> None:

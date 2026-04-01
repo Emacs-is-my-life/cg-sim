@@ -3,7 +3,7 @@ import time
 import threading
 from pathlib import Path
 import orjson
-from enum import Enum
+from enum import Enum, auto
 from typing import Any
 
 
@@ -12,6 +12,13 @@ class TrackID(Enum):
     Event = 1
     Counter = 2
     State = 3
+
+
+class Level(Enum):
+    ENGINE = 0
+    EVENT = 1
+    COUNTER = 2
+    STATE = 3
 
 
 class Log:
@@ -38,18 +45,17 @@ class Log:
 
         # On/Off Switch
         self.on = True
-
-        # Set log level
-        """
-        log_level:
-        - 0: Log Engine, Event
-        - 1: + Log counter states
-        - 2: + Log all states
-        """
-        log_level = 0
+        # Set logging level
+        log_level = Level.EVENT
         if "log_level" in args:
-            log_level = int(args["log_level"])
-        self.log_level = log_level
+            _level = int(args["log_level"])
+            if _level == 1:
+                log_level = Level.EVENT
+            elif _level == 2:
+                log_level = Level.COUNTER
+            else:
+                log_level = Level.STATE
+        self.level = log_level
 
         # Set logging infrastructure
         self.log_queue = queue.Queue()
@@ -146,13 +152,13 @@ class Log:
 
         return
 
-    def record(self, log_event: dict, log_level: int = 0):
+    def record(self, log_event: dict, level: Level = Level.EVENT):
         """
         Other modules call this method to record a log event.
         This method is thread-safe.
         """
 
-        if self.on and (log_level <= self.log_level):
+        if self.on and level.value <= self.level.value:
             self.log_queue.put(log_event)
 
         return
@@ -227,6 +233,19 @@ class Log:
             "name": title,
             "ph": "E",
             "ts": timestamp,
+            "args": args if args is not None else {}
+        }
+
+    @staticmethod
+    def event_complete(obj_id: int, title: str, timestamp_start: float, duration: float, args: dict[str, Any] | None = None):
+        return {
+            "pid": TrackID.Event.value,
+            "tid": obj_id,
+            "cat": "Event",
+            "name": title,
+            "ph": "X",
+            "ts": timestamp_start,
+            "dur": duration,
             "args": args if args is not None else {}
         }
 

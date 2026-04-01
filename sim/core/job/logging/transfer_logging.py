@@ -3,32 +3,32 @@ from sim.core.job import TransferJob
 from sim.hw.common import DataRegion
 
 
-def begin_log(job: TransferJob, log: Log, timestamp: float) -> None:
-    batch: list[(DataRegion, DataRegion)] = job.batch
+def begin_log(job: TransferJob, log: Log) -> None:
+    # batch: list[(DataRegion, DataRegion)] = job.batch
 
-    src0, dest0 = batch[0]
-    total_transfer = 0
-    for src_region, dest_region in batch:
-        total_transfer += 4 * src_region.num_pages    # KB
+    # src0, dest0 = batch[0]
+    # total_transfer = 0
+    # for src_region, dest_region in batch:
+    #     total_transfer += 4 * src_region.num_pages    # KB
 
-    args = {
-        "from": src0.hw.name,
-        "to": dest0.hw.name,
-        "size_KB": total_transfer,
-    }
+    # args = {
+    #     "from": src0.hw.name,
+    #     "to": dest0.hw.name,
+    #     "size_KB": total_transfer,
+    # }
 
-    for hw in job.running_on:
-        log.record(Log.event_begin(
-            hw.id,
-            "TRANSFER_BEGIN",
-            timestamp,
-            args
-        ))
+    # for hw in job.running_on:
+    #     log.record(Log.event_begin(
+    #         hw.id,
+    #         "TRANSFER_BEGIN",
+    #         job.timestamp_begin,
+    #         args
+    #     ))
 
     return
 
 
-def end_log(job: TransferJob, log: Log, timestamp: float) -> None:
+def end_log(job: TransferJob, log: Log) -> None:
     batch: list[(DataRegion, DataRegion)] = job.batch
 
     src0, dest0 = batch[0]
@@ -42,11 +42,15 @@ def end_log(job: TransferJob, log: Log, timestamp: float) -> None:
         "size_KB": total_transfer,
     }
 
+    timestamp = job.timestamp_begin
+    duration = job.timestamp_end - job.timestamp_begin
+
     for hw in job.running_on:
-        log.record(Log.event_end(
+        log.record(Log.event_complete(
             hw.id,
-            "TRANSFER_END",
+            "TRANSFER_JOB",
             timestamp,
+            duration,
             args
         ))
 

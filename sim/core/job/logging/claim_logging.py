@@ -2,7 +2,7 @@ from sim.core.log import Log
 from sim.core.job import ClaimJob
 
 
-def begin_log(job: ClaimJob, log: Log, timestamp: float) -> None:
+def begin_log(job: ClaimJob, log: Log) -> None:
     args = {
         "page_idx_start": job.page_idx_start,
         "num_pages": job.num_pages,
@@ -12,13 +12,13 @@ def begin_log(job: ClaimJob, log: Log, timestamp: float) -> None:
     for hw in job.running_on:
         log.record(Log.event_instant(
             hw.id,
-            "DATA_REGION_CLAIMED",
-            timestamp,
+            "CLAIM_JOB",
+            job.timestamp_begin,
             args
         ))
 
     return
 
 
-def end_log(job: ClaimJob, log: Log, timestamp: float) -> None:
+def end_log(job: ClaimJob, log: Log) -> None:
     return
