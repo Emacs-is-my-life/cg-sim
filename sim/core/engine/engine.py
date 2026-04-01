@@ -63,12 +63,15 @@ class Engine(SimObject):
 
     def run(self) -> None:
         self.log.record(Log.engine(self.id, "COMPILE_STAGE_START", self.timestamp_now))
+        self.signal_end_stage: bool = False
         self._compile()
 
         self.log.record(Log.engine(self.id, "LAYOUT_STAGE_START", self.timestamp_now))
+        self.signal_end_stage: bool = False
         self._layout()
 
         self.log.record(Log.engine(self.id, "RUNTIME_STAGE_START", self.timestamp_now))
+        self.signal_end_stage: bool = False
         self._runtime()
 
         self._cleanup()
@@ -105,7 +108,7 @@ class Engine(SimObject):
         # Turn off logging in placement step
         self.log.on = False
 
-        while not (self.signal_abort or (self.signal_end_stage and len(self.job_running) == 0 and len(self.job_waiting) == 0)):
+        while not (self.signal_abort or self.signal_end_stage or (self.signal_end_stage and len(self.job_running) == 0 and len(self.job_waiting) == 0)):
             retired_jobs = self._layout_forward()
 
             # Scheduler Placement
