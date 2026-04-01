@@ -18,14 +18,29 @@ class Vanilla(BaseScheduler):
 
     def __init__(self, obj_id: int, name: str, log: Log, sys: System, args: dict[str, Any] | None = None):
         super().__init__(obj_id, name, log, sys, args)
+
+        """
+        Assumption: Vanila scheduler expects one of each:
+        - One compute unit
+        - One memory unit
+        - One storage unit
+        """
+        for hw in sys.hw.values:
+            if isinstance(hw, BaseCompute):
+                self.compute = hw
+            elif isinstance(hw, BaseMemory):
+                self.memory = hw
+            elif isinstance(hw, BaseStorage):
+                self.storage = hw
+
         return
 
     def compile(self, trace: Trace) -> None:
-        """No compilation"""
+        """Vanilla Scheduler won't do compilation."""
         return
 
     def layout(self, retired_jobs: list[BaseJob]) -> None:
-        pass
+        return
 
     def runtime(self, retired_jobs: list[BaseJob]) -> None:
-        pass
+        return
