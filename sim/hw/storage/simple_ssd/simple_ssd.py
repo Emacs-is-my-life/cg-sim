@@ -7,7 +7,7 @@ from sim.hw.storage.common import BaseStorage
 
 
 def is_sorted_by_first(lst):
-    return all(lst[i][0] <= lst[i+1][0] for i in range(len(lst)-1))
+    return all(lst[i][0] < lst[i+1][0] for i in range(len(lst)-1))
 
 
 class SimpleSSD(BaseStorage):

@@ -123,7 +123,7 @@ class MemorySpace:
     def release(self, free_region: MemoryRegion) -> None:
         """
         Release a MemoryRegion reserved for certain tensor,
-        freeing space for other tensors
+        freeing space for other tensors.
         """
         free_key = None
 

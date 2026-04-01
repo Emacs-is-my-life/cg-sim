@@ -12,7 +12,7 @@ def assertion(job: TransferJob, sys: System) -> bool:
         if not hw.can_run(job):
             return False
 
-    batch: list[tuple(DataRegion, DataRegion)] = job.batch
+    batch: list[tuple[DataRegion, DataRegion]] = job.batch
     src0, dest0 = batch[0]
     src_hw = src0.hw
     dest_hw = dest0.hw
