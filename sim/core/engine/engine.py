@@ -147,6 +147,11 @@ class Engine(SimObject):
 
         if self.job_running:
             job = heapq.heappop(self.job_running)
+            if job.timestamp_ETA == float("inf"):
+                # None of jobs in the queue are initialized properly, yet.
+                heapq.heappush(self.job_running, job)
+                return retired_jobs
+
             self.time_elapsed = job.timestamp_ETA - self.timestamp_now
             self.timestamp_now = job.timestamp_ETA
 
@@ -249,3 +254,11 @@ class Engine(SimObject):
         args = args if args is not None else {}
         self.log.record(Log.engine(self.id, "SIMULATION_ABORT", self.timestamp_now, args))
         return
+
+    def log_counters(self) -> dict[str, Any] | None:
+        """No counters to log"""
+        return None
+
+    def log_states(self) -> dict[str, Any] | None:
+        """No states to log"""
+        return None

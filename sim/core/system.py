@@ -49,7 +49,7 @@ class System:
 
     def claim(self, hw: BaseMemory | BaseStorage, tensor: Tensor, page_idx_start: int = -1) -> DataRegion | None:
         job = ClaimJob(hw, tensor, page_idx_start)
-        if not claim_assertion(job):
+        if not claim_assertion(job, self):
             args = {
                 "from": self.engine.name,
                 "error": "Job Pre-Execution Assertion Failure",
@@ -61,7 +61,7 @@ class System:
 
         job.timestamp_begin = self.engine.timestamp_now
         claim_mutation(job, self)
-        claim_log(job, self.log)
+        claim_log(job, self.engine.log)
         return job.region
 
     def find(self, hw: BaseMemory | BaseStorage, tensor: Tensor | int) -> list[DataRegion]:
@@ -74,7 +74,7 @@ class System:
 
     def release(self, region: DataRegion) -> None:
         job = ReleaseJob(region)
-        if not release_assertion(job):
+        if not release_assertion(job, self):
             args = {
                 "from": self.engine.name,
                 "error": "Job Pre-Execution Assertion Failure",
@@ -86,7 +86,7 @@ class System:
 
         job.timestamp_begin = self.engine.timestamp_now
         release_mutation(job, self)
-        release_log(job, self.log)
+        release_log(job, self.engine.log)
         return
 
     def transfer(self, batch: list[tuple[DataRegion, DataRegion]]) -> uuid.UUID:

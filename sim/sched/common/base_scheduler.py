@@ -32,3 +32,11 @@ class BaseScheduler(SimObject):
     @abstractmethod
     def runtime(self, retired_jobs: list[BaseJob]) -> None:
         pass
+
+    def log_counters(self) -> dict[str, Any] | None:
+        """No counters to log"""
+        return None
+
+    def log_states(self) -> dict[str, Any] | None:
+        """No states to log"""
+        return None

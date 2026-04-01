@@ -1,5 +1,5 @@
 import sys
-from hydra import initialize, compose
+from hydra import initialize_config_dir, compose
 from omegaconf import OmegaConf
 from pathlib import Path
 
@@ -15,7 +15,7 @@ from .init.scheduler import LOAD_SCHEDULER_CLASS
 
 
 def parse_config(config_file_path: str):
-    config_file_path = Path(config_file_path)
+    config_file_path = Path(config_file_path).resolve()
     config_file_dir = str(config_file_path.parent)
     config_file_name = config_file_path.stem
 
@@ -24,7 +24,7 @@ def parse_config(config_file_path: str):
 
     # Initialize Hydra
     cfg = None
-    with initialize(version_base=None, config_path=config_file_dir):
+    with initialize_config_dir(version_base=None, config_dir=config_file_dir):
         cfg = compose(config_name=config_file_name, overrides=overrides)
 
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)

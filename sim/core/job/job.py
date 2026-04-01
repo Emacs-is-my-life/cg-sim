@@ -25,9 +25,9 @@ class BaseJob(ABC):
         self.work_rate: float = 0   # Work being processed per microsecond
 
         # Timestamp
-        self.timestamp_begin: float | None = None  # Simulation time, that job started execution
-        self.timestamp_end: float | None = None    # Simulation time, that job ended execution
-        self.timestamp_ETA: float | None = None    # Simulation time, when job is expected to end
+        self.timestamp_begin: float | None = None        # Simulation time, that job started execution
+        self.timestamp_end: float | None = None          # Simulation time, that job ended execution
+        self.timestamp_ETA: float = float("inf")  # Simulation time, when job is expected to end
 
     def __lt__(self, other: "BaseJob") -> bool:
         my_ETA = self.timestamp_ETA if self.timestamp_ETA is not None else float("inf")

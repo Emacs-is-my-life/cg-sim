@@ -176,7 +176,7 @@ class Llamacpp(TraceLoader):
     def placement(self, trace: Trace, storage: BaseStorage) -> None:
         tensor_map = trace.tensor_map
 
-        for tensor in tensor_map:
+        for tensor in tensor_map.values():
             """
             Tensors are one of:
 
