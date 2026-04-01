@@ -556,7 +556,8 @@ def release(self, free_region: MemoryRegion) -> None:
 
 This keeps allocator contents and usage counters consistent.
 
-* TODO Storage model implementation mismatch bug
+* DONE Storage model implementation mismatch bug
+CLOSED: [2026-04-01 Wed 17:18]
 ** Summary
 The SSD model’s documented behavior says IO latency is ~fixed_latency + size / bandwidth~, but the implementation ignores fixed latency entirely and models only throughput. That creates a direct contradiction between documented hardware semantics and actual simulation results, especially for small IOs where fixed latency matters most.
 
@@ -617,7 +618,8 @@ for job in transfer_jobs:
 This keeps the current bandwidth model while making SSD timing match its own
 documented semantics.
 
-* TODO Trace loading and graph-validation correctness bugs
+* DONE Trace loading and graph-validation correctness bugs
+CLOSED: [2026-04-01 Wed 17:18]
 ** Summary
 The trace layer validates only a small subset of the invariants that runtime code assumes. It checks tensor references and that the last node is a terminal node, but it does not verify node-reference validity or parent/child consistency. The llama.cpp loader also hard-codes the number of steps instead of deriving it from input data or configuration. These issues make trace execution less trustworthy and less configurable than intended.
 

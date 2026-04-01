@@ -31,7 +31,7 @@ python main.py -i <path-to-input.yaml>
   - `cg-sim/core/log/`: In charge of logging simulator events and messages
   - `cg-sim/core/trace/`: Data structure that represents a workload(compute graph), which is a combination of Nodes and Tensors
   - `cg-sim/core/init/`: Initialization logic to import trace, intialize logger, hardwares and scheduler for simulation run 
-  - 'cg-sim/core/job/`: Represents jobs. Scheduler requests job, hardware models calculate how much would it take, then engine simulates time advance
+  - `cg-sim/core/job/`: Represents jobs. Scheduler requests job, hardware models calculate how much would it take, then engine simulates time advance
   - `cg-sim/core/engine/`: Core engine that interacts with hardware & scheduler, asserts actions they do, and processes discrete events
   
 ## Trace Importer
