@@ -42,7 +42,11 @@ def end_log(job: TransferJob, log: Log) -> None:
     for src_region, dest_region in batch:
         total_transfer += 4 * src_region.num_pages    # KB
 
-    avg_rate = (1_000_000 * total_transfer) / (job.timestamp_end - job.timestamp_begin)
+    avg_rate = float("inf")
+    duration = job.timestamp_end - job.timestamp_begin
+    if duration != float(0.0):
+        avg_rate = (1_000_000 * total_transfer) / duration
+
     args = {
         "from_id": src0.hw.id,
         "to_id": dest0.hw.id,

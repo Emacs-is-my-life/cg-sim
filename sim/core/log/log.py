@@ -97,7 +97,13 @@ class Log:
                 self._first_event = False
             else:
                 parts.append(",\n")
-            parts.append(orjson.dumps(log_event).decode())
+            # parts.append(orjson.dumps(log_event).decode())
+            try:
+                parts.append(orjson.dumps(log_event).decode())
+            except Exception as e:
+                print("[Log] Failed to serialize log event:")
+                print(repr(log_event))
+                raise
 
         self.file_ptr.write("".join(parts))
         self.file_ptr.flush()

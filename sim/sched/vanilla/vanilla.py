@@ -38,8 +38,10 @@ class Vanilla(BaseScheduler):
             elif isinstance(hw, BaseStorage):
                 self.storage = hw
 
-        self.avail_page_idx: int = 0
 
+        self.layout_invoked: bool = False
+
+        self.avail_page_idx: int = 0
         self.node_ids: list[int] = list(self.sys.trace.node_map.keys())
         self.last_job_id = None
 
@@ -50,6 +52,9 @@ class Vanilla(BaseScheduler):
         return
 
     def layout(self, retired_jobs: list[BaseJob]) -> None:
+        if self.layout_invoked:
+            return
+
         tensor_map = self.sys.trace.tensor_map
 
         # Check if memory size adequate to hold all tensors
@@ -70,8 +75,17 @@ class Vanilla(BaseScheduler):
         batch = []
         for tensor in tensor_map.values():
             mem_region = self.sys.claim(self.memory, tensor, self.avail_page_idx)
+            if mem_region is None:
+                args = {
+                    "from": self.name,
+                    "error": "LAYOUT_FAILURE",
+                    "msg": f"Failed to claim memory region: [{self.avail_page_idx}, {self.avail_page_idx + tensor.num_pages})"
+                }
+                self.sys.abort(args)
+                return
+
             self.avail_page_idx += tensor.num_pages
-            if tensor.args["tensor_type"] in ("INPUT", "WEIGHT"):
+            if tensor.args["tensor_type"] in ("INPUT", "WEIGHT", "LEAF", "KVCACHE"):
                 stor_region = self.sys.find(self.storage, tensor)[0]
                 batch.append((stor_region, mem_region))
 
@@ -81,6 +95,7 @@ class Vanilla(BaseScheduler):
 
         # End Layout stage
         self.sys.end_stage()
+        self.layout_invoked = True
         return
 
     def runtime(self, retired_jobs: list[BaseJob]) -> None:

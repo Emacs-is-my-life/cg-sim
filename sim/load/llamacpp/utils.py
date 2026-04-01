@@ -16,10 +16,18 @@ def get_tensor_type(label: str) -> str:
     if label.startswith("<x>"):
         if ".weight" in label:
             return "WEIGHT"
-        elif ("cache_k" in label) or ("cache_v" in label) or ("leaf" in label):
+        elif ("cache_k" in label) or ("cache_v" in label):
             return "KVCACHE"
+        elif "leaf" in label:
+            return "LEAF"
         elif "inp_embd" in label:
             return "INPUT"
+    elif ("cache_k" in label) or ("cache_v" in label):
+        return "KVCACHE"
+    elif "leaf" in label:
+        return "LEAF"
+    elif "inp_embd" in label:
+        return "INPUT"
     else:
         return "INTERMEDIATE"
 

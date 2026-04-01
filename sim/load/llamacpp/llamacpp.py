@@ -94,12 +94,14 @@ class Llamacpp(TraceLoader):
             # Parent is a Node (Control Dependency)
             if isinstance(parent, Node):
                 # Add Control Dependency
-                parent.add_child_node(child.id)
-                child.add_parent_node(parent.id)
 
-                # Add Data Dependency
-                for tensor_id in parent.output_tensors:
-                    child.add_input_tensor(tensor_id)
+                if parent.id != child.id:  # God fucking why!!!!!!!
+                    parent.add_child_node(child.id)
+                    child.add_parent_node(parent.id)
+
+                    # Add Data Dependency
+                    for tensor_id in parent.output_tensors:
+                        child.add_input_tensor(tensor_id)
 
             # Parent is a Tensor (Leaf, Data Dependency)
             else:
@@ -183,11 +185,13 @@ class Llamacpp(TraceLoader):
             - WEIGHT
             - KVCACHE
             - INPUT
+            - LEAF
             - INTERMEDIATE
+
             """
 
             tensor_type = tensor.args["tensor_type"]
-            if tensor_type in ("WEIGHT", "INPUT"):
+            if tensor_type in ("WEIGHT", "INPUT", "LEAF", "KVCACHE"):
                 # Place tensor in the storage device
                 stor_region = storage.space.claim(tensor.id, -1, tensor.num_pages)
                 stor_region.is_ready = True

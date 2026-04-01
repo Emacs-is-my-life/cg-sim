@@ -75,6 +75,9 @@ class Engine(SimObject):
         self.signal_end_stage: bool = False
         self._layout()
 
+        ## DEBUG
+        # self.log.record(Log.state(self.sys.trace.id, "TRACE_MAP", self.timestamp_now, self.sys.trace.log_states()))
+
         self.log.record(Log.engine(self.id, "RUNTIME_STAGE_START", self.timestamp_now))
         self.signal_end_stage: bool = False
         self._runtime()
@@ -113,7 +116,10 @@ class Engine(SimObject):
         # Turn off logging in placement step
         self.log.on = False
 
-        while not (self.signal_abort or self.signal_end_stage or (self.signal_end_stage and len(self.job_running) == 0 and len(self.job_waiting) == 0)):
+        while not (
+                self.signal_abort or
+                (self.signal_end_stage and len(self.job_running) == 0 and len(self.job_waiting) == 0)
+        ):
             retired_jobs = self._layout_forward()
 
             # Scheduler Placement
@@ -124,6 +130,10 @@ class Engine(SimObject):
                     self.job_waiting.popleft()
                     job_w.begin(self.log, self.sys, self.timestamp_now)
                     self.job_running.append(job_w)
+
+                    # Set their ETA to all NOW (immediately finish)
+                    for job in self.job_running:
+                        job.timestamp_ETA = self.timestamp_now
                 else:
                     if len(self.job_running) == 0:
                         args = {
@@ -213,8 +223,29 @@ class Engine(SimObject):
                     if len(self.job_running) == 0:
                         args = {
                             "from": self.name,
-                            "msg": "Deadlock detected."
+                            "msg": "Deadlock detected.",
+                            "job": None
                         }
+
+                        if self.job_waiting:
+                            job = self.job_waiting[0]
+                            if isinstance(job, ComputeJob):
+                                node = job.node
+                                args["job"] = {
+                                    "JOB_TYPE": "COMPUTE",
+                                    "node": {
+                                        "id": node.id,
+                                        "name": node.name,
+                                        "parent_nodes": node.parent_nodes,
+                                        "input_tensors": node.input_tensors,
+                                        "output_tensors": node.output_tensors
+                                    }
+                                }
+                            elif isinstance(job, TransferJob):
+                                args["job"] = {
+                                    "JOB_TYPE": "TRANSFER"
+                                }
+
                         self._log_abort(args)
                         self.signal_abort = True
 
@@ -229,14 +260,14 @@ class Engine(SimObject):
         args = {
             "simulation_success": str(not self.signal_abort),
             "simulation_time": self.timestamp_now,
-            "obj_id": {},
             "hardware": {
+                "book": [],
                 "memory": []
             }
         }
 
         for hw in self.sys.hw.values():
-            args["obj_id"][hw.id] = hw.name
+            args["hardware"]["book"] = {"id": hw.id, "name": hw.name}
 
         for hw in self.sys.hw.values():
             if isinstance(hw, BaseMemory):

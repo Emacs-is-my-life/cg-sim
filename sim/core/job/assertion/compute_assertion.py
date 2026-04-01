@@ -36,6 +36,7 @@ def assertion(job: ComputeJob, sys: System) -> bool:
         for i_mem_region in candidates:
             OK = i_mem_region.is_ready and i_mem_region.is_latest and \
                 (i_mem_region.access_status in (DataRegionAccess.IDLE, DataRegionAccess.BEING_READ))
+
             if OK:
                 FOUND = True
                 break

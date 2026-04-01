@@ -54,7 +54,8 @@ class Trace(SimObject):
         """Log its state according to logging format"""
 
         states = {
-            "nodes": []
+            "nodes": [],
+            "tensors": [] 
         }
 
         for _, node in self.node_map.items():
@@ -66,7 +67,16 @@ class Trace(SimObject):
                 "step": step,
                 "id": node.id,
                 "name": node.name,
-                "status": node.status.name
+                "parent_nodes": node.parent_nodes,
+                "input_tensors": node.input_tensors,
+                "output_tensors": node.output_tensors
+            })
+
+        for _, tensor in self.tensor_map.items():
+            states["tensors"].append({
+                "id": tensor.id,
+                "name": tensor.name,
+                "type": tensor.args["tensor_type"]
             })
 
         return states
