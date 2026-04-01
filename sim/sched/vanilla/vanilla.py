@@ -21,6 +21,7 @@ class Vanilla(BaseScheduler):
 
         """
         Assumption: Vanila scheduler expects one of each:
+
         - One compute unit
         - One memory unit
         - One storage unit
@@ -40,6 +41,20 @@ class Vanilla(BaseScheduler):
         return
 
     def layout(self, retired_jobs: list[BaseJob]) -> None:
+        tensor_map = self.sys.trace.tensor_map
+
+        # Check the memory size adequate
+        # - sum(tensor.num_pages in tensor_map) <= self.memory.space.num_total_pages
+        # - if not, call sys.abort() with args: {"from": self.name, "msg": "Total Tensor Size: {sum_tensor_pages} while Memory Size: {self.memory.space.num_total_pages}"}
+
+        # Load tensors one by one into Memory
+        # - Keep a avail_page_idx = 0, which tracks the first available page_idx in memory now
+        # Iterate over tensor in tensor_map
+        # if tensor_type = tensor.args["tensor_type"] is "INPUT" or "WEIGHT"
+        #   - find StorageRegion in self.storage by tensor.id
+        #   - Allocate MemoryRegion in self.memory with tensor.id and tensor.num_pages, then increment avail_page_idx
+        #   - 
+
         return
 
     def runtime(self, retired_jobs: list[BaseJob]) -> None:
