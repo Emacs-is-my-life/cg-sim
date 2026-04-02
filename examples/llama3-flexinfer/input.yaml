@@ -29,7 +29,7 @@ hardware:
     - name: "ram"
       type: "SimpleRAM"
       args:
-        memory_size_KB: 12582912    # 12 GB
+        memory_size_KB: 6442450944    # 6 GB
         memory_bandwidth_KBps: 512000000
 
   # Storage unit

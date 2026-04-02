@@ -70,7 +70,7 @@ class Engine(SimObject):
         self._compile()
 
         ## DEBUG ##
-        self.log.dump_trace(self.sys.trace)
+        # self.log.dump_trace(self.sys.trace)
 
         print("[Engine] Layout stage start")
         self.log.record(Log.engine(self.id, "LAYOUT_STAGE_START", self.timestamp_now))
