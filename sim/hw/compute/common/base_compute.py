@@ -40,11 +40,12 @@ class BaseCompute(BaseHardware):
 
         if self.job_running:
             job = self.job_running[0]
+            progress = 100 * (job.work_done / job.work_total) if job.work_total != 0.0 else 100
             node: Node = job.node
             states["computing_now"] = {
                 "id": node.id,
                 "name": node.name,
-                "progress": f"{100 * (job.work_done / job.work_total)} %",
+                "progress": f"{progress} %",
                 "args": node.args
             }
 

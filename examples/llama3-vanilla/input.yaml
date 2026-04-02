@@ -4,6 +4,7 @@
 logger:
   args:
     output_path: "sim_result.json"
+    log_level: 2             # Events, Counters
 
 # Trace(workload) loading
 trace:
@@ -39,7 +40,7 @@ hardware:
         fixed_latency_micros: 50
         # [<IO_size_in_KB>, <IO_bandwidth_in_KBps>]
         read_io_curve_KBps:
-          - [4, 80000]      # ~80 MB/s (IOPS-limited)
+          - [4, 80000]       # ~80 MB/s (IOPS-limited)
           - [8, 160000]
           - [16, 320000]
           - [32, 800000]
@@ -47,9 +48,9 @@ hardware:
           - [128, 3000000]
           - [256, 5000000]
           - [512, 6500000]
-          - [1024, 7000000] # ~7 GB/s plateau
+          - [1024, 7000000]  # ~7 GB/s plateau
         write_io_curve_KBps:
-          - [4, 60000]      # writes usually a bit slower
+          - [4, 60000]       # Writes usually a bit slower
           - [8, 120000]
           - [16, 250000]
           - [32, 600000]
@@ -57,7 +58,7 @@ hardware:
           - [128, 2200000]
           - [256, 3500000]
           - [512, 4500000]
-          - [1024, 5000000] # ~5 GB/s plateau
+          - [1024, 5000000]  # ~5 GB/s plateau
 
 # Scheduler configuration
 scheduler:

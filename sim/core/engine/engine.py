@@ -71,9 +71,6 @@ class Engine(SimObject):
         self.log.record(Log.engine(self.id, "LAYOUT_STAGE_START", self.timestamp_now))
         self._layout()
 
-        ## DEBUG
-        # self.log.record(Log.state(self.sys.trace.id, "TRACE_MAP", self.timestamp_now, self.sys.trace.log_states()))
-
         self.log.record(Log.engine(self.id, "RUNTIME_STAGE_START", self.timestamp_now))
         self._runtime()
 
@@ -186,19 +183,19 @@ class Engine(SimObject):
         # Add a bit of time, to make events not overlap
         self.timestamp_now += 0.001  # 1/1000 microsecond
 
-        # Counter and States logging
-        hw_affected = set(hw for job in retired_jobs for hw in job.running_on)
-        for hw in hw_affected:
-            if self.log.level.value >= Level.COUNTER.value:
-                self.log.record(Log.counter(hw.id, "HW Counter", self.timestamp_now, hw.log_counters()))
-
-            if self.log.level.value >= Level.STATE.value:
-                self.log.record(Log.state(hw.id, "HW State", self.timestamp_now, hw.log_states()))
-
         return retired_jobs
 
     def _runtime(self) -> None:
         while not self.signal_abort:
+            # Log Hardware Counters & States
+            running_hw = set(hw for job in self.job_running for hw in job.running_on)
+            for hw in running_hw:
+                if self.log.level.value >= Level.COUNTER.value:
+                    self.log.record(Log.counter(hw.id, "HW Counter", self.timestamp_now, hw.log_counters()))
+
+                if self.log.level.value >= Level.STATE.value:
+                    self.log.record(Log.state(hw.id, "HW State", self.timestamp_now, hw.log_states()))
+
             # Inspect retired jobs
             retired_jobs = self._runtime_forward()
             for job in retired_jobs:
