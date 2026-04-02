@@ -68,6 +68,9 @@ class Engine(SimObject):
         self.log.record(Log.engine(self.id, "COMPILE_STAGE_START", self.timestamp_now))
         self._compile()
 
+        ## DEBUG ##
+        self.log.dump_trace(self.sys.trace)
+
         self.log.record(Log.engine(self.id, "LAYOUT_STAGE_START", self.timestamp_now))
         self._layout()
 

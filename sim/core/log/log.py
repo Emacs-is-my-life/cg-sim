@@ -30,18 +30,30 @@ class Log:
     def __init__(self, args: dict, flush_period: float = 0.5):
         # Set log output file
         output_path = Path("./sim_run_result.json")
+        node_path = Path("./node_map.json")
+        tensor_path = Path("./tensor_map.json")
+
         if "output_path" in args:
             p = Path(args["output_path"])
             if not p.is_absolute():
-                p = Path(args["input_path"]).parent / p
+                dir_path = Path(args["input_path"]).parent
+                p = dir_path / p
+                node_path = dir_path / node_path
+                tensor_path = dir_path / tensor_path
 
             if p.suffix:
                 p.parent.mkdir(parents=True, exist_ok=True)
             else:
                 p.mkdir(parents=True, exist_ok=True)
                 p = p / Path("sim_run_result.json")
+                node_path = p / node_path
+                tensor_path = p / tensor_path
+
             output_path = p
+
         self.output_path = output_path
+        self.node_path = node_path
+        self.tensor_path = tensor_path
 
         # On/Off Switch
         self.on = True
@@ -97,13 +109,8 @@ class Log:
                 self._first_event = False
             else:
                 parts.append(",\n")
-            # parts.append(orjson.dumps(log_event).decode())
-            try:
-                parts.append(orjson.dumps(log_event).decode())
-            except Exception as e:
-                print("[Log] Failed to serialize log event:")
-                print(repr(log_event))
-                raise
+
+            parts.append(orjson.dumps(log_event, option=orjson.OPT_INDENT_2).decode().replace("  ", "\t"))
 
         self.file_ptr.write("".join(parts))
         self.file_ptr.flush()
@@ -167,6 +174,37 @@ class Log:
 
         if self.on and level.value <= self.level.value:
             self.log_queue.put(log_event)
+
+        return
+
+    def dump_trace(self, trace):
+        nodes = {"nodes": []}
+        tensors = {"tensors": []}
+
+        for node in trace.node_map.values():
+            nodes["nodes"].append({
+                "id": node.id,
+                "name": node.name,
+                "input_tensors": node.input_tensors,
+                "output_tensors": node.output_tensors,
+                "parent_nodes": node.parent_nodes,
+                "children_nodes": node.children_nodes
+            })
+
+        for tensor in trace.tensor_map.values():
+            tensor_type = tensor.args["tensor_type"] if "tensor_type" in tensor.args else ""
+            tensors["tensors"].append({
+                "id": tensor.id,
+                "name": tensor.name,
+                "tensor_type": tensor_type,
+                "size_bytes": tensor.size_bytes
+            })
+
+        with open(self.node_path, 'w') as f:
+            f.write(orjson.dumps(nodes, option=orjson.OPT_INDENT_2).decode().replace("  ", "\t"))
+
+        with open(self.tensor_path, 'w') as f:
+            f.write(orjson.dumps(tensors, option=orjson.OPT_INDENT_2).decode().replace("  ", "\t"))
 
         return
 
