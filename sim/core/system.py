@@ -101,6 +101,7 @@ class System:
         return
 
     def abort(self, args: dict[str, Any] | None = None) -> None:
+        print("[System] Abort called!")
         args = args if args is not None else {}
 
         self.engine._log_abort(args)

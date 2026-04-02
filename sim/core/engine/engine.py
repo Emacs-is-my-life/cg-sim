@@ -126,6 +126,27 @@ class Engine(SimObject):
         # Run all jobs
         while self.job_waiting:
             job_w = self.job_waiting[0]
+
+            ## DEBUG
+            if isinstance(job_w, ComputeJob):
+                print("Compute Job Hang")
+
+            if isinstance(job_w, TransferJob):
+                print("Transfer Job Hang")
+                batch = job_w.batch
+
+                src0, dest0 = batch[0]
+                args = {
+                    "from": src0.hw.name,
+                    "to": dest0.hw.name,
+                    "transfers": []
+                }
+
+                print(job_w.is_runnable(self.sys))
+
+                #for src_region, dest_region in batch:
+                #    print(f"src ID: {src_region.tensor_id} | dest ID: {dest_region.tensor_id}")
+
             if job_w.is_runnable(self.sys):
                 self.job_waiting.popleft()
                 job_w.begin(self.log, self.sys, self.timestamp_now)
@@ -141,7 +162,6 @@ class Engine(SimObject):
                 }
                 self._log_abort(args)
                 self.signal_abort = True
-
                 break
 
         # Retire all jobs
@@ -219,6 +239,10 @@ class Engine(SimObject):
             # Drain all runnable jobs from job_waiting to job_running, in FIFO manner
             while self.job_waiting:
                 job_w = self.job_waiting[0]
+
+                ## DEBUG 
+                self.log.record(Log.engine(self.id, "ENGINE_DEBUG", self.timestamp_now, job_w.begin_log()))
+
                 # Start runnable jobs
                 if job_w.is_runnable(self.sys):
                     self.job_waiting.popleft()

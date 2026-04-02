@@ -10,27 +10,6 @@ if TYPE_CHECKING:
 
 
 def begin_log(job: TransferJob, log: Log) -> None:
-    # batch: list[(DataRegion, DataRegion)] = job.batch
-
-    # src0, dest0 = batch[0]
-    # total_transfer = 0
-    # for src_region, dest_region in batch:
-    #     total_transfer += 4 * src_region.num_pages    # KB
-
-    # args = {
-    #     "from": src0.hw.name,
-    #     "to": dest0.hw.name,
-    #     "size_KB": total_transfer,
-    # }
-
-    # for hw in job.running_on:
-    #     log.record(Log.event_begin(
-    #         hw.id,
-    #         "TRANSFER_BEGIN",
-    #         job.timestamp_begin,
-    #         args
-    #     ))
-
     return
 
 

@@ -46,9 +46,9 @@ class Heap:
             return None
 
         # Check before first block
-        first_start, _ = self.allocs[0]
+        first_start, _, _ = self.allocs[0]
         if first_start >= tensor_size:
-            self.allocs.insert(0, (0, tensor_size, Tensor))
+            self.allocs.insert(0, (0, tensor_size, tensor))
             return self._idx(0)
 
         # Check gaps between blocks
@@ -64,7 +64,7 @@ class Heap:
                 return self._idx(gap_start)
 
         # Check after last block
-        last_start, last_size = self.allocs[-1]
+        last_start, last_size, _ = self.allocs[-1]
         end = last_start + last_size
 
         if self.cap - end >= tensor_size:
@@ -111,6 +111,21 @@ class FlexInfer(BaseScheduler):
             elif isinstance(hw, BaseStorage):
                 self.storage = hw
 
+        node_map = self.sys.trace.node_map
+        _layer_start_node_id = -1
+        _layer_end_node_id = -1
+        for node in node_map.values():
+            if "-0" in node.name:
+                _layer_start_node_id = node.id
+                break
+
+        for node in node_map.values():
+            if "-1" in node.name:
+                _layer_end_node_id = node.id
+                break
+
+        self.num_nodes_in_a_layer = _layer_end_node_id - _layer_start_node_id
+
         # Tensor information gather
         self.layers, self.tensor_layer_num, others_size_num_pages = categorize_tensors(sys.trace.tensor_map)
         attn_tensor_size = self.layers[0].attn[0].num_pages
@@ -121,6 +136,7 @@ class FlexInfer(BaseScheduler):
         memory_size = self.memory.space.num_total_pages
         minimum_size = self.prefetch_window * (3 * ffn_tensor_size + 2 * attn_tensor_size) + others_size_num_pages
         if memory_size < minimum_size:
+            print("[FlexInfer] Failed due to memory shortage.")
             args = {
                 "from": self.name,
                 "msg": f"Memory size is too small to run FlexInfer policy. {4 * minimum_size} KB required, have {4 * memory_size} KB."
@@ -151,6 +167,7 @@ class FlexInfer(BaseScheduler):
         self.heap: Heap = Heap(self.page_idx_heap_start, self.page_idx_heap_end)
 
         self.current_layer = 0
+        self.waiting_job_ids: set = set()
         return
 
     def compile(self, trace: Trace) -> None:
@@ -161,7 +178,7 @@ class FlexInfer(BaseScheduler):
         mem_region = self.sys.claim(self.memory, tensor, self.page_idx_heap_start)
         self.page_idx_heap_start += tensor.num_pages
         stor_region = self.sys.find(init_storage, tensor)[0]
-        return (mem_region, stor_region)
+        return (stor_region, mem_region)
 
     def layout(self, init_storage: BaseStorage) -> None:
         """
@@ -200,9 +217,12 @@ class FlexInfer(BaseScheduler):
                 else:
                     # Claim a memory region, and load tensor from the storage
                     mem_region = self.sys.claim(self.memory, tensor, self.page_idx_heap_start)
+                    if mem_region is None:
+                        print("[FlexInfer] mem_region is None!")
+
                     self.page_idx_heap_start += tensor.num_pages
                     stor_region = self.sys.find(init_storage, tensor)[0]
-                    others_batch.append((mem_region, stor_region))
+                    others_batch.append((stor_region, mem_region))
 
         # Pin Attn/FFN tensors
         pin_batch = []
@@ -214,7 +234,6 @@ class FlexInfer(BaseScheduler):
 
                 layer.attn[0].args["pin"] = True
                 pin_batch.append(self._build_payload(init_storage, layer.attn[0]))
-
         elif self.mode == FlexInferMode.MEMORY_INTERMEDIATE:
             num_pages_avail = (self.page_idx_heap_end - self.page_idx_heap_start) - self.must_reserve_pages
 
@@ -235,7 +254,6 @@ class FlexInfer(BaseScheduler):
                     if attn_idx < len(layer.attn):
                         layer.attn[attn_idx].args["pin"] = True
                         pin_batch.append(self._build_payload(init_storage, layer.attn[attn_idx]))
-
         elif self.mode == FlexInferMode.MEMROY_LIMITED:
             num_pages_avail = (self.page_idx_heap_end - self.page_idx_heap_start) - self.must_reserve_pages
 
@@ -278,9 +296,16 @@ class FlexInfer(BaseScheduler):
         return ids
 
     def runtime(self, retired_jobs: list[BaseJob]) -> None:
+        Forward = (len(self.waiting_job_ids) == 0)
+
         # Try to update current_layer number
         used_tensor_ids = set()
         for job in retired_jobs:
+            if job.id in self.waiting_job_ids:
+                self.waiting_job_ids.remove(job.id)
+                if not self.waiting_job_ids:
+                    Forward = True
+
             if isinstance(job, ComputeJob):
                 node = job.node
                 used_tensor_ids.update(node.input_tensors)
@@ -312,7 +337,17 @@ class FlexInfer(BaseScheduler):
                 mem_region = self.sys.find(self.memory, tensor_id)
                 if not mem_region:
                     alloc_page_idx = self.heap.alloc(tensor)
+                    if alloc_page_idx is None:
+                        args = {
+                            "from": self.name,
+                            "msg": "[FlexInfer] Failed to claim MemoryRegion for Dynamic Tensor"
+                        }
+                        self.sys.abort(args)
+                        return
+
                     mem_region = self.sys.claim(self.memory, tensor, alloc_page_idx)
+                    if mem_region is None:
+                        print("mem_region claim failed!")
                     stor_region = self.sys.find(self.storage, tensor)[0]
                     batch.append((stor_region, mem_region))
 
@@ -320,5 +355,20 @@ class FlexInfer(BaseScheduler):
         self.sys.transfer(batch)
 
         # Submit compute jobs
-        
+        if Forward:
+            node_map = self.sys.trace.node_map
+            todo_start = -1
+            for node in node_map.values():
+                if node.status == NodeStatus.TODO:
+                    todo_start = node.id
+                    break
+
+            self.waiting_job_ids.clear()
+            for node_id in range(todo_start, todo_start + self.num_nodes_in_a_layer):
+                if node_id not in node_map:
+                    continue
+
+                node = node_map[node_id]
+                job_id = self.sys.compute(self.compute, node)
+                self.waiting_job_ids.add(job_id)
         return
