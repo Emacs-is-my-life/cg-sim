@@ -147,21 +147,34 @@ class FlexInfer(BaseScheduler):
 
                 pin_batch.append(self._build_payload(init_storage, layer.attn[0]))
 
-        if self.mode == FlexInferMode.MEMORY_INTERMEDIATE:
+        elif self.mode == FlexInferMode.MEMORY_INTERMEDIATE:
             num_pages_avail = (self.page_idx_heap_end - self.page_idx_heap_start) - self.must_reserve_pages
 
-            # TODO: Implement
-            # Consider self.attn_tensor_size, self.ffn_tensor_size and num_pages_avail,
-            # 1. Try to pin FFN tensors in memory, in uniform manner (all layers have similar number of pinned FFN tensors)
-            # 2. If space is still available, pin Attn tensors as much as possible, in uniform manner
-            pass
-        if self.mode == FlexInferMode.MEMROY_LIMITED:
+            num_ffn_per_layer = min(3, num_pages_avail // (len(self.layers) * self.ffn_tensor_size))
+            num_pages_avail -= num_ffn_per_layer * len(self.layers) * self.ffn_tensor_size
+
+            for ffn_idx in range(num_ffn_per_layer):
+                for layer in self.layers:
+                    if ffn_idx < len(layer.ffn):
+                        pin_batch.append(self._build_payload(init_storage, layer.ffn[ffn_idx]))
+
+            num_attn_per_layer = min(2, num_pages_avail // (len(self.layers) * self.attn_tensor_size))
+            num_pages_avail -= num_attn_per_layer * len(self.layers) * self.attn_tensor_size
+
+            for attn_idx in range(num_attn_per_layer):
+                for layer in self.layers:
+                    if attn_idx < len(layer.attn):
+                        pin_batch.append(self._build_payload(init_storage, layer.attn[attn_idx]))
+        elif self.mode == FlexInferMode.MEMROY_LIMITED:
             num_pages_avail = (self.page_idx_heap_end - self.page_idx_heap_start) - self.must_reserve_pages
 
-            # TODO: Implement
-            # Consider self.attn_tensor_size, self.ffn_tensor_size and num_pages_avail,
-            # 1. Try to pin Attn tensors in memory, in uniform manner
-            pass
+            num_attn_per_layer = min(2, num_pages_avail // (len(self.layers) * self.attn_tensor_size))
+            num_pages_avail -= num_attn_per_layer * len(self.layers) * self.attn_tensor_size
+
+            for attn_idx in range(num_attn_per_layer):
+                for layer in self.layers:
+                    if attn_idx < len(layer.attn):
+                        pin_batch.append(self._build_payload(init_storage, layer.attn[attn_idx]))
 
         self.sys.transfer(others_batch + pin_batch)
         return
