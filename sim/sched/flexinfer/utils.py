@@ -33,6 +33,7 @@ def categorize_tensors(tensor_map: dict[int, Tensor]) -> tuple[list[Layer], dict
         match = layer_pattern.match(name)
         if tensor_type == "WEIGHT" and match is not None:
             n_this_layer = int(match.group(1))
+            tensor.args["layer"] = n_this_layer
             layer = layers[n_this_layer]
 
             if "attn_q" in name or "attn_output" in name:

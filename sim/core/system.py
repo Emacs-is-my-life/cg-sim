@@ -2,7 +2,7 @@ import uuid
 from typing import Any
 
 from sim.core.log import Log
-from sim.core.trace import Trace, Node, Tensor
+from sim.core.trace import Trace, Node, NodeStatus, Tensor
 from sim.core.engine import EngineSignal, Engine
 from sim.hw.common.base_hardware import BaseHardware
 from sim.hw.common.data_region import DataRegion
@@ -43,6 +43,7 @@ class System:
         return
 
     def compute(self, hw: BaseCompute, node: Node) -> uuid.UUID:
+        node.status = NodeStatus.WAITING
         job = ComputeJob(hw, node)
         self.engine.submit(job)
         return job.id

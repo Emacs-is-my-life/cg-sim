@@ -5,7 +5,7 @@ from typing import Any, TYPE_CHECKING
 
 from sim.sched.common import BaseScheduler
 from sim.core.log import Log
-from sim.core.trace import Trace, Tensor
+from sim.core.trace import Trace, Tensor, NodeStatus, Node
 from sim.core.job import BaseJob, ComputeJob, ClaimJob, ReleaseJob, TransferJob
 from sim.hw.compute.common import BaseCompute
 from sim.hw.memory.common import BaseMemory, MemoryRegion
@@ -21,6 +21,65 @@ class FlexInferMode(Enum):
     MEMORY_SUFFICIENT = auto()
     MEMORY_INTERMEDIATE = auto()
     MEMROY_LIMITED = auto()
+
+
+class Heap:
+    def __init__(self, page_start: int, page_end: int):
+        self.page_start = page_start
+        self.page_end = page_end
+        self.cap = self.page_end - self.page_start
+
+        self.allocs = []
+        return
+
+    def _idx(self, idx: int):
+        return self.page_start + idx
+
+    def alloc(self, tensor: Tensor) -> int | None:
+        tensor_size = tensor.num_pages
+
+        # First alloc
+        if not self.allocs:
+            if tensor_size <= self.cap:
+                self.allocs.append((0, tensor_size, tensor))
+                return self._idx(0)
+            return None
+
+        # Check before first block
+        first_start, _ = self.allocs[0]
+        if first_start >= tensor_size:
+            self.allocs.insert(0, (0, tensor_size, Tensor))
+            return self._idx(0)
+
+        # Check gaps between blocks
+        for i in range(len(self.allocs) - 1):
+            cur_start, cur_size, _ = self.allocs[i]
+            next_start, _, _ = self.allocs[i + 1]
+
+            gap_start = cur_start + cur_size
+            gap_size = next_start - gap_start
+
+            if gap_size >= tensor_size:
+                self.allocs.insert(i + 1, (gap_start, tensor_size, tensor))
+                return self._idx(gap_start)
+
+        # Check after last block
+        last_start, last_size = self.allocs[-1]
+        end = last_start + last_size
+
+        if self.cap - end >= tensor_size:
+            self.allocs.append((end, tensor_size, tensor))
+            return self._idx(end)
+
+        return None
+
+    def free(self, free_tensor: Tensor) -> bool:
+        for i, (start, tensor_size, tensor) in enumerate(self.allocs):
+            if tensor.id == free_tensor.id:
+                del self.allocs[i]
+                return True
+
+        return False
 
 
 class FlexInfer(BaseScheduler):
@@ -79,7 +138,7 @@ class FlexInfer(BaseScheduler):
             self.mode = FlexInferMode.MEMROY_LIMITED
             args["msg"] = f"FlexInfer Scheduler operating in MEMORY_LIMITED mode."
 
-        self.log(Log.engine(self.id, "SCHEDULER_MESSAGE", 0, args))
+        self.log.record(Log.engine(self.id, "SCHEDULER_MESSAGE", 0, args))
 
 
         self.attn_tensor_size = attn_tensor_size
@@ -88,7 +147,10 @@ class FlexInfer(BaseScheduler):
         self.must_reserve_pages = self.prefetch_window * (3 * ffn_tensor_size + 2 * attn_tensor_size)
 
         self.page_idx_heap_start = 0
-        self.page_idx_heap_end = self.memory.space.total_num_pages
+        self.page_idx_heap_end = self.memory.space.num_total_pages
+        self.heap: Heap = Heap(self.page_idx_heap_start, self.page_idx_heap_end)
+
+        self.current_layer = 0
         return
 
     def compile(self, trace: Trace) -> None:
@@ -122,11 +184,15 @@ class FlexInfer(BaseScheduler):
         """
 
         tensor_map = self.sys.trace.tensor_map
+        for tensor in tensor_map.values():
+            tensor.args["pin"] = False     # Initialize as False
+
         others_batch = []
         # Load/Claim All 'other' tensors in memory
-        for tensor_id, layer_num in self.tensor_layer_num:
+        for tensor_id, layer_num in self.tensor_layer_num.items():
             if layer_num == -1:
                 tensor = tensor_map[tensor_id]
+                tensor.args["pin"] = True
                 if tensor.args["tensor_type"] == "INTERMEDIATE":
                     # Claiming memory region is enough
                     self.sys.claim(self.memory, tensor, self.page_idx_heap_start)
@@ -143,8 +209,10 @@ class FlexInfer(BaseScheduler):
         if self.mode == FlexInferMode.MEMORY_SUFFICIENT:
             for layer in self.layers:     # For every layer,
                 for tensor in layer.ffn:  # Pin all FFN Tensors and one Attn Tensor
+                    tensor.args["pin"] = True
                     pin_batch.append(self._build_payload(init_storage, tensor))
 
+                layer.attn[0].args["pin"] = True
                 pin_batch.append(self._build_payload(init_storage, layer.attn[0]))
 
         elif self.mode == FlexInferMode.MEMORY_INTERMEDIATE:
@@ -156,6 +224,7 @@ class FlexInfer(BaseScheduler):
             for ffn_idx in range(num_ffn_per_layer):
                 for layer in self.layers:
                     if ffn_idx < len(layer.ffn):
+                        layer.ffn[ffn_idx].args["pin"] = True
                         pin_batch.append(self._build_payload(init_storage, layer.ffn[ffn_idx]))
 
             num_attn_per_layer = min(2, num_pages_avail // (len(self.layers) * self.attn_tensor_size))
@@ -164,7 +233,9 @@ class FlexInfer(BaseScheduler):
             for attn_idx in range(num_attn_per_layer):
                 for layer in self.layers:
                     if attn_idx < len(layer.attn):
+                        layer.attn[attn_idx].args["pin"] = True
                         pin_batch.append(self._build_payload(init_storage, layer.attn[attn_idx]))
+
         elif self.mode == FlexInferMode.MEMROY_LIMITED:
             num_pages_avail = (self.page_idx_heap_end - self.page_idx_heap_start) - self.must_reserve_pages
 
@@ -174,10 +245,80 @@ class FlexInfer(BaseScheduler):
             for attn_idx in range(num_attn_per_layer):
                 for layer in self.layers:
                     if attn_idx < len(layer.attn):
+                        layer.attn[attn_idx].args["pin"] = True
                         pin_batch.append(self._build_payload(init_storage, layer.attn[attn_idx]))
 
         self.sys.transfer(others_batch + pin_batch)
         return
 
+    def _find_layer_from_tensor(self, tensor_ids: list[int]) -> int | None:
+        tensor_map = self.sys.trace.tensor_map
+        layer = None
+        for tensor_id in tensor_ids:
+            tensor = tensor_map[tensor_id]
+            if "layer" in tensor.args:
+                _layer = tensor.args["layer"]
+                if layer is None or _layer < layer:
+                    layer = _layer
+
+        return layer
+
+    def _get_needed_tensor_ids(self) -> list[int]:
+        N_layers = len(self.layers)
+        will_be_used_tensors = set()
+        iter_layers = [(self.current_layer + i) % N_layers for i in range(self.prefetch_window)]
+        for i in iter_layers:
+            will_be_used_tensors.update(self.layers[i].attn)
+            will_be_used_tensors.update(self.layers[i].ffn)
+
+        ids = []
+        for tensor in will_be_used_tensors:
+            ids.append(tensor.id)
+
+        return ids
+
     def runtime(self, retired_jobs: list[BaseJob]) -> None:
+        # Try to update current_layer number
+        used_tensor_ids = set()
+        for job in retired_jobs:
+            if isinstance(job, ComputeJob):
+                node = job.node
+                used_tensor_ids.update(node.input_tensors)
+                used_tensor_ids.update(node.output_tensors)
+
+        used_tensor_ids = list(used_tensor_ids)
+        if used_tensor_ids:
+            current_layer = self._find_layer_from_tensor(used_tensor_ids)
+            if current_layer is not None:
+                self.current_layer = current_layer
+
+        needed_tensor_ids = self._get_needed_tensor_ids()
+        retire_tensor_ids = list(set(used_tensor_ids) - set(needed_tensor_ids))
+        tensor_map = self.sys.trace.tensor_map
+
+        # Release won't be needed tensors
+        for tensor_id in retire_tensor_ids:
+            tensor = tensor_map[tensor_id]
+            if not tensor.args["pin"]:
+                if self.heap.free(tensor):
+                    mem_region = self.sys.find(self.memory, tensor)[0]
+                    self.sys.release(mem_region)
+
+        # Load will-be-needed tensors
+        batch = []
+        for tensor_id in needed_tensor_ids:
+            tensor = tensor_map[tensor_id]
+            if not tensor.args["pin"]:       # Dynamic Tensor
+                mem_region = self.sys.find(self.memory, tensor_id)
+                if not mem_region:
+                    alloc_page_idx = self.heap.alloc(tensor)
+                    mem_region = self.sys.claim(self.memory, tensor, alloc_page_idx)
+                    stor_region = self.sys.find(self.storage, tensor)[0]
+                    batch.append((stor_region, mem_region))
+
+        # Prefetch Tensors from storage
+        self.sys.transfer(batch)
+
+        # Submit compute jobs
+        
         return
