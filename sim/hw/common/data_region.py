@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any
 from enum import Enum, auto
 from abc import ABC
 from typing import TYPE_CHECKING
@@ -32,7 +33,7 @@ class DataRegion(ABC):
     where tensor can reside.
     """
 
-    def __init__(self, hw: "BaseMemory | BaseStorage", num_pages: int, tensor_id: int):
+    def __init__(self, hw: "BaseMemory | BaseStorage", num_pages: int, tensor_id: int, args: dict[str, Any] | None = None):
         self.id: uuid.UUID = fastuuid.uuid4()
         self.hw: "BaseMemory | BaseStorage" = hw
         self.num_pages: int = num_pages
@@ -43,4 +44,5 @@ class DataRegion(ABC):
 
         self.access_status: DataRegionAccess = DataRegionAccess.IDLE
         self.access_count: int = 0         # How many jobs are accessing this region now?
+        self.args = args if args is not None else {}
         return
