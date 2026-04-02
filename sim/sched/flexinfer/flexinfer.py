@@ -32,6 +32,31 @@ class Heap:
         self.allocs = []
         return
 
+    def free_spans(self) -> list[tuple[int, int]]:
+        spans = []
+
+        if not self.allocs:
+            return [(0, self.cap)]
+
+        first_start, _, _ = self.allocs[0]
+        if first_start > 0:
+            spans.append((0, first_start))
+
+        for i in range(len(self.allocs) - 1):
+            cur_start, cur_size, _ = self.allocs[i]
+            next_start, _, _ = self.allocs[i + 1]
+            gap_start = cur_start + cur_size
+            gap_end = next_start
+            if gap_start < gap_end:
+                spans.append((gap_start, gap_end))
+
+        last_start, last_size, _ = self.allocs[-1]
+        end = last_start + last_size
+        if end < self.cap:
+            spans.append((end, self.cap))
+
+        return spans
+
     def _idx(self, idx: int):
         return self.page_start + idx
 
@@ -164,10 +189,11 @@ class FlexInfer(BaseScheduler):
 
         self.page_idx_heap_start = 0
         self.page_idx_heap_end = self.memory.space.num_total_pages
-        self.heap: Heap = Heap(self.page_idx_heap_start, self.page_idx_heap_end)
 
         self.current_layer = 0
         self.waiting_job_ids: set = set()
+
+        self.heap: Heap = None
         return
 
     def compile(self, trace: Trace) -> None:
@@ -267,6 +293,7 @@ class FlexInfer(BaseScheduler):
                         pin_batch.append(self._build_payload(init_storage, layer.attn[attn_idx]))
 
         self.sys.transfer(others_batch + pin_batch)
+        self.heap: Heap = Heap(self.page_idx_heap_start, self.page_idx_heap_end)
         return
 
     def _find_layer_from_tensor(self, tensor_ids: list[int]) -> int | None:
@@ -318,7 +345,11 @@ class FlexInfer(BaseScheduler):
                 self.current_layer = current_layer
 
         needed_tensor_ids = self._get_needed_tensor_ids()
-        retire_tensor_ids = list(set(used_tensor_ids) - set(needed_tensor_ids))
+        tensors_in_heap = []
+        for _, _, tensor in self.heap.allocs:
+            tensors_in_heap.append(tensor.id)
+
+        retire_tensor_ids = list(set(tensors_in_heap) - set(needed_tensor_ids))
         tensor_map = self.sys.trace.tensor_map
 
         # Release won't be needed tensors
@@ -340,7 +371,9 @@ class FlexInfer(BaseScheduler):
                     if alloc_page_idx is None:
                         args = {
                             "from": self.name,
-                            "msg": "[FlexInfer] Failed to claim MemoryRegion for Dynamic Tensor"
+                            "msg": "[FlexInfer] Failed to claim MemoryRegion for Dynamic Tensor",
+                            "heap free spans": self.heap.free_spans(),
+                            "requested tensor size": tensor.num_pages
                         }
                         self.sys.abort(args)
                         return
@@ -352,7 +385,8 @@ class FlexInfer(BaseScheduler):
                     batch.append((stor_region, mem_region))
 
         # Prefetch Tensors from storage
-        self.sys.transfer(batch)
+        if batch:
+            self.sys.transfer(batch)
 
         # Submit compute jobs
         if Forward:
