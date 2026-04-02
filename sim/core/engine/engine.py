@@ -65,15 +65,18 @@ class Engine(SimObject):
         return
 
     def run(self) -> None:
+        print("[Engine] Compile stage start")
         self.log.record(Log.engine(self.id, "COMPILE_STAGE_START", self.timestamp_now))
         self._compile()
 
         ## DEBUG ##
         self.log.dump_trace(self.sys.trace)
 
+        print("[Engine] Layout stage start")
         self.log.record(Log.engine(self.id, "LAYOUT_STAGE_START", self.timestamp_now))
         self._layout()
 
+        print("[Engine] Runtime stage start")
         self.log.record(Log.engine(self.id, "RUNTIME_STAGE_START", self.timestamp_now))
         self._runtime()
 
