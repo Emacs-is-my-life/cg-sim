@@ -64,4 +64,4 @@ hardware:
 scheduler:
   type: "FlexInfer"
   args:
-    foo: "bar"
+    prefetch_window: 3
