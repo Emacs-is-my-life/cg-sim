@@ -15,6 +15,8 @@ class BaseStorage(BaseHardware):
         from .storage_region import StorageSpace
         self.space: StorageSpace = StorageSpace(self)
         self.fixed_latency_micros: float = 0.0
+
+        self.initial_placement: bool = False
         return
 
     def log_counters(self) -> dict[str, Any]:

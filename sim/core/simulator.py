@@ -87,12 +87,14 @@ class Simulator:
             storage_hw = StorageClass(sim_id.get_id(), name, log, s_cfg["args"])
             hw[storage_hw.name] = storage_hw
 
-        # Place initial tensors into the memory
+        # Place initial tensors into the Storage device
         if not hw:
             raise Exception("[Engine] There is no storage device available!")
         else:
             # Place tensors in the very first storage device
-            trace_loader.placement(trace, hw[next(iter(hw))])
+            init_storage = hw[next(iter(hw))]
+            trace_loader.placement(trace, init_storage)
+            init_storage.initial_placement = True
 
         # Memory
         for m_cfg in cfg["hardware"]["memory"]:

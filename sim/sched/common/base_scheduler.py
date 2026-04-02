@@ -7,6 +7,7 @@ from sim.core.sim_object import SimObject
 from sim.core.trace import Trace
 from sim.core.log import Log
 from sim.core.job import BaseJob
+from sim.hw.storage.common import BaseStorage
 
 if TYPE_CHECKING:
     from sim.core.system import System
@@ -26,7 +27,7 @@ class BaseScheduler(SimObject):
         pass
 
     @abstractmethod
-    def layout(self, retired_jobs: list[BaseJob]) -> None:
+    def layout(self, init_storage: BaseStorage) -> None:
         pass
 
     @abstractmethod

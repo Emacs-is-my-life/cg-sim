@@ -28,7 +28,7 @@ class FlexGen(BaseScheduler):
         """No compilation"""
         return
 
-    def layout(self, retired_jobs: list[BaseJob]) -> None:
+    def layout(self, init_storage: BaseStorage) -> None:
         pass
 
     def runtime(self, retired_jobs: list[BaseJob]) -> None:

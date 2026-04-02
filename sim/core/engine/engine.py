@@ -10,6 +10,7 @@ from sim.core.log import Log, TrackID, Level
 from sim.core.trace import TerminalNode
 from sim.core.job import BaseJob, ComputeJob, TransferJob
 from sim.hw.memory.common import BaseMemory
+from sim.hw.storage.common import BaseStorage
 
 from .update import update_running_jobs
 
@@ -38,7 +39,6 @@ class Engine(SimObject):
         self.sched = sched
 
         # Signals
-        self.signal_end_stage: bool = False
         self.signal_abort: bool = False
 
         # Simulation states
@@ -60,26 +60,21 @@ class Engine(SimObject):
 
     def signal(self, signal: EngineSignal) -> None:
         match signal:
-            case EngineSignal.END_STAGE:
-                self.signal_end_stage = True
             case EngineSignal.ABORT:
                 self.signal_abort = True
         return
 
     def run(self) -> None:
         self.log.record(Log.engine(self.id, "COMPILE_STAGE_START", self.timestamp_now))
-        self.signal_end_stage: bool = False
         self._compile()
 
         self.log.record(Log.engine(self.id, "LAYOUT_STAGE_START", self.timestamp_now))
-        self.signal_end_stage: bool = False
         self._layout()
 
         ## DEBUG
         # self.log.record(Log.state(self.sys.trace.id, "TRACE_MAP", self.timestamp_now, self.sys.trace.log_states()))
 
         self.log.record(Log.engine(self.id, "RUNTIME_STAGE_START", self.timestamp_now))
-        self.signal_end_stage: bool = False
         self._runtime()
 
         self._cleanup()
@@ -98,10 +93,10 @@ class Engine(SimObject):
         # Pop everything w/o advancing time
         while self.job_running:
             job = self.job_running.pop(0)
-            if isinstance(job, ComputeJob):
+            if not isinstance(job, TransferJob):
                 args = {
                     "from": self.name,
-                    "msg": "Cannot execute compute job in layout phase."
+                    "msg": "Scheduler can only submit TransferJob in layout phase."
                 }
                 self._log_abort(args)
                 self.signal_abort = True
@@ -116,36 +111,40 @@ class Engine(SimObject):
         # Turn off logging in placement step
         self.log.on = False
 
-        while not (
-                self.signal_abort or
-                (self.signal_end_stage and len(self.job_running) == 0 and len(self.job_waiting) == 0)
-        ):
-            retired_jobs = self._layout_forward()
+        # Find the storage hardware with initial placement
+        init_storage = None
+        for hw in self.sys.hw.values():
+            if isinstance(hw, BaseStorage) and hw.initial_placement:
+                init_storage = hw
 
-            # Scheduler Placement
-            self.sched.layout(retired_jobs)
-            while self.job_waiting:
-                job_w = self.job_waiting[0]
-                if job_w.is_runnable(self.sys):
-                    self.job_waiting.popleft()
-                    job_w.begin(self.log, self.sys, self.timestamp_now)
-                    self.job_running.append(job_w)
+        # Scheduler Placement
+        self.sched.layout(init_storage)
 
-                    # Set their ETA to all NOW (immediately finish)
-                    for job in self.job_running:
-                        job.timestamp_ETA = self.timestamp_now
-                else:
-                    if len(self.job_running) == 0:
-                        args = {
-                            "from": self.name,
-                            "msg": "Deadlock detected."
-                        }
-                        self._log_abort(args)
-                        self.signal_abort = True
+        # Run all jobs
+        while self.job_waiting:
+            job_w = self.job_waiting[0]
+            if job_w.is_runnable(self.sys):
+                self.job_waiting.popleft()
+                job_w.begin(self.log, self.sys, self.timestamp_now)
+                self.job_running.append(job_w)
 
-                    break
+                # Set their ETA to all NOW (immediately finish)
+                for job in self.job_running:
+                    job.timestamp_ETA = self.timestamp_now
+            else:
+                args = {
+                    "from": self.name,
+                    "msg": "Deadlock detected."
+                }
+                self._log_abort(args)
+                self.signal_abort = True
 
-        # Turn on logging
+                break
+
+        # Retire all jobs
+        self._layout_forward()
+
+        # Turn logging back on
         self.log.on = True
 
         # Advance time a little bit
