@@ -19,7 +19,8 @@ from .utils import categorize_tensors
 
 class FlexInferMode(Enum):
     MEMORY_SUFFICIENT = auto()
-    MEMORY_INTERMEDIATE = auto()
+    MEMORY_INTERMEDIATE_2 = auto()
+    MEMORY_INTERMEDIATE_1 = auto()
     MEMROY_LIMITED = auto()
 
 
@@ -169,12 +170,15 @@ class FlexInfer(BaseScheduler):
             sys.abort(args)
 
         args = {"from": self.name, "msg": ""}
-        if (memory_size > (3 * num_layers * ffn_tensor_size + 2 * num_layers * attn_tensor_size) + others_size_num_pages):
+        if (memory_size > (3 * ffn_tensor_size + 2 * attn_tensor_size) * num_layers + others_size_num_pages):
             self.mode = FlexInferMode.MEMORY_SUFFICIENT
             args["msg"] = f"FlexInfer Scheduler operating in MEMORY_SUFFICIENT mode."
-        elif (memory_size > num_layers * ffn_tensor_size + others_size_num_pages):
-            self.mode = FlexInferMode.MEMORY_INTERMEDIATE
-            args["msg"] = f"FlexInfer Scheduler operating in MEMORY_INTERMEDIATE mode."
+        elif (memory_size > (2 * ffn_tensor_size) * num_layers + others_size_num_pages):
+            self.mode = FlexInferMode.MEMORY_INTERMEDIATE_2
+            args["msg"] = f"FlexInfer Scheduler operating in MEMORY_INTERMEDIATE_2 mode."
+        elif (memory_size > (1 * ffn_tensor_size) * num_layers + others_size_num_pages):
+            self.mode = FlexInferMode.MEMORY_INTERMEDIATE_1
+            args["msg"] = f"FlexInfer Scheduler operating in MEMORY_INTERMEDIATE_1 mode."
         else:
             self.mode = FlexInferMode.MEMROY_LIMITED
             args["msg"] = f"FlexInfer Scheduler operating in MEMORY_LIMITED mode."
@@ -185,7 +189,7 @@ class FlexInfer(BaseScheduler):
         self.attn_tensor_size = attn_tensor_size
         self.ffn_tensor_size = ffn_tensor_size
 
-        self.must_reserve_pages = self.prefetch_window * (3 * ffn_tensor_size + 2 * attn_tensor_size)
+        self.must_reserve_pages = (self.prefetch_window+1) * (3 * ffn_tensor_size + 2 * attn_tensor_size)
 
         self.page_idx_heap_start = 0
         self.page_idx_heap_end = self.memory.space.num_total_pages
@@ -253,44 +257,54 @@ class FlexInfer(BaseScheduler):
         # Pin Attn/FFN tensors
         pin_batch = []
         if self.mode == FlexInferMode.MEMORY_SUFFICIENT:
-            for layer in self.layers:     # For every layer,
-                for tensor in layer.ffn:  # Pin all FFN Tensors and one Attn Tensor
-                    tensor.args["pin"] = True
-                    pin_batch.append(self._build_payload(init_storage, tensor))
+            # For all layer, pin all FFN
+            for layer in self.layers:
+                for ffn in layer.ffn:
+                    ffn.args["pin"] = True
+                    pin_batch.append(self._build_payload(init_storage, ffn))
+        elif self.mode == FlexInferMode.MEMORY_INTERMEDIATE_2:
+            # For all layer, pin two FFN
+            for layer in self.layers:
+                for ffn_idx in range(2):
+                    layer.ffn[ffn_idx].args["pin"] = True
+                    pin_batch.append(self._build_payload(init_storage, layer.ffn[ffn_idx]))
+        elif self.mode == FlexInferMode.MEMORY_INTERMEDIATE_1:
+            # For all layer, pin one FFN
+            for layer in self.layers:
+                layer.ffn[0].args["pin"] = True
+                pin_batch.append(self._build_payload(init_storage, layer.ffn[0]))
 
-                layer.attn[0].args["pin"] = True
-                pin_batch.append(self._build_payload(init_storage, layer.attn[0]))
-        elif self.mode == FlexInferMode.MEMORY_INTERMEDIATE:
-            num_pages_avail = (self.page_idx_heap_end - self.page_idx_heap_start) - self.must_reserve_pages
+        # Try to pin ATTN every layer as much as possible
+        num_pages_avail = (self.page_idx_heap_end - self.page_idx_heap_start) - self.must_reserve_pages
+        num_attn_per_layer = min(2, num_pages_avail // (len(self.layers) * self.attn_tensor_size))
+        for attn_idx in range(num_attn_per_layer):
+            for layer in self.layers:
+                if attn_idx < len(layer.attn):
+                    layer.attn[attn_idx].args["pin"] = True
+                    pin_batch.append(self._build_payload(init_storage, layer.attn[attn_idx]))
 
-            num_ffn_per_layer = min(3, num_pages_avail // (len(self.layers) * self.ffn_tensor_size))
-            num_pages_avail -= num_ffn_per_layer * len(self.layers) * self.ffn_tensor_size
+        # Try to pin ATTN weights as much as possible
+        num_pages_avail = (self.page_idx_heap_end - self.page_idx_heap_start) - self.must_reserve_pages
+        its_over = False
+        for layer in self.layers:
+            for attn in layer.attn:
+                if not attn.args["pin"] and num_pages_avail > self.attn_tensor_size:
+                    attn.args["pin"] = True
+                    pin_batch.append(self._build_payload(init_storage, attn))
+                    num_pages_avail = (self.page_idx_heap_end - self.page_idx_heap_start) - self.must_reserve_pages
+                else:
+                    its_over = True
+                    break
 
-            for ffn_idx in range(num_ffn_per_layer):
-                for layer in self.layers:
-                    if ffn_idx < len(layer.ffn):
-                        layer.ffn[ffn_idx].args["pin"] = True
-                        pin_batch.append(self._build_payload(init_storage, layer.ffn[ffn_idx]))
+            if its_over:
+                break
 
-            num_attn_per_layer = min(2, num_pages_avail // (len(self.layers) * self.attn_tensor_size))
-            num_pages_avail -= num_attn_per_layer * len(self.layers) * self.attn_tensor_size
-
-            for attn_idx in range(num_attn_per_layer):
-                for layer in self.layers:
-                    if attn_idx < len(layer.attn):
-                        layer.attn[attn_idx].args["pin"] = True
-                        pin_batch.append(self._build_payload(init_storage, layer.attn[attn_idx]))
-        elif self.mode == FlexInferMode.MEMROY_LIMITED:
-            num_pages_avail = (self.page_idx_heap_end - self.page_idx_heap_start) - self.must_reserve_pages
-
-            num_attn_per_layer = min(2, num_pages_avail // (len(self.layers) * self.attn_tensor_size))
-            num_pages_avail -= num_attn_per_layer * len(self.layers) * self.attn_tensor_size
-
-            for attn_idx in range(num_attn_per_layer):
-                for layer in self.layers:
-                    if attn_idx < len(layer.attn):
-                        layer.attn[attn_idx].args["pin"] = True
-                        pin_batch.append(self._build_payload(init_storage, layer.attn[attn_idx]))
+        args = {
+            "page_idx_heap_start": self.page_idx_heap_start,
+            "page_idx_heap_end": self.page_idx_heap_end,
+            "heap_size_num_pages": (self.page_idx_heap_end - self.page_idx_heap_start)
+        }
+        self.log.record(Log.engine(self.id, "SCHEDULER_MESSAGE", 0, args))
 
         self.sys.transfer(others_batch + pin_batch)
         self.heap: Heap = Heap(self.page_idx_heap_start, self.page_idx_heap_end)
