@@ -32,8 +32,15 @@ def end_log(job: TransferJob, log: Log) -> None:
         "from": src0.hw.name,
         "to": dest0.hw.name,
         "size_KB": total_transfer,
-        "transfer_KBps": avg_rate
+        "transfer_KBps": avg_rate,
+        "batch": []
     }
+
+    for src_region, _ in batch:
+        tensor_id = src_region.tensor_id
+        args["batch"].append({
+            "tensor_id": tensor_id,
+        })
 
     timestamp = job.timestamp_begin
     duration = job.timestamp_end - job.timestamp_begin

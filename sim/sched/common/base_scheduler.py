@@ -5,7 +5,7 @@ from typing import Any, TYPE_CHECKING
 
 from sim.core.sim_object import SimObject
 from sim.core.trace import Trace
-from sim.core.log import Log
+from sim.core.log import Log, TrackID
 from sim.core.job import BaseJob
 from sim.hw.storage.common import BaseStorage
 
@@ -20,6 +20,8 @@ class BaseScheduler(SimObject):
         super().__init__(obj_id, name, log)
         self.sys: System = sys
         self.args: dict[str, Any] = args if args is not None else {}
+
+        self.log.record(Log.subtrack(TrackID.Engine, self.id, "Scheduler"))
         return
 
     @abstractmethod

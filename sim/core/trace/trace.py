@@ -43,7 +43,7 @@ class Trace(SimObject):
         self.node_map: dict[int, Node] = node_map
         self.tensor_map: dict[int, Tensor] = tensor_map
 
-        self.log.record(Log.subtrack(TrackID.State, self.id, self.name))
+        self.log.record(Log.subtrack(TrackID.Engine, self.id, self.name))
         return
 
     def log_counters(self) -> dict[str, Any] | None:

@@ -129,7 +129,7 @@ class Log:
         return
 
     def _create_tracks(self):
-        self.record(Log.track(TrackID.Engine, "Engine"))
+        self.record(Log.track(TrackID.Engine, "Simulation"))
         self.record(Log.track(TrackID.Event, "Event"))
         self.record(Log.track(TrackID.Counter, "Counter"))
         self.record(Log.track(TrackID.State, "State"))
@@ -177,7 +177,7 @@ class Log:
 
         return
 
-    def dump_trace(self, trace):
+    def get_trace_log(self, trace) -> (dict[str, Any], dict[str, Any]):
         nodes = {"nodes": []}
         tensors = {"tensors": []}
 
@@ -185,10 +185,14 @@ class Log:
             nodes["nodes"].append({
                 "id": node.id,
                 "name": node.name,
-                "input_tensors": node.input_tensors,
-                "output_tensors": node.output_tensors,
-                "parent_nodes": node.parent_nodes,
-                "children_nodes": node.children_nodes
+                "control_deps": {
+                    "parent_nodes": node.parent_nodes,
+                    "children_nodes": node.children_nodes
+                },
+                "data_deps": {
+                    "input_tensors": node.input_tensors,
+                    "output_tensors": node.output_tensors
+                }
             })
 
         for tensor in trace.tensor_map.values():
@@ -197,16 +201,10 @@ class Log:
                 "id": tensor.id,
                 "name": tensor.name,
                 "tensor_type": tensor_type,
-                "size_bytes": tensor.size_bytes
+                "size_KB": 4 * tensor.num_pages
             })
 
-        with open(self.node_path, 'w') as f:
-            f.write(orjson.dumps(nodes, option=orjson.OPT_INDENT_2).decode().replace("  ", "\t"))
-
-        with open(self.tensor_path, 'w') as f:
-            f.write(orjson.dumps(tensors, option=orjson.OPT_INDENT_2).decode().replace("  ", "\t"))
-
-        return
+        return nodes, tensors
 
     @staticmethod
     def track(track: TrackID, name: str):

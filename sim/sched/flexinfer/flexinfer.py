@@ -4,7 +4,7 @@ from enum import Enum, auto
 from typing import Any, TYPE_CHECKING
 
 from sim.sched.common import BaseScheduler
-from sim.core.log import Log
+from sim.core.log import Log, TrackID
 from sim.core.trace import Trace, Tensor, NodeStatus, Node
 from sim.core.job import BaseJob, ComputeJob, ClaimJob, ReleaseJob, TransferJob
 from sim.hw.compute.common import BaseCompute

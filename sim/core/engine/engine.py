@@ -50,7 +50,7 @@ class Engine(SimObject):
         self.job_running: list[BaseJob] = []
 
         # Create subtracks for logging
-        self.log.record(Log.subtrack(TrackID.Engine, self.id, self.name))
+        self.log.record(Log.subtrack(TrackID.Engine, self.id, "Engine"))
         return
 
     # Public Interfaces
@@ -69,8 +69,10 @@ class Engine(SimObject):
         self.log.record(Log.engine(self.id, "COMPILE_STAGE_START", self.timestamp_now))
         self._compile()
 
-        ## DEBUG ##
-        # self.log.dump_trace(self.sys.trace)
+        # node_map and tensor_map dump
+        arg_nodes, arg_tensors = self.log.get_trace_log(self.sys.trace)
+        self.log.record(Log.engine(self.sys.trace.id, "NODES", self.timestamp_now, arg_nodes))
+        self.log.record(Log.engine(self.sys.trace.id, "TENSORS", self.timestamp_now, arg_tensors))
 
         print("[Engine] Layout stage start")
         self.log.record(Log.engine(self.id, "LAYOUT_STAGE_START", self.timestamp_now))
