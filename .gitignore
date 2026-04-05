@@ -1,5 +1,6 @@
 # Temporary
 tmp/
+exp/
 
 # Python
 __pycache__/
