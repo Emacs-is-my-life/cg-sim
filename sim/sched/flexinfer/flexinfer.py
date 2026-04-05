@@ -160,7 +160,20 @@ class FlexInfer(BaseScheduler):
 
         # Check operation mode
         memory_size = self.memory.space.num_total_pages
-        minimum_size = self.prefetch_window * (3 * ffn_tensor_size + 2 * attn_tensor_size) + others_size_num_pages
+
+        cost_sufficient = others_size_num_pages + num_layers * (3 * ffn_tensor_size + 2 * attn_tensor_size)
+        cost_intermediate_2 = (
+            others_size_num_pages
+            + num_layers * (2 * ffn_tensor_size)
+            + self.prefetch_window * (1 * ffn_tensor_size + 2 * attn_tensor_size)
+        )
+        cost_intermediate_1 = (
+            others_size_num_pages
+            + num_layers * (1 * ffn_tensor_size)
+            + self.prefetch_window * (2 * ffn_tensor_size + 2 * attn_tensor_size)
+        )
+        minimum_size = others_size_num_pages + self.prefetch_window * (3 * ffn_tensor_size + 2 * attn_tensor_size)
+
         if memory_size < minimum_size:
             print("[FlexInfer] Failed due to memory shortage.")
             args = {
@@ -170,26 +183,25 @@ class FlexInfer(BaseScheduler):
             sys.abort(args)
 
         args = {"from": self.name, "msg": ""}
-        if (memory_size > (3 * ffn_tensor_size + 2 * attn_tensor_size) * num_layers + others_size_num_pages):
+        if memory_size >= cost_sufficient:
             self.mode = FlexInferMode.MEMORY_SUFFICIENT
-            args["msg"] = f"FlexInfer Scheduler operating in MEMORY_SUFFICIENT mode."
-        elif (memory_size > (2 * ffn_tensor_size) * num_layers + others_size_num_pages):
+            args["msg"] = "FlexInfer Scheduler operating in MEMORY_SUFFICIENT mode."
+        elif memory_size >= cost_intermediate_2:
             self.mode = FlexInferMode.MEMORY_INTERMEDIATE_2
-            args["msg"] = f"FlexInfer Scheduler operating in MEMORY_INTERMEDIATE_2 mode."
-        elif (memory_size > (1 * ffn_tensor_size) * num_layers + others_size_num_pages):
+            args["msg"] = "FlexInfer Scheduler operating in MEMORY_INTERMEDIATE_2 mode."
+        elif memory_size >= cost_intermediate_1:
             self.mode = FlexInferMode.MEMORY_INTERMEDIATE_1
-            args["msg"] = f"FlexInfer Scheduler operating in MEMORY_INTERMEDIATE_1 mode."
+            args["msg"] = "FlexInfer Scheduler operating in MEMORY_INTERMEDIATE_1 mode."
         else:
             self.mode = FlexInferMode.MEMROY_LIMITED
-            args["msg"] = f"FlexInfer Scheduler operating in MEMORY_LIMITED mode."
+            args["msg"] = "FlexInfer Scheduler operating in MEMORY_LIMITED mode."
 
         self.log.record(Log.engine(self.id, "SCHEDULER_MESSAGE", 0, args))
-
 
         self.attn_tensor_size = attn_tensor_size
         self.ffn_tensor_size = ffn_tensor_size
 
-        self.must_reserve_pages = (self.prefetch_window+1) * (3 * ffn_tensor_size + 2 * attn_tensor_size)
+        self.must_reserve_pages = 0
 
         self.page_idx_heap_start = 0
         self.page_idx_heap_end = self.memory.space.num_total_pages
@@ -209,6 +221,37 @@ class FlexInfer(BaseScheduler):
         self.page_idx_heap_start += tensor.num_pages
         stor_region = self.sys.find(init_storage, tensor)[0]
         return (stor_region, mem_region)
+
+    def _dynamic_pages_for_window(self, start_layer: int, window_size: int | None = None) -> int:
+        window = self.prefetch_window if window_size is None else window_size
+        total = 0
+        N_layers = len(self.layers)
+
+        for offset in range(window):
+            layer = self.layers[(start_layer + offset) % N_layers]
+            for tensor in layer.attn:
+                if not tensor.args["pin"]:
+                    total += tensor.num_pages
+            for tensor in layer.ffn:
+                if not tensor.args["pin"]:
+                    total += tensor.num_pages
+
+        return total
+
+    def _max_dynamic_pages_over_all_windows(self, window_size: int | None = None) -> int:
+        if not self.layers:
+            return 0
+        return max(self._dynamic_pages_for_window(i, window_size) for i in range(len(self.layers)))
+
+    def _can_pin_tensor(self, tensor: Tensor) -> bool:
+        tensor.args["pin"] = True
+        try:
+            required_dynamic_pages = self._max_dynamic_pages_over_all_windows()
+        finally:
+            tensor.args["pin"] = False
+
+        remaining_pages = self.page_idx_heap_end - (self.page_idx_heap_start + tensor.num_pages)
+        return remaining_pages >= required_dynamic_pages
 
     def layout(self, init_storage: BaseStorage) -> None:
         """
@@ -274,39 +317,65 @@ class FlexInfer(BaseScheduler):
                 layer.ffn[0].args["pin"] = True
                 pin_batch.append(self._build_payload(init_storage, layer.ffn[0]))
 
-        # Try to pin ATTN every layer as much as possible
-        num_pages_avail = (self.page_idx_heap_end - self.page_idx_heap_start) - self.must_reserve_pages
-        num_attn_per_layer = min(2, num_pages_avail // (len(self.layers) * self.attn_tensor_size))
-        for attn_idx in range(num_attn_per_layer):
+        # Try to pin ATTN every layer as much as possible (up to two), with per-tensor dynamic feasibility check
+        for attn_idx in range(2):
             for layer in self.layers:
-                if attn_idx < len(layer.attn):
-                    layer.attn[attn_idx].args["pin"] = True
-                    pin_batch.append(self._build_payload(init_storage, layer.attn[attn_idx]))
+                if attn_idx >= len(layer.attn):
+                    continue
 
-        # Try to pin ATTN weights as much as possible
-        num_pages_avail = (self.page_idx_heap_end - self.page_idx_heap_start) - self.must_reserve_pages
+                attn = layer.attn[attn_idx]
+                if attn.args["pin"]:
+                    continue
+
+                if self._can_pin_tensor(attn):
+                    attn.args["pin"] = True
+                    pin_batch.append(self._build_payload(init_storage, attn))
+
+        # Try to pin remaining ATTN weights as much as possible, with per-tensor dynamic feasibility check
         its_over = False
         for layer in self.layers:
             for attn in layer.attn:
-                if not attn.args["pin"] and num_pages_avail > self.attn_tensor_size:
-                    attn.args["pin"] = True
-                    pin_batch.append(self._build_payload(init_storage, attn))
-                    num_pages_avail = (self.page_idx_heap_end - self.page_idx_heap_start) - self.must_reserve_pages
-                else:
-                    its_over = True
-                    break
+                if not attn.args["pin"]:
+                    num_pages_avail = self.page_idx_heap_end - self.page_idx_heap_start
+                    if num_pages_avail >= attn.num_pages and self._can_pin_tensor(attn):
+                        attn.args["pin"] = True
+                        pin_batch.append(self._build_payload(init_storage, attn))
+                    else:
+                        its_over = True
+                        break
 
             if its_over:
                 break
 
-        args = {
-            "page_idx_heap_start": self.page_idx_heap_start,
-            "page_idx_heap_end": self.page_idx_heap_end,
-            "heap_size_num_pages": (self.page_idx_heap_end - self.page_idx_heap_start)
-        }
-        self.log.record(Log.engine(self.id, "SCHEDULER_MESSAGE", 0, args))
+        self.must_reserve_pages = self._max_dynamic_pages_over_all_windows()
+
+        required_dynamic_pages = self._max_dynamic_pages_over_all_windows()
+        heap_cap_pages = self.page_idx_heap_end - self.page_idx_heap_start
+        if required_dynamic_pages > heap_cap_pages:
+            self.sys.abort({
+                "from": self.name,
+                "msg": "[FlexInfer] Layout produced insufficient heap for dynamic working set.",
+                "required_dynamic_pages": required_dynamic_pages,
+                "heap_cap_pages": heap_cap_pages,
+                "page_idx_heap_start": self.page_idx_heap_start,
+                "page_idx_heap_end": self.page_idx_heap_end,
+            })
+            return
 
         self.sys.transfer(others_batch + pin_batch)
+
+        total_memory_pages = self.memory.space.num_total_pages
+        pinned_memory_pages = self.page_idx_heap_start
+        heap_space_pages = self.page_idx_heap_end - self.page_idx_heap_start
+
+        self.log.record(Log.engine(self.id, "SCHEDULER_MESSAGE", 0, {
+            "from": self.name,
+            "msg": "FlexInfer layout memory summary.",
+            "total_memory_pages": total_memory_pages,
+            "pinned_memory_pages": pinned_memory_pages,
+            "heap_space_pages": heap_space_pages,
+        }))
+
         self.heap: Heap = Heap(self.page_idx_heap_start, self.page_idx_heap_end)
         return
 
@@ -322,17 +391,24 @@ class FlexInfer(BaseScheduler):
 
         return layer
 
+    def _heap_used_pages(self) -> int:
+        return sum(num_pages for _, num_pages, _ in self.heap.allocs)
+
     def _get_needed_tensor_ids(self) -> list[int]:
         N_layers = len(self.layers)
-        will_be_used_tensors = set()
-        iter_layers = [(self.current_layer + i) % N_layers for i in range(self.prefetch_window)]
-        for i in iter_layers:
-            will_be_used_tensors.update(self.layers[i].attn)
-            will_be_used_tensors.update(self.layers[i].ffn)
-
         ids = []
-        for tensor in will_be_used_tensors:
-            ids.append(tensor.id)
+        seen = set()
+
+        for offset in range(self.prefetch_window):
+            layer = self.layers[(self.current_layer + offset) % N_layers]
+            for tensor in layer.attn:
+                if tensor.id not in seen:
+                    seen.add(tensor.id)
+                    ids.append(tensor.id)
+            for tensor in layer.ffn:
+                if tensor.id not in seen:
+                    seen.add(tensor.id)
+                    ids.append(tensor.id)
 
         return ids
 
@@ -363,8 +439,25 @@ class FlexInfer(BaseScheduler):
         for _, _, tensor in self.heap.allocs:
             tensors_in_heap.append(tensor.id)
 
-        retire_tensor_ids = list(set(tensors_in_heap) - set(needed_tensor_ids))
+        needed_dynamic_tensor_ids = []
+        needed_dynamic_pages = 0
+        resident_needed_dynamic_tensor_ids = []
+        missing_needed_dynamic_tensor_ids = []
+        missing_needed_dynamic_pages = 0
+
         tensor_map = self.sys.trace.tensor_map
+        for tensor_id in needed_tensor_ids:
+            tensor = tensor_map[tensor_id]
+            if not tensor.args["pin"]:
+                needed_dynamic_tensor_ids.append(tensor_id)
+                needed_dynamic_pages += tensor.num_pages
+                if tensor_id in tensors_in_heap:
+                    resident_needed_dynamic_tensor_ids.append(tensor_id)
+                else:
+                    missing_needed_dynamic_tensor_ids.append(tensor_id)
+                    missing_needed_dynamic_pages += tensor.num_pages
+
+        retire_tensor_ids = list(set(tensors_in_heap) - set(needed_tensor_ids))
 
         # Release won't be needed tensors
         for tensor_id in retire_tensor_ids:
@@ -386,8 +479,29 @@ class FlexInfer(BaseScheduler):
                         args = {
                             "from": self.name,
                             "msg": "[FlexInfer] Failed to claim MemoryRegion for Dynamic Tensor",
-                            "heap free spans": self.heap.free_spans(),
-                            "requested tensor size": tensor.num_pages
+                            "current_layer": self.current_layer,
+                            "prefetch_window": self.prefetch_window,
+                            "heap": {
+                                "page_idx_heap_start": self.page_idx_heap_start,
+                                "page_idx_heap_end": self.page_idx_heap_end,
+                                "cap_pages": self.heap.cap,
+                                "used_pages": self._heap_used_pages(),
+                                "free_pages": self.heap.cap - self._heap_used_pages(),
+                                "free_spans": self.heap.free_spans(),
+                            },
+                            "tensor": {
+                                "id": tensor.id,
+                                "name": tensor.name,
+                                "requested_tensor_size": tensor.num_pages,
+                                "pin": tensor.args["pin"],
+                                "layer": tensor.args.get("layer"),
+                            },
+                            "needed_tensor_ids": needed_tensor_ids,
+                            "needed_dynamic_tensor_ids": needed_dynamic_tensor_ids,
+                            "needed_dynamic_pages": needed_dynamic_pages,
+                            "missing_needed_dynamic_tensor_ids": missing_needed_dynamic_tensor_ids,
+                            "missing_needed_dynamic_pages": missing_needed_dynamic_pages,
+                            "resident_tensor_ids_in_heap": tensors_in_heap,
                         }
                         self.sys.abort(args)
                         return
