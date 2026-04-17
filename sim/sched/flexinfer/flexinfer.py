@@ -161,7 +161,7 @@ class FlexInfer(BaseScheduler):
         # Check operation mode
         memory_size = self.memory.space.num_total_pages
 
-        cost_sufficient = others_size_num_pages + num_layers * (3 * ffn_tensor_size + 2 * attn_tensor_size)
+        cost_sufficient = others_size_num_pages + num_layers * (3 * ffn_tensor_size + attn_tensor_size)
         cost_intermediate_2 = (
             others_size_num_pages
             + num_layers * (2 * ffn_tensor_size)
@@ -367,14 +367,36 @@ class FlexInfer(BaseScheduler):
         total_memory_pages = self.memory.space.num_total_pages
         pinned_memory_pages = self.page_idx_heap_start
         heap_space_pages = self.page_idx_heap_end - self.page_idx_heap_start
+        unpinned_attn_tensor_count = sum(
+            1
+            for layer in self.layers
+            for tensor in layer.attn
+            if not tensor.args["pin"]
+        )
+
+        unpinned_ffn_tensor_count = sum(
+            1
+            for layer in self.layers
+            for tensor in layer.ffn
+            if not tensor.args["pin"]
+        )
+
+        unpinned_tensor_count = unpinned_attn_tensor_count + unpinned_ffn_tensor_count
+
+        self.log.on = True
 
         self.log.record(Log.engine(self.id, "SCHEDULER_MESSAGE", 0, {
             "from": self.name,
-            "msg": "FlexInfer layout memory summary.",
+            "msg": "FlexInfer Memory Layout Summary.",
             "total_memory_pages": total_memory_pages,
             "pinned_memory_pages": pinned_memory_pages,
             "heap_space_pages": heap_space_pages,
+            "unpinned_tensor_count": unpinned_tensor_count,
+            "unpinned_attn_tensor_count": unpinned_attn_tensor_count,
+            "unpinned_ffn_tensor_count": unpinned_ffn_tensor_count,
         }))
+
+        self.log.on = False
 
         self.heap: Heap = Heap(self.page_idx_heap_start, self.page_idx_heap_end)
         return

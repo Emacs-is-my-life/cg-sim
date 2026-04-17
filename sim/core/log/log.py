@@ -36,10 +36,10 @@ class Log:
         if "output_path" in args:
             p = Path(args["output_path"])
             if not p.is_absolute():
-                dir_path = Path(args["input_path"]).parent
-                p = dir_path / p
-                node_path = dir_path / node_path
-                tensor_path = dir_path / tensor_path
+                base_path = Path.cwd()
+                p = base_path / p
+                node_path = base_path / node_path
+                tensor_path = base_path / tensor_path
 
             if p.suffix:
                 p.parent.mkdir(parents=True, exist_ok=True)
