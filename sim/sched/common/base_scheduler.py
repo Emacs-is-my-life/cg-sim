@@ -21,8 +21,16 @@ class BaseScheduler(SimObject):
         self.sys: System = sys
         self.args: dict[str, Any] = args if args is not None else {}
 
-        self.log.record(Log.subtrack(TrackID.Engine, self.id, "Scheduler"))
+        self.log.record(Log.subtrack(TrackID.Event, self.id, self.name))
+        self.log.record(Log.subtrack(TrackID.Counter, self.id, self.name))
+        self.log.record(Log.subtrack(TrackID.State, self.id, self.name))
         return
+
+    def log(self, args: dict[str, Any] | None = None):
+        if args is None:
+            return
+        else:
+            self.log.event_instant(self.id, "SCHEDULER_DECISION", self.sys.engine.timestamp_now, args)
 
     @abstractmethod
     def compile(self, trace: Trace) -> None:

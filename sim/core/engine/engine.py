@@ -11,6 +11,7 @@ from sim.core.trace import TerminalNode
 from sim.core.job import BaseJob, ComputeJob, TransferJob
 from sim.hw.memory.common import BaseMemory
 from sim.hw.storage.common import BaseStorage
+from sim.sched.common import BaseScheduler
 
 from .update import update_running_jobs
 
@@ -28,8 +29,7 @@ class Engine(SimObject):
     Engine is central point of simulation.
     """
 
-    # TODO: polish type annotation(sys: System, sched: BaseScheduler)
-    def __init__(self, obj_id: int, name: str, log: Log, sys: System, sched: Any):
+    def __init__(self, obj_id: int, name: str, log: Log, sys: System, sched: BaseScheduler):
         super().__init__(obj_id, name, log)
 
         # Key Objects
