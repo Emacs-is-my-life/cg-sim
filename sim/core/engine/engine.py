@@ -55,6 +55,7 @@ class Engine(SimObject):
 
     # Public Interfaces
     def submit(self, job: BaseJob) -> None:
+        job.life.timestamp_enqueued = self.timestamp_now
         self.job_waiting.append(job)
         return
 
@@ -210,6 +211,9 @@ class Engine(SimObject):
                 if isinstance(job, ComputeJob) and isinstance(job.node, TerminalNode):
                     return
 
+                # Handling Job Lifecycle Dependent Logging
+                # TODO
+
             # Update progress
             for job in self.job_running:
                 job.update_progress(self.time_elapsed)
@@ -221,11 +225,14 @@ class Engine(SimObject):
             while self.job_waiting:
                 job_w = self.job_waiting[0]
 
-                ## DEBUG
+                # Mark its head arrivale time if not set
+                if job_w.life.timestamp_head is None:
+                    job_w.life.timestamp_head = self.timestamp_now
 
                 # Start runnable jobs
                 if job_w.is_runnable(self.sys):
                     self.job_waiting.popleft()
+                    job_w.life.timestamp_started = self.timestamp_now
                     job_w.begin(self.log, self.sys, self.timestamp_now)
                     self.job_running.append(job_w)  # Use append here, as ETA are None for new jobs
                 else:
