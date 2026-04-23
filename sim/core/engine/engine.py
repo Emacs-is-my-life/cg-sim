@@ -129,31 +129,34 @@ class Engine(SimObject):
             if isinstance(hw, BaseStorage) and hw.initial_placement:
                 init_storage = hw
 
-        # Scheduler Placement
-        self.sched.layout(init_storage)
+        # Multi-step layout
+        finished = False
+        while not finished:
+            # Scheduler Placement
+            finished = self.sched.layout(init_storage)
 
-        # Run all jobs
-        while self.job_waiting:
-            job_w = self.job_waiting[0]
-            if job_w.is_runnable(self.sys):
-                self.job_waiting.popleft()
-                job_w.begin(self.log, self.sys, self.timestamp_now)
-                self.job_running.append(job_w)
+            # Run all jobs
+            while self.job_waiting:
+                job_w = self.job_waiting[0]
+                if job_w.is_runnable(self.sys):
+                    self.job_waiting.popleft()
+                    job_w.begin(self.log, self.sys, self.timestamp_now)
+                    self.job_running.append(job_w)
 
-                # Set their ETA to all NOW (immediately finish)
-                for job in self.job_running:
-                    job.timestamp_ETA = self.timestamp_now
-            else:
-                args = {
-                    "from": self.name,
-                    "msg": "Deadlock detected."
-                }
-                self._log_abort(args)
-                self.signal_abort = True
-                break
+                    # Set their ETA to all NOW (immediately finish)
+                    for job in self.job_running:
+                        job.timestamp_ETA = self.timestamp_now
+                else:
+                    args = {
+                        "from": self.name,
+                        "msg": "Deadlock detected."
+                    }
+                    self._log_abort(args)
+                    self.signal_abort = True
+                    break
 
-        # Retire all jobs
-        self._layout_forward()
+            # Retire all jobs
+            self._layout_forward()
 
         # Turn logging back on
         self.log.on = True

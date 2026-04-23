@@ -253,7 +253,7 @@ class FlexInfer(BaseScheduler):
         remaining_pages = self.page_idx_heap_end - (self.page_idx_heap_start + tensor.num_pages)
         return remaining_pages >= required_dynamic_pages
 
-    def layout(self, init_storage: BaseStorage) -> None:
+    def layout(self, init_storage: BaseStorage) -> bool:
         """
         Input: Attention tensor size 𝑠𝑖𝑧𝑒𝑎𝑡𝑡𝑒 , FFN tensor size
         𝑠𝑖𝑧𝑒𝐹 𝐹 𝑁 , Layer number 𝑁 , Memory budget 𝑠𝑖𝑧𝑒𝑚𝑒𝑚 ,
@@ -399,7 +399,7 @@ class FlexInfer(BaseScheduler):
         self.log.on = False
 
         self.heap: Heap = Heap(self.page_idx_heap_start, self.page_idx_heap_end)
-        return
+        return True
 
     def _find_layer_from_tensor(self, tensor_ids: list[int]) -> int | None:
         tensor_map = self.sys.trace.tensor_map

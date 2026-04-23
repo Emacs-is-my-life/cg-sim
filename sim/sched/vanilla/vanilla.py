@@ -48,7 +48,7 @@ class Vanilla(BaseScheduler):
         """Vanilla Scheduler won't do compilation."""
         return
 
-    def layout(self, init_storage: BaseStorage) -> None:
+    def layout(self, init_storage: BaseStorage) -> bool:
         tensor_map = self.sys.trace.tensor_map
 
         # Check if memory size adequate to hold all tensors
@@ -87,7 +87,7 @@ class Vanilla(BaseScheduler):
         if batch:
             self.sys.transfer(batch)
 
-        return
+        return True
 
     def runtime(self, retired_jobs: list[BaseJob]) -> None:
         if self.last_job_id is not None:

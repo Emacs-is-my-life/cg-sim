@@ -37,7 +37,7 @@ class BaseScheduler(SimObject):
         pass
 
     @abstractmethod
-    def layout(self, init_storage: BaseStorage) -> None:
+    def layout(self, init_storage: BaseStorage) -> bool:
         pass
 
     @abstractmethod
