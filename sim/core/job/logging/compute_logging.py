@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from sim.core.log import Log
 from sim.core.trace import Node
+from sim.hw.compute.common import BaseCompute
 
 if TYPE_CHECKING:
     from ..compute_job import ComputeJob
@@ -30,10 +31,17 @@ def begin_log(job: ComputeJob, log: Log) -> None:
 
 def end_log(job: ComputeJob, log: Log) -> None:
     node: Node = job.node
+    hw: BaseCompute = job.running_on[0]
     args = {
-        "node_id": node.id,
-        "node_name": node.name,
-        "work_total": job.work_total
+        "Hardware": {
+            "id": hw.id,
+            "name": hw.name,
+        },
+        "Payload": {
+            "id": node.id,
+            "name": node.name,
+            "work_total": job.work_total
+        }
     }
 
     timestamp = job.timestamp_begin

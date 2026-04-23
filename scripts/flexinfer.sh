@@ -9,11 +9,11 @@ STEP_MB=128
 
 for ((mb=START_MB; mb<=END_MB; mb+=STEP_MB)); do
   kb=$((mb * 1024))
-  out="tmp/results/flexinfer_mem_${mb}MB.json"
+  result="tmp/results/flexinfer_${mb}MB_result.json"
 
   echo "Running FlexInfer with Memory: ${mb} MB"
   python main.py \
     -i "$INPUT_CFG" \
-	logger.args.output_path="${out}" \
+	logger.args.output_path="${result}" \
 	hardware.memory.0.args.memory_size_KB="${kb}"
 done

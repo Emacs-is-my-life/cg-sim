@@ -13,6 +13,13 @@ if TYPE_CHECKING:
 def assertion(job: ComputeJob, sys: System) -> bool:
     # 0. Hardware Availability
     hw = job.running_on[0]
+    if "HW_type" in job.node.args:
+        if "HW_type" in hw.args:
+            if job.node.args["HW_type"] != hw.args["HW_type"]:
+                sys.abort({"from": sys.engine.name, "msg": f"You cannot run a job with HW_type: {job.args['HW_type']} on {hw.name}"})
+        else:
+            sys.abort({"from": sys.engine.name, "msg": f"You cannot run a job with HW_type: {job.args['HW_type']} on {hw.name}"})
+
     if not hw.can_run(job):
         return False
 

@@ -27,6 +27,9 @@ class BaseHardware(SimObject):
 
         self.job_running: list["BaseJob"] = []
 
+        # args field for arbitrary note
+        self.args: dict[str, Any] = {}
+
         # Create logging tracks
         log.record(Log.subtrack(TrackID.Event, self.id, self.name))
         log.record(Log.subtrack(TrackID.Counter, self.id, self.name))

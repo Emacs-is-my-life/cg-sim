@@ -23,6 +23,7 @@ class SimpleCPU(BaseCompute):
             raise ValueError("[Compute]: modifier must be > 0.")
 
         self.modifier = modifier
+        self.args["HW_type"] = "CPU"
         return
 
     def can_run(self, job: BaseJob) -> bool:
