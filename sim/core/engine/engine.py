@@ -4,6 +4,7 @@ from typing import Any, TYPE_CHECKING
 from enum import Enum, auto
 from collections import deque
 import heapq
+import orjson
 
 from sim.core.sim_object import SimObject
 from sim.core.log import Log, TrackID, Level
@@ -14,6 +15,7 @@ from sim.hw.storage.common import BaseStorage
 from sim.sched.common import BaseScheduler
 
 from .update import update_running_jobs
+from .job_stats import init_job_stats, record_job_stats
 
 if TYPE_CHECKING:
     from sim.core.system import System
@@ -49,13 +51,17 @@ class Engine(SimObject):
         self.job_waiting: deque[BaseJob] = deque()  # job_waiting.popleft()
         self.job_running: list[BaseJob] = []
 
+        # Job Statistics
+        self.job_stats: dict[str, Any] = {}
+        init_job_stats(self.job_stats)
+
         # Create subtracks for logging
         self.log.record(Log.subtrack(TrackID.Engine, self.id, "Engine"))
         return
 
     # Public Interfaces
     def submit(self, job: BaseJob) -> None:
-        job.life.timestamp_enqueued = self.timestamp_now
+        job.timestamp_queued = self.timestamp_now
         self.job_waiting.append(job)
         return
 
@@ -182,14 +188,14 @@ class Engine(SimObject):
                 job.end(self.log, self.sys, self.timestamp_now)
                 retired_jobs.append(job)
 
-            # Don't retire multiple jobs, as this might cause overlap issue in perfetto UI viewer.
-            # while self.job_running and (self.job_running[0].timestamp_ETA == self.timestamp_now):
-            #     job = heapq.heappop(self.job_running)
-            #     job.end(self.log, self.sys, self.timestamp_now)
-            #     retired_jobs.append(job)
+            # Retire jobs with the same ETA timestamp
+            while self.job_running and (self.job_running[0].timestamp_ETA == self.timestamp_now):
+                job = heapq.heappop(self.job_running)
+                job.end(self.log, self.sys, self.timestamp_now)
+                retired_jobs.append(job)
 
-        # Add a bit of time, to make events not overlap
-        self.timestamp_now += 0.001  # 1/1000 microsecond
+        # Handle Job Logging (Compute Stall Time, ...)
+        record_job_stats(retired_jobs, self.job_stats)
 
         return retired_jobs
 
@@ -211,9 +217,6 @@ class Engine(SimObject):
                 if isinstance(job, ComputeJob) and isinstance(job.node, TerminalNode):
                     return
 
-                # Handling Job Lifecycle Dependent Logging
-                # TODO
-
             # Update progress
             for job in self.job_running:
                 job.update_progress(self.time_elapsed)
@@ -226,13 +229,12 @@ class Engine(SimObject):
                 job_w = self.job_waiting[0]
 
                 # Mark its head arrivale time if not set
-                if job_w.life.timestamp_head is None:
-                    job_w.life.timestamp_head = self.timestamp_now
+                if job_w.timestamp_at_head is None:
+                    job_w.timestamp_at_head = self.timestamp_now
 
                 # Start runnable jobs
                 if job_w.is_runnable(self.sys):
                     self.job_waiting.popleft()
-                    job_w.life.timestamp_started = self.timestamp_now
                     job_w.begin(self.log, self.sys, self.timestamp_now)
                     self.job_running.append(job_w)  # Use append here, as ETA are None for new jobs
                 else:
@@ -283,18 +285,27 @@ class Engine(SimObject):
             }
         }
 
-        for hw in self.sys.hw.values():
-            args["hardware"]["book"] = {"id": hw.id, "name": hw.name}
+        args = {
+            "simulation": {},
+            "memory": [],
+            "job": {}
+        }
+
+        args["simulation"]["success"] = str(not self.signal_abort)
+        args["simulation"]["time"] = self.timestamp_now
 
         for hw in self.sys.hw.values():
             if isinstance(hw, BaseMemory):
-                args["hardware"]["memory"].append({
-                    "id": hw.id,
+                args["memory"].append({
                     "name": hw.name,
                     "peak_memory_usage_KB": 4 * hw.space.peak_num_used_pages
                 })
 
-        self.log.record(Log.engine(self.id, "SIMULATION_REPORT", self.timestamp_now, args))
+        args["job"] = self.job_stats
+
+        with open(self.log.result_path, 'w') as f:
+            f.write(orjson.dumps(args, option=orjson.OPT_INDENT_2).decode().replace("  ", "\t"))
+
         self.log.stop()
         return
 

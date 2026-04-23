@@ -12,13 +12,6 @@ if TYPE_CHECKING:
     from sim.hw.common.base_hardware import BaseHardware
 
 
-class JobLifecycle:
-    def __init__(self):
-        self.timestamp_enqueued: float | None = None
-        self.timestamp_head: float | None = None
-        self.timestamp_started: float | None = None
-
-
 class BaseJob(ABC):
     def __init__(self, work_total: float):
         # Basics
@@ -32,12 +25,13 @@ class BaseJob(ABC):
         self.work_rate: float = 0   # Work being processed per microsecond
 
         # Timestamp
+        self.timestamp_queued: float | None = None       # Simulation time, that job is queued into the job_waiting
+        self.timestamp_at_head: float | None = None      # Simulation time, that job has arrived at the head of the job_waiting
         self.timestamp_begin: float | None = None        # Simulation time, that job started execution
         self.timestamp_end: float | None = None          # Simulation time, that job ended execution
-        self.timestamp_ETA: float = float("inf")  # Simulation time, when job is expected to end
 
-        # Lifecycle Log
-        self.life: JobLifecycle = JobLifecycle()
+        self.timestamp_ETA: float = float("inf")         # Simulation time, when job is expected to end
+
 
     def __lt__(self, other: "BaseJob") -> bool:
         my_ETA = self.timestamp_ETA if self.timestamp_ETA is not None else float("inf")

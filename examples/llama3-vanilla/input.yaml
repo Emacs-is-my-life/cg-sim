@@ -3,7 +3,8 @@
 # Simulator configuration
 logger:
   args:
-    output_path: "sim_result.json"
+    event_path: "sim_events.json"
+    result_path: "sim_result.json"
     log_level: 2             # Events, Counters
 
 # Trace(workload) loading
