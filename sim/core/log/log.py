@@ -29,29 +29,10 @@ class Log:
 
     def __init__(self, args: dict, flush_period: float = 0.5):
         # Set log output file
-        event_path = Path("./sim_events.json")
         result_path = Path("./sim_result.json")
 
         node_path = Path("./node_map.json")
         tensor_path = Path("./tensor_map.json")
-
-        if "event_path" in args:
-            p = Path(args["event_path"])
-            if not p.is_absolute():
-                base_path = Path.cwd()
-                p = base_path / p
-                node_path = base_path / node_path
-                tensor_path = base_path / tensor_path
-
-            if p.suffix:
-                p.parent.mkdir(parents=True, exist_ok=True)
-            else:
-                p.mkdir(parents=True, exist_ok=True)
-                p = p / Path("sim_events.json")
-                node_path = p / node_path
-                tensor_path = p / tensor_path
-
-            event_path = p
 
         if "result_path" in args:
             p = Path(args["result_path"])
@@ -71,7 +52,6 @@ class Log:
 
             result_path = p
 
-        self.event_path = event_path
         self.result_path = result_path
         self.node_path = node_path
         self.tensor_path = tensor_path
@@ -102,7 +82,7 @@ class Log:
         return
 
     def _open_file(self):
-        self.file_ptr = open(self.event_path, "w", encoding="utf-8")
+        self.file_ptr = open(self.result_path, "w", encoding="utf-8")
         self._first_event = True
         self.file_ptr.write('{"traceEvents": [\n')
         self.file_ptr.flush()

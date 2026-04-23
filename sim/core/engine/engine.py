@@ -302,10 +302,7 @@ class Engine(SimObject):
                 })
 
         args["job"] = self.job_stats
-
-        with open(self.log.result_path, 'w') as f:
-            f.write(orjson.dumps(args, option=orjson.OPT_INDENT_2).decode().replace("  ", "\t"))
-
+        self.log.record(Log.engine(self.id, "SIMULATION_RESULT", self.timestamp_now, args))
         self.log.stop()
         return
 

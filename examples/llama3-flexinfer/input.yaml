@@ -3,7 +3,6 @@
 # Simulator configuration
 logger:
   args:
-    event_path: "sim_events.json"
     result_path: "sim_result.json"
     log_level: 2             # Events, Counters
 
