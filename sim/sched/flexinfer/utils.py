@@ -5,17 +5,16 @@ import re
 class Layer:
     def __init__(self, layer_number: int):
         self.N = layer_number
-        self.attn: list[Tensor] = []
-        self.ffn: list[Tensor] = []
+
+        self.attn_big = list[Tensor]
+        self.attn_small = list[Tensor]
+        self.ffn = list[Tensor]
         return
 
 
-def categorize_tensors(tensor_map: dict[int, Tensor]) -> tuple[list[Layer], dict[int, int], int]:
-    others_size_num_pages: int = 0
-    tensor_layer: dict[int, int] = {}
-
+def categorize_tensors(tensor_map: dict[int, Tensor]) -> tuple[list[Layer], list[Tensor]]:
+    other_tensors: list[Tensor] = []
     layer_pattern = re.compile(r"^blk\.(\d+)\.")
-
     max_layer = -1
     for tensor in tensor_map.values():
         match = layer_pattern.match(tensor.name)
@@ -36,17 +35,17 @@ def categorize_tensors(tensor_map: dict[int, Tensor]) -> tuple[list[Layer], dict
             tensor.args["layer"] = n_this_layer
             layer = layers[n_this_layer]
 
+            tensor.args["flexinfer_loaded"] = False
+
             if "attn_q" in name or "attn_output" in name:
-                layer.attn.append(tensor)
-                tensor_layer[tensor.id] = n_this_layer
+                layer.attn_big.append(tensor)
+            elif "attn_k" in name or "attn_v" in name:
+                layer.attn_small.append(tensor)
             elif "ffn_down" in name or "ffn_gate" in name or "ffn_up" in name:
                 layer.ffn.append(tensor)
-                tensor_layer[tensor.id] = n_this_layer
             else:
-                others_size_num_pages += tensor.num_pages
-                tensor_layer[tensor.id] = -1
+                other_tensors.append(tensor)
         else:
-            others_size_num_pages += tensor.num_pages
-            tensor_layer[tensor.id] = -1
+            other_tensors.append(tensor)
 
-    return layers, tensor_layer, others_size_num_pages
+    return layers, other_tensors
