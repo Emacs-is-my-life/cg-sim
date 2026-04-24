@@ -469,6 +469,10 @@ class FlexInfer(BaseScheduler):
             for tensor in unpinned:
                 page_idx = self._tensor_page_idx(pref_layer, slot_idx, tensor)
                 mem_region = self.sys.claim(self.memory, tensor, page_idx)
+                if mem_region is None:
+                    # sys.claim already signalled abort on the engine; stop
+                    # here so we don't hand a None dest to sys.transfer.
+                    return
                 stor_region = self.sys.find(self.storage, tensor)[0]
                 batch.append((stor_region, mem_region))
                 tensor.args["flexinfer"] = FlexInferStatus.MEMORY_LOADING
