@@ -12,11 +12,11 @@ if TYPE_CHECKING:
 class BaseMemory(BaseHardware):
     """Base class for memory hardwares"""
 
-    def __init__(self, obj_id: int, name: str, log: Log, memory_size_KB: int):
+    def __init__(self, obj_id: int, name: str, log: Log, memory_size_KB: int, args: dict[str, Any] | None = None):
         if memory_size_KB < 4:
             raise ValueError(f"[Memory] Memory size cannot be: {memory_size_KB}")
 
-        super().__init__(obj_id, name, log)
+        super().__init__(obj_id, name, log, args)
         from .memory_region import MemorySpace
         self.space: MemorySpace = MemorySpace(self, KB_to_num_pages(memory_size_KB))
         return

@@ -9,8 +9,8 @@ from sim.hw.memory.common import BaseMemory
 class BaseCompute(BaseHardware):
     """Base class for compute hardwares"""
 
-    def __init__(self, obj_id: int, name: str, log: Log, memory: BaseMemory):
-        super().__init__(obj_id, name, log)
+    def __init__(self, obj_id: int, name: str, log: Log, memory: BaseMemory, args: dict[str, Any] | None = None):
+        super().__init__(obj_id, name, log, args)
         self.memory: BaseMemory = memory
         return
 

@@ -16,7 +16,7 @@ class SimpleCPU(BaseCPU):
     """
 
     def __init__(self, obj_id: int, name: str, log: Log, memory: BaseMemory, args: dict[str, Any]):
-        super().__init__(obj_id, name, log, memory)
+        super().__init__(obj_id, name, log, memory, args)
 
         modifier: float = args["modifier"]
         if modifier <= 0:

@@ -35,48 +35,55 @@ def assertion(job: ComputeJob, sys: System) -> bool:
             sys.abort(args)
             return False
 
-    node = job.node
-    node_map = sys.trace.node_map
-    # 1. Control Dependency
-    for p_node_id in node.parent_nodes:
-        p_node = node_map[p_node_id]
-        if p_node.status != NodeStatus.DONE:
-            return False
+    if node.custom_deps:
+        # Compute Node with Custom Dependencies
+        for dep in node.custom_deps:
+            if not dep.check(job, sys):
+                return False
+    else:
+        # Normal Compute Node
+        node_map = sys.trace.node_map
 
-    memory = hw.memory    # Tensors must be in compute hardware's local memory
-    # 2. Data Dependency
-    # Input Tensors
-    for i_tensor_id in node.input_tensors:
-        candidates = memory.space.get_by_tensor_id(i_tensor_id)
-        if len(candidates) == 0:
-            return False
+        # 1. Control Dependency
+        for p_node_id in node.parent_nodes:
+            p_node = node_map[p_node_id]
+            if p_node.status != NodeStatus.DONE:
+                return False
 
-        FOUND = False
-        for i_mem_region in candidates:
-            OK = i_mem_region.is_ready and i_mem_region.is_latest and \
-                (i_mem_region.access_status in (DataRegionAccess.IDLE, DataRegionAccess.BEING_READ))
+        memory = hw.memory    # Tensors must be in compute hardware's local memory
+        # 2. Data Dependency
+        # Input Tensors
+        for i_tensor_id in node.input_tensors:
+            candidates = memory.space.get_by_tensor_id(i_tensor_id)
+            if len(candidates) == 0:
+                return False
 
-            if OK:
-                FOUND = True
-                break
+            FOUND = False
+            for i_mem_region in candidates:
+                OK = i_mem_region.is_ready and i_mem_region.is_latest and \
+                    (i_mem_region.access_status in (DataRegionAccess.IDLE, DataRegionAccess.BEING_READ))
 
-        if not FOUND:
-            return False
+                if OK:
+                    FOUND = True
+                    break
 
-    # Output Tensors
-    for o_tensor_id in node.output_tensors:
-        candidates = memory.space.get_by_tensor_id(o_tensor_id)
-        if len(candidates) == 0:
-            return False
+            if not FOUND:
+                return False
 
-        FOUND = False
-        for o_mem_region in candidates:
-            OK = o_mem_region.access_status == DataRegionAccess.IDLE
-            if OK:
-                FOUND = True
-                break
+        # Output Tensors
+        for o_tensor_id in node.output_tensors:
+            candidates = memory.space.get_by_tensor_id(o_tensor_id)
+            if len(candidates) == 0:
+                return False
 
-        if not FOUND:
-            return False
+            FOUND = False
+            for o_mem_region in candidates:
+                OK = o_mem_region.access_status == DataRegionAccess.IDLE
+                if OK:
+                    FOUND = True
+                    break
+
+            if not FOUND:
+                return False
 
     return True
