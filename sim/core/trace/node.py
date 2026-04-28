@@ -1,5 +1,5 @@
 from __future__ import annotations
-from enum import Enum, auto
+from enum import Enum, IntFlag, auto
 from typing import Any
 
 
@@ -9,6 +9,12 @@ class NodeStatus(Enum):
     WAITING = auto()   # Node is in the job queue
     RUNNING = auto()   # Node is being processed now
     DONE = auto()      # Finished execution
+
+
+class NodeHW(IntFlag):
+    CPU = auto()
+    GPU = auto()
+    NPU = auto()
 
 
 class Node:
@@ -22,6 +28,7 @@ class Node:
         self.id: int = node_id
         self.is_custom: bool = False
         self.name: str = node_name
+        self.hw: NodeHW = NodeHW.CPU | NodeHW.GPU | NodeHW.NPU   # Runs on anywhere by default
         self.compute_time_micros: float = compute_time_micros
         self.status: NodeStatus = NodeStatus.TODO
         self.args: dict[str, Any] = args if args is not None else {}

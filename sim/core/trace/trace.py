@@ -36,12 +36,13 @@ class Trace(SimObject):
     Datastructure representing the ML workload
     """
 
-    def __init__(self, obj_id: int, name: str, log: Log, node_map: dict[int, Node], tensor_map: dict[int, Tensor]):
+    def __init__(self, obj_id: int, name: str, log: Log, node_map: dict[int, Node], tensor_map: dict[int, Tensor], args: dict[str, Any] | None = None):
         super().__init__(obj_id, name, log)
 
         map_check(node_map, tensor_map)
         self.node_map: dict[int, Node] = node_map
         self.tensor_map: dict[int, Tensor] = tensor_map
+        self.args = args if args is not None else {}
 
         self.log.record(Log.subtrack(TrackID.Engine, self.id, self.name))
         return

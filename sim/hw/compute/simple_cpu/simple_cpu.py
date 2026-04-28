@@ -2,11 +2,11 @@ from typing import Any
 
 from sim.core.log import Log
 from sim.core.job import BaseJob
-from sim.hw.compute.common import BaseCompute
+from sim.hw.compute.common import BaseCPU
 from sim.hw.memory.common import BaseMemory
 
 
-class SimpleCPU(BaseCompute):
+class SimpleCPU(BaseCPU):
     """
     Simplistic model of CPU.
     It has only one tunable parameter: modifier
@@ -23,7 +23,6 @@ class SimpleCPU(BaseCompute):
             raise ValueError("[Compute]: modifier must be > 0.")
 
         self.modifier = modifier
-        self.args["HW_type"] = "CPU"
         return
 
     def can_run(self, job: BaseJob) -> bool:

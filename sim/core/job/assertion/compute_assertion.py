@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sim.core.trace import NodeStatus
+from sim.core.trace import NodeStatus, NodeHW
+from sim.hw.compute.common import BaseCPU, BaseGPU, BaseNPU
 from sim.hw.common.data_region import DataRegionAccess
 
 if TYPE_CHECKING:
@@ -11,17 +12,27 @@ if TYPE_CHECKING:
 
 
 def assertion(job: ComputeJob, sys: System) -> bool:
-    # 0. Hardware Availability
-    hw = job.running_on[0]
-    if "HW_type" in job.node.args:
-        if "HW_type" in hw.args:
-            if job.node.args["HW_type"] != hw.args["HW_type"]:
-                sys.abort({"from": sys.engine.name, "msg": f"You cannot run a job with HW_type: {job.node.args['HW_type']} on {hw.args['HW_type']}"})
-        else:
-            sys.abort({"from": sys.engine.name, "msg": f"You cannot run a job with HW_type: {job.node.args['HW_type']} on {hw.name}"})
+    # 0. Hardware Availability Check
+    for hw in job.running_on:
+        if not hw.can_run(job):
+            return False
 
-    if not hw.can_run(job):
-        return False
+        if job.hw & NodeHW.CPU:
+            if isinstance(hw, BaseCPU):
+                continue
+        elif job.hw & NodeHW.GPU:
+            if isinstance(hw, BaseGPU):
+                continue
+        elif job.hw & NodeHW.NPU:
+            if isinstance(hw, BaseNPU):
+                continue
+        else:
+            args = {
+                "from": "Engine",
+                "msg": f"Job dispatched to a wrong hardware: {hw.name}."
+            }
+            sys.abort(args)
+            return False
 
     node = job.node
     node_map = sys.trace.node_map
