@@ -24,7 +24,7 @@ class SimpleSSD(BaseStorage):
     """
 
     def __init__(self, obj_id: int, name: str, log: Log, args: dict[str, Any]):
-        super().__init__(obj_id, name, log)
+        super().__init__(obj_id, name, log, args)
 
         # Load fixed_latency_micros
         fixed_latency_micros = float(args["fixed_latency_micros"])

@@ -6,6 +6,7 @@ from pathlib import Path
 from sim.core.system import System
 from sim.core.log import Log
 from sim.core.engine import Engine
+from sim.core.trace.custom_dep import TensorAtHWDep
 
 from .init.trace import LOAD_TRACE_CLASS
 from .init.compute import LOAD_COMPUTE_CLASS
@@ -112,6 +113,29 @@ class Simulator:
             sim_id.check_name(name)
             compute_hw = ComputeClass(sim_id.get_id(), name, log, local_memory, c_cfg["args"])
             hw[compute_hw.name] = compute_hw
+
+        # Validate custom_dep_tag values: must be unique across hw, and every
+        # TensorAtHWDep on a trace node must reference a declared tag.
+        tag_owners: dict[str, list[str]] = {}
+        for h in hw.values():
+            tag = h.args.get("custom_dep_tag")
+            if tag is not None:
+                tag_owners.setdefault(tag, []).append(h.name)
+
+        for tag, owners in tag_owners.items():
+            if len(owners) > 1:
+                raise Exception(
+                    f"[Simulator] custom_dep_tag {tag!r} shared by hw: {owners}. Tags must be unique."
+                )
+
+        for node in trace.node_map.values():
+            for dep in node.custom_deps:
+                if isinstance(dep, TensorAtHWDep):
+                    if dep.custom_dep_tag not in tag_owners:
+                        raise Exception(
+                            f"[Simulator] node {node.id} ({node.name}) references custom_dep_tag "
+                            f"{dep.custom_dep_tag!r} but no hw declares it."
+                        )
 
         # System
         sys = System(trace, hw)

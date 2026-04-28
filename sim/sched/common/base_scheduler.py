@@ -26,7 +26,7 @@ class BaseScheduler(SimObject):
         self.log.record(Log.subtrack(TrackID.State, self.id, self.name))
         return
 
-    def log(self, args: dict[str, Any] | None = None):
+    def log_decision(self, args: dict[str, Any] | None = None):
         if args is None:
             return
         else:

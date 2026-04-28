@@ -42,9 +42,12 @@ class System:
         self.hw: dict[str, BaseHardware] = hw
         return
 
-    def compute(self, hw: BaseCompute, node: Node) -> uuid.UUID:
+    def compute(self, hw: BaseCompute, node: Node, args: dict[str, Any] | None = None) -> uuid.UUID:
         node.status = NodeStatus.WAITING
         job = ComputeJob(hw, node)
+        if args:
+            job.args = args
+
         self.engine.submit(job)
         return job.id
 
@@ -90,8 +93,11 @@ class System:
         release_log(job, self.engine.log)
         return
 
-    def transfer(self, batch: list[tuple[DataRegion, DataRegion]]) -> uuid.UUID:
+    def transfer(self, batch: list[tuple[DataRegion, DataRegion]], args: dict[str, Any] | None = None) -> uuid.UUID:
         job = TransferJob(batch)
+        if args:
+            job.args = args
+
         self.engine.submit(job)
         return job.id
 

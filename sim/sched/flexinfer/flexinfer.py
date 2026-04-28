@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from enum import Enum, auto
 from typing import Any, TYPE_CHECKING
 
@@ -14,7 +15,7 @@ from sim.hw.storage.common import BaseStorage, StorageRegion
 if TYPE_CHECKING:
     from sim.core.system import System
 
-from .utils import categorize_tensors
+from .utils import categorize_tensors, categorize_nodes
 
 
 class FlexInferMode(Enum):
@@ -24,88 +25,10 @@ class FlexInferMode(Enum):
     MEMROY_LIMITED = auto()
 
 
-class Heap:
-    def __init__(self, page_start: int, page_end: int):
-        self.page_start = page_start
-        self.page_end = page_end
-        self.cap = self.page_end - self.page_start
-
-        self.allocs = []
-        return
-
-    def free_spans(self) -> list[tuple[int, int]]:
-        spans = []
-
-        if not self.allocs:
-            return [(0, self.cap)]
-
-        first_start, _, _ = self.allocs[0]
-        if first_start > 0:
-            spans.append((0, first_start))
-
-        for i in range(len(self.allocs) - 1):
-            cur_start, cur_size, _ = self.allocs[i]
-            next_start, _, _ = self.allocs[i + 1]
-            gap_start = cur_start + cur_size
-            gap_end = next_start
-            if gap_start < gap_end:
-                spans.append((gap_start, gap_end))
-
-        last_start, last_size, _ = self.allocs[-1]
-        end = last_start + last_size
-        if end < self.cap:
-            spans.append((end, self.cap))
-
-        return spans
-
-    def _idx(self, idx: int):
-        return self.page_start + idx
-
-    def alloc(self, tensor: Tensor) -> int | None:
-        tensor_size = tensor.num_pages
-
-        # First alloc
-        if not self.allocs:
-            if tensor_size <= self.cap:
-                self.allocs.append((0, tensor_size, tensor))
-                return self._idx(0)
-            return None
-
-        # Check before first block
-        first_start, _, _ = self.allocs[0]
-        if first_start >= tensor_size:
-            self.allocs.insert(0, (0, tensor_size, tensor))
-            return self._idx(0)
-
-        # Check gaps between blocks
-        for i in range(len(self.allocs) - 1):
-            cur_start, cur_size, _ = self.allocs[i]
-            next_start, _, _ = self.allocs[i + 1]
-
-            gap_start = cur_start + cur_size
-            gap_size = next_start - gap_start
-
-            if gap_size >= tensor_size:
-                self.allocs.insert(i + 1, (gap_start, tensor_size, tensor))
-                return self._idx(gap_start)
-
-        # Check after last block
-        last_start, last_size, _ = self.allocs[-1]
-        end = last_start + last_size
-
-        if self.cap - end >= tensor_size:
-            self.allocs.append((end, tensor_size, tensor))
-            return self._idx(end)
-
-        return None
-
-    def free(self, free_tensor: Tensor) -> bool:
-        for i, (start, tensor_size, tensor) in enumerate(self.allocs):
-            if tensor.id == free_tensor.id:
-                del self.allocs[i]
-                return True
-
-        return False
+class FlexInferStatus(Enum):
+    MEMORY_LOADED = auto()
+    MEMORY_LOADING = auto()
+    MEMORY_ABSENT = auto()
 
 
 class FlexInfer(BaseScheduler):
@@ -137,42 +60,44 @@ class FlexInfer(BaseScheduler):
             elif isinstance(hw, BaseStorage):
                 self.storage = hw
 
-        node_map = self.sys.trace.node_map
-        _layer_start_node_id = -1
-        _layer_end_node_id = -1
-        for node in node_map.values():
-            if "-0" in node.name:
-                _layer_start_node_id = node.id
-                break
-
-        for node in node_map.values():
-            if "-1" in node.name:
-                _layer_end_node_id = node.id
-                break
-
-        self.num_nodes_in_a_layer = _layer_end_node_id - _layer_start_node_id
-
         # Tensor information gather
-        self.layers, self.tensor_layer_num, others_size_num_pages = categorize_tensors(sys.trace.tensor_map)
-        attn_tensor_size = self.layers[0].attn[0].num_pages
-        ffn_tensor_size = self.layers[0].ffn[0].num_pages
-        num_layers = len(self.layers)
+        tensor_map = sys.trace.tensor_map
+        self.flex_layers, self.other_tensors = categorize_tensors(tensor_map)
+        attn_big_num_pages = self.flex_layers[0].attn_big[0].num_pages
+        attn_small_num_pages = self.flex_layers[0].attn_small[0].num_pages
+        ffn_num_pages = self.flex_layers[0].ffn[0].num_pages
+        num_layers = len(self.flex_layers)
+
+        # Get total size of "other tensors"
+        others_size_num_pages = 0
+        for tensor in self.other_tensors:
+            others_size_num_pages += tensor.num_pages
 
         # Check operation mode
         memory_size = self.memory.space.num_total_pages
 
-        cost_sufficient = others_size_num_pages + num_layers * (3 * ffn_tensor_size + attn_tensor_size)
+        # Pessimistic dyn-heap reserve: prefetch_window layers' worth of every
+        # flex-layer tensor, matching the per-layer slot size used at runtime.
+        reserve_pessimistic = self.prefetch_window * (
+            3 * ffn_num_pages + 2 * attn_big_num_pages + 2 * attn_small_num_pages
+        )
+
+        cost_sufficient = (
+            others_size_num_pages
+            + num_layers * (3 * ffn_num_pages + attn_big_num_pages)
+            + reserve_pessimistic
+        )
         cost_intermediate_2 = (
             others_size_num_pages
-            + num_layers * (2 * ffn_tensor_size)
-            + self.prefetch_window * (1 * ffn_tensor_size + 2 * attn_tensor_size)
+            + num_layers * (2 * ffn_num_pages)
+            + reserve_pessimistic
         )
         cost_intermediate_1 = (
             others_size_num_pages
-            + num_layers * (1 * ffn_tensor_size)
-            + self.prefetch_window * (2 * ffn_tensor_size + 2 * attn_tensor_size)
+            + num_layers * (1 * ffn_num_pages)
+            + reserve_pessimistic
         )
-        minimum_size = others_size_num_pages + self.prefetch_window * (3 * ffn_tensor_size + 2 * attn_tensor_size)
+        minimum_size = others_size_num_pages + reserve_pessimistic
 
         if memory_size < minimum_size:
             print("[FlexInfer] Failed due to memory shortage.")
@@ -198,18 +123,10 @@ class FlexInfer(BaseScheduler):
 
         self.log.record(Log.engine(self.id, "SCHEDULER_MESSAGE", 0, args))
 
-        self.attn_tensor_size = attn_tensor_size
-        self.ffn_tensor_size = ffn_tensor_size
-
-        self.must_reserve_pages = 0
-
-        self.page_idx_heap_start = 0
-        self.page_idx_heap_end = self.memory.space.num_total_pages
-
-        self.current_layer = 0
-        self.waiting_job_ids: set = set()
-
-        self.heap: Heap = None
+        self.attn_big_num_pages = attn_big_num_pages
+        self.attn_small_num_pages = attn_small_num_pages
+        self.ffn_num_pages = ffn_num_pages
+        self.free_region_page_idx = 0   # Keep track of available memory pages
         return
 
     def compile(self, trace: Trace) -> None:
@@ -217,342 +134,369 @@ class FlexInfer(BaseScheduler):
         return
 
     def _build_payload(self, init_storage: BaseStorage, tensor: Tensor) -> tuple[MemoryRegion, StorageRegion]:
-        mem_region = self.sys.claim(self.memory, tensor, self.page_idx_heap_start)
-        self.page_idx_heap_start += tensor.num_pages
+        mem_region = self.sys.claim(self.memory, tensor, self.free_region_page_idx)
+        self.free_region_page_idx += tensor.num_pages
         stor_region = self.sys.find(init_storage, tensor)[0]
         return (stor_region, mem_region)
 
-    def _dynamic_pages_for_window(self, start_layer: int, window_size: int | None = None) -> int:
-        window = self.prefetch_window if window_size is None else window_size
-        total = 0
-        N_layers = len(self.layers)
+    def _assign_in_mem(self, tensor: Tensor) -> None:
+        self.sys.claim(self.memory, tensor, self.free_region_page_idx)
+        self.free_region_page_idx += tensor.num_pages
+        return
 
-        for offset in range(window):
-            layer = self.layers[(start_layer + offset) % N_layers]
-            for tensor in layer.attn:
-                if not tensor.args["pin"]:
-                    total += tensor.num_pages
-            for tensor in layer.ffn:
-                if not tensor.args["pin"]:
-                    total += tensor.num_pages
+    def _acquire_slot(self, step_idx: int, layer_idx: int) -> int | None:
+        """Claim the first free dynamic-heap slot for this (step, layer)."""
+        for i in range(self.num_slots):
+            if self.dyn_slots[i] is None:
+                self.dyn_slots[i] = (step_idx, layer_idx)
+                return i
+        return None
 
-        return total
+    def _release_slot(self, step_idx: int, layer_idx: int) -> None:
+        """Release whichever slot this (step, layer) occupies (no-op if none)."""
+        for i in range(self.num_slots):
+            if self.dyn_slots[i] == (step_idx, layer_idx):
+                self.dyn_slots[i] = None
+                return
 
-    def _max_dynamic_pages_over_all_windows(self, window_size: int | None = None) -> int:
-        if not self.layers:
-            return 0
-        return max(self._dynamic_pages_for_window(i, window_size) for i in range(len(self.layers)))
+    def _tensor_page_idx(self, layer_idx: int, slot_idx: int, tensor: Tensor) -> int:
+        """Absolute memory page index for tensor when layer sits in slot.
+        Placement is a function of layer shape only, so step doesn't enter here."""
+        slot_base = self.dyn_start_page + slot_idx * self.slot_size_pages
+        return slot_base + self.layer_tensor_offsets[layer_idx][tensor.id]
 
-    def _can_pin_tensor(self, tensor: Tensor) -> bool:
-        tensor.args["pin"] = True
-        try:
-            required_dynamic_pages = self._max_dynamic_pages_over_all_windows()
-        finally:
-            tensor.args["pin"] = False
+    def _unload_layer(self, step_idx: int, layer_idx: int) -> None:
+        """Release a (step, layer)'s unpinned tensors and free its slot."""
+        for tensor in self.unpinned_per_layer[layer_idx]:
+            regions = self.sys.find(self.memory, tensor)
+            if not regions:
+                continue
+            self.sys.release(regions[0])
+            tensor.args["flexinfer"] = FlexInferStatus.MEMORY_ABSENT
+        self._release_slot(step_idx, layer_idx)
 
-        remaining_pages = self.page_idx_heap_end - (self.page_idx_heap_start + tensor.num_pages)
-        return remaining_pages >= required_dynamic_pages
+    def _advance_prefetch_ptr(self) -> None:
+        """Move next_prefetch pointer forward, wrapping layer → step+1."""
+        self.next_prefetch_layer_idx += 1
+        if self.next_prefetch_layer_idx >= len(self.flex_layers):
+            self.next_prefetch_step_idx += 1
+            self.next_prefetch_layer_idx = 0
 
     def layout(self, init_storage: BaseStorage) -> bool:
-        """
+        """  FlexInfer Algorithm
         Input: Attention tensor size 𝑠𝑖𝑧𝑒𝑎𝑡𝑡𝑒 , FFN tensor size
         𝑠𝑖𝑧𝑒𝐹 𝐹 𝑁 , Layer number 𝑁 , Memory budget 𝑠𝑖𝑧𝑒𝑚𝑒𝑚 ,
         Output: Tensor preservation plan 𝑃
-        1: if 𝑠𝑖𝑧𝑒𝑚𝑒𝑚 >= 𝑠𝑖𝑧𝑒𝐹 𝐹 𝑁 ∗ 𝑁 ∗ 3 + 𝑠𝑖𝑧𝑒𝑎𝑡𝑡𝑛 ∗ 𝑁 ∗ 2 then
-        2:     Set all FFN tensors for all layers
+        1: if 𝑠𝑖𝑧𝑒𝑚𝑒𝑚 >= 𝑠𝑖𝑧𝑒𝐹 𝐹 𝑁 ∗ 𝑁 ∗ 3 + 𝑠𝑖𝑧𝑒𝑎𝑡𝑡𝑛 ∗ 𝑁 ∗ 1 then
+        2:     Set all FFN tensors for all layers  (MEMORY_SUFFICIENT)
         3: else
         4:     if 𝑠𝑖𝑧𝑒𝑚𝑒𝑚 >= 𝑠𝑖𝑧𝑒𝐹 𝐹 𝑁 ∗ 𝑁 ∗ 2 then
-        5:         Set two FFN tensor for all layers
+        5:         Set two FFN tensor for all layers (MEMORY_INTERMEDIATE2)
         6:     else
         7:         if 𝑠𝑖𝑧𝑒𝑚𝑒𝑚 >= 𝑠𝑖𝑧𝑒𝐹 𝐹 𝑁 ∗ 𝑁 then
-        8:             Set one FFN tensor for all layers
+        8:             Set one FFN tensor for all layers (MEMORY_INTERMEDIATE1)
         9:         end if
         10:    end if
         11: end if
-        12: Set as much as possible attention tensors one by one
+        12: Set as much as possible attention tensors one by one (MEMORY_LIMITED)
         13: return 𝑃
         """
 
+        """
+        How to load a tensor(type: Tensor) into a memory in layout state:
+
+        Iterate over a tensor_map.
+
         tensor_map = self.sys.trace.tensor_map
-        for tensor in tensor_map.values():
-            tensor.args["pin"] = False     # Initialize as False
+        for tensor in tensor_map.values:
 
-        others_batch = []
-        # Load/Claim All 'other' tensors in memory
-        for tensor_id, layer_num in self.tensor_layer_num.items():
-            if layer_num == -1:
-                tensor = tensor_map[tensor_id]
-                tensor.args["pin"] = True
-                if tensor.args["tensor_type"] == "INTERMEDIATE":
-                    # Claiming memory region is enough
-                    self.sys.claim(self.memory, tensor, self.page_idx_heap_start)
-                    self.page_idx_heap_start += tensor.num_pages
-                else:
-                    # Claim a memory region, and load tensor from the storage
-                    mem_region = self.sys.claim(self.memory, tensor, self.page_idx_heap_start)
-                    if mem_region is None:
-                        print("[FlexInfer] mem_region is None!")
+        - 1. Claim a memory region for a tensor in the memory
+             (page_idx) is index of the start page in memory, which you must keep track of.
+            mem_region = self.sys.claim(self.memory, tensor, page_idx)
 
-                    self.page_idx_heap_start += tensor.num_pages
-                    stor_region = self.sys.find(init_storage, tensor)[0]
-                    others_batch.append((stor_region, mem_region))
+        - 2. Find this tensor in init_storage (if not INTERMEDIATE tensor)
+            stor_region = self.sys.find(init_storage, tensor)[0]
 
-        # Pin Attn/FFN tensors
-        pin_batch = []
-        if self.mode == FlexInferMode.MEMORY_SUFFICIENT:
-            # For all layer, pin all FFN
-            for layer in self.layers:
-                for ffn in layer.ffn:
-                    ffn.args["pin"] = True
-                    pin_batch.append(self._build_payload(init_storage, ffn))
-        elif self.mode == FlexInferMode.MEMORY_INTERMEDIATE_2:
-            # For all layer, pin two FFN
-            for layer in self.layers:
-                for ffn_idx in range(2):
-                    layer.ffn[ffn_idx].args["pin"] = True
-                    pin_batch.append(self._build_payload(init_storage, layer.ffn[ffn_idx]))
-        elif self.mode == FlexInferMode.MEMORY_INTERMEDIATE_1:
-            # For all layer, pin one FFN
-            for layer in self.layers:
-                layer.ffn[0].args["pin"] = True
-                pin_batch.append(self._build_payload(init_storage, layer.ffn[0]))
+        - 3. Add this stor_region -> mem_region transfer, to a batch we will request
+            load_batch.append((mem_region, stor_region))
+        """
+        load_batch = []
 
-        # Try to pin ATTN every layer as much as possible (up to two), with per-tensor dynamic feasibility check
-        for attn_idx in range(2):
-            for layer in self.layers:
-                if attn_idx >= len(layer.attn):
-                    continue
 
-                attn = layer.attn[attn_idx]
-                if attn.args["pin"]:
-                    continue
+        # [CLAUDE_BEGIN]
 
-                if self._can_pin_tensor(attn):
-                    attn.args["pin"] = True
-                    pin_batch.append(self._build_payload(init_storage, attn))
+        # Pin "other tensors"
+        for tensor in self.other_tensors:
+            tensor.args["pin"] = True                  # Mark as pinned tensor
+            if tensor.args["tensor_type"] == "INTERMEDIATE":
+                # Only assign memory region for it
+                # because value for INTERMEDIATE tensors does not exist in init_storage
+                self._assign_in_mem(tensor)
+            else:
+                # Load tensor from the storage, to the memory
+                payload = self._build_payload(init_storage, tensor)
+                load_batch.append(payload)
+            tensor.args["flexinfer"] = FlexInferStatus.MEMORY_LOADED   # Mark as loaded
 
-        # Try to pin remaining ATTN weights as much as possible, with per-tensor dynamic feasibility check
-        its_over = False
-        for layer in self.layers:
-            for attn in layer.attn:
-                if not attn.args["pin"]:
-                    num_pages_avail = self.page_idx_heap_end - self.page_idx_heap_start
-                    if num_pages_avail >= attn.num_pages and self._can_pin_tensor(attn):
-                        attn.args["pin"] = True
-                        pin_batch.append(self._build_payload(init_storage, attn))
-                    else:
-                        its_over = True
-                        break
+        # Default every flex-layer tensor to unpinned / absent.
+        # The blocks below flip the ones chosen for pinning.
+        for layer in self.flex_layers:
+            for tensor in layer.attn_big + layer.attn_small + layer.ffn:
+                tensor.args["pin"] = False
+                tensor.args["flexinfer"] = FlexInferStatus.MEMORY_ABSENT
 
-            if its_over:
+        # Pin FFN tensors per layer according to the selected mode.
+        # FlexInfer paper: 3 / 2 / 1 / 0 FFN tensors per layer.
+        ffn_pin_count_per_layer = {
+            FlexInferMode.MEMORY_SUFFICIENT: 3,
+            FlexInferMode.MEMORY_INTERMEDIATE_2: 2,
+            FlexInferMode.MEMORY_INTERMEDIATE_1: 1,
+            FlexInferMode.MEMROY_LIMITED: 0,
+        }[self.mode]
+
+        for layer in self.flex_layers:
+            for i in range(min(ffn_pin_count_per_layer, len(layer.ffn))):
+                ffn_tensor = layer.ffn[i]
+                ffn_tensor.args["pin"] = True
+                payload = self._build_payload(init_storage, ffn_tensor)
+                load_batch.append(payload)
+                ffn_tensor.args["flexinfer"] = FlexInferStatus.MEMORY_LOADED
+
+        # Round-robin pin attn_big tensors across layers, stopping before we
+        # eat into the dynamic-heap reserve. Reserve is a pessimistic
+        # prefetch_window layers' worth of every flex-layer tensor, per user.
+        per_layer_flex_pages = (
+            2 * self.attn_big_num_pages
+            + 2 * self.attn_small_num_pages
+            + 3 * self.ffn_num_pages
+        )
+        reserve_pages = self.prefetch_window * per_layer_flex_pages
+        num_total_pages = self.memory.space.num_total_pages
+
+        done = False
+        for attn_big_idx in range(2):  # attn_q first across layers, then attn_output
+            if done:
                 break
+            for layer in self.flex_layers:
+                if attn_big_idx >= len(layer.attn_big):
+                    continue
+                tensor = layer.attn_big[attn_big_idx]
+                pages_free_after_pin = (
+                    num_total_pages - self.free_region_page_idx - tensor.num_pages
+                )
+                if pages_free_after_pin < reserve_pages:
+                    done = True
+                    break
+                tensor.args["pin"] = True
+                payload = self._build_payload(init_storage, tensor)
+                load_batch.append(payload)
+                tensor.args["flexinfer"] = FlexInferStatus.MEMORY_LOADED
 
-        self.must_reserve_pages = self._max_dynamic_pages_over_all_windows()
+        # Build the runtime convenience index: per-layer list of tensors
+        # that will be load/unload-cycled at runtime.
+        self.unpinned_per_layer: list[list[Tensor]] = []
+        for layer in self.flex_layers:
+            unpinned = [
+                t for t in (layer.attn_big + layer.attn_small + layer.ffn)
+                if not t.args["pin"]
+            ]
+            self.unpinned_per_layer.append(unpinned)
 
-        required_dynamic_pages = self._max_dynamic_pages_over_all_windows()
-        heap_cap_pages = self.page_idx_heap_end - self.page_idx_heap_start
-        if required_dynamic_pages > heap_cap_pages:
-            self.sys.abort({
-                "from": self.name,
-                "msg": "[FlexInfer] Layout produced insufficient heap for dynamic working set.",
-                "required_dynamic_pages": required_dynamic_pages,
-                "heap_cap_pages": heap_cap_pages,
-                "page_idx_heap_start": self.page_idx_heap_start,
-                "page_idx_heap_end": self.page_idx_heap_end,
-            })
-            return
+        # Dynamic heap: divided into prefetch_window equal slots, each sized
+        # to hold one layer's worst-case unpinned tensors. The minimum_size
+        # check in __init__ guarantees the dynamic heap fits every slot.
+        self.dyn_start_page: int = self.free_region_page_idx
+        self.slot_size_pages: int = per_layer_flex_pages
+        self.num_slots: int = self.prefetch_window
+        self.dyn_slots: list[tuple[int, int] | None] = [None] * self.num_slots
 
-        self.sys.transfer(others_batch + pin_batch)
+        # Frozen intra-slot placement: each unpinned tensor of layer L lands
+        # at slot_base + layer_tensor_offsets[L][tensor.id], regardless of
+        # which slot L ends up occupying.
+        self.layer_tensor_offsets: list[dict[int, int]] = []
+        for unpinned in self.unpinned_per_layer:
+            offsets: dict[int, int] = {}
+            off = 0
+            for t in unpinned:
+                offsets[t.id] = off
+                off += t.num_pages
+            self.layer_tensor_offsets.append(offsets)
 
-        total_memory_pages = self.memory.space.num_total_pages
-        pinned_memory_pages = self.page_idx_heap_start
-        heap_space_pages = self.page_idx_heap_end - self.page_idx_heap_start
-        unpinned_attn_tensor_count = sum(
-            1
-            for layer in self.layers
-            for tensor in layer.attn
-            if not tensor.args["pin"]
-        )
+        # Runtime orchestration state. Node categorization is step-aware:
+        # layer_node_ids[step][layer] holds the node ids for that invocation,
+        # pre/post buckets are per-step. The same layer-shape info above is
+        # reused across all steps.
+        self.layer_node_ids, self.pre_node_ids_per_step, self.post_node_ids_per_step = \
+            categorize_nodes(self.sys.trace.node_map)
+        self.num_steps: int = len(self.layer_node_ids)
 
-        unpinned_ffn_tensor_count = sum(
-            1
-            for layer in self.layers
-            for tensor in layer.ffn
-            if not tensor.args["pin"]
-        )
+        # Reverse index for O(1) retire handling; only layer nodes populate it.
+        # Pre- and post-layer computes retire too but are left out of the map,
+        # so retire handling silently ignores them.
+        self.node_to_step_layer: dict[int, tuple[int, int]] = {}
+        for step in range(self.num_steps):
+            for layer, nids in enumerate(self.layer_node_ids[step]):
+                for nid in nids:
+                    self.node_to_step_layer[nid] = (step, layer)
 
-        unpinned_tensor_count = unpinned_attn_tensor_count + unpinned_ffn_tensor_count
+        # Per-(step, layer) outstanding compute-node counter.
+        self.layer_nodes_remaining: list[list[int]] = [
+            [len(nids) for nids in per_step] for per_step in self.layer_node_ids
+        ]
 
-        self.log.on = True
+        # Progress pointers and one-shot submission flags (filled in Phase 5).
+        self.current_step_idx: int = 0
+        self.current_layer_idx: int = 0
+        self.next_prefetch_step_idx: int = 0
+        self.next_prefetch_layer_idx: int = 0
+        self.compute_submitted: set[tuple[int, int]] = set()
+        self.pre_submitted: set[int] = set()
+        self.post_submitted: set[int] = set()
 
-        self.log.record(Log.engine(self.id, "SCHEDULER_MESSAGE", 0, {
-            "from": self.name,
-            "msg": "FlexInfer Memory Layout Summary.",
-            "total_memory_pages": total_memory_pages,
-            "pinned_memory_pages": pinned_memory_pages,
-            "heap_space_pages": heap_space_pages,
-            "unpinned_tensor_count": unpinned_tensor_count,
-            "unpinned_attn_tensor_count": unpinned_attn_tensor_count,
-            "unpinned_ffn_tensor_count": unpinned_ffn_tensor_count,
-        }))
+        # Maps prefetch TransferJob id to the (step, layer) it's loading.
+        self.prefetch_job_to_step_layer: dict[uuid.UUID, tuple[int, int]] = {}
 
-        self.log.on = False
+        # [CLAUDE_END]
 
-        self.heap: Heap = Heap(self.page_idx_heap_start, self.page_idx_heap_end)
+
+        # Submit transfer job
+        if load_batch:
+            self.sys.transfer(load_batch)
+
         return True
 
-    def _find_layer_from_tensor(self, tensor_ids: list[int]) -> int | None:
-        tensor_map = self.sys.trace.tensor_map
-        layer = None
-        for tensor_id in tensor_ids:
-            tensor = tensor_map[tensor_id]
-            if "layer" in tensor.args:
-                _layer = tensor.args["layer"]
-                if layer is None or _layer < layer:
-                    layer = _layer
-
-        return layer
-
-    def _heap_used_pages(self) -> int:
-        return sum(num_pages for _, num_pages, _ in self.heap.allocs)
-
-    def _get_needed_tensor_ids(self) -> list[int]:
-        N_layers = len(self.layers)
-        ids = []
-        seen = set()
-
-        for offset in range(self.prefetch_window):
-            layer = self.layers[(self.current_layer + offset) % N_layers]
-            for tensor in layer.attn:
-                if tensor.id not in seen:
-                    seen.add(tensor.id)
-                    ids.append(tensor.id)
-            for tensor in layer.ffn:
-                if tensor.id not in seen:
-                    seen.add(tensor.id)
-                    ids.append(tensor.id)
-
-        return ids
-
     def runtime(self, retired_jobs: list[BaseJob]) -> None:
-        Forward = (len(self.waiting_job_ids) == 0)
+        """ Help
+        - Trace information to execute
+          node_map = self.sys.trace.node_map (dict[node_id, Node])
+          tensor_map = self.sys.trace.tensor_map (dict[tensor_id, Tensor])
 
-        # Try to update current_layer number
-        used_tensor_ids = set()
+        - How to release a memory region in memory for re-use
+          mem_region = self.sys.find(self.memory, tensor)[0]
+          self.sys.release(mem_region)
+
+        - How to claim a memory region, for use or load (page_idx is a start address in memory for this tensor)
+          mem_region = self.sys.claim(self.memory, tensor, page_idx)
+
+        - How to load tensors from storage to memory (load them in batch for performance)
+          load_batch = []
+          mem_region = self.sys.find(self.memory, tensor)[0]
+          stor_region = self.sys.find(self.storage, tensor)[0]
+          load_batch.append((mem_region, stor_region))
+          # ... (add more tuples to the load_batch)
+          self.sys.transfer(load_batch)
+
+        - How to request computation of a node
+          self.sys.compute(self.compute, node)
+        """
+
+
+        # [CLAUDE_BEGIN]
+
+        # Retire handling: update prefetch status and layer counters.
         for job in retired_jobs:
-            if job.id in self.waiting_job_ids:
-                self.waiting_job_ids.remove(job.id)
-                if not self.waiting_job_ids:
-                    Forward = True
+            if isinstance(job, TransferJob):
+                sl = self.prefetch_job_to_step_layer.pop(job.id, None)
+                if sl is not None:
+                    _step, layer = sl
+                    for tensor in self.unpinned_per_layer[layer]:
+                        tensor.args["flexinfer"] = FlexInferStatus.MEMORY_LOADED
+            elif isinstance(job, ComputeJob):
+                sl = self.node_to_step_layer.get(job.node.id)
+                if sl is not None:
+                    step, layer = sl
+                    self.layer_nodes_remaining[step][layer] -= 1
 
-            if isinstance(job, ComputeJob):
-                node = job.node
-                used_tensor_ids.update(node.input_tensors)
-                used_tensor_ids.update(node.output_tensors)
+        # Advance current (step, layer) while its compute counter hits zero.
+        # Wraps to the next step when we finish a step's last layer. Loops so
+        # that a tick which retires the final node(s) of several consecutive
+        # layers advances through all of them and frees their slots.
+        while self.current_step_idx < self.num_steps:
+            if self.current_layer_idx >= len(self.flex_layers):
+                self.current_step_idx += 1
+                self.current_layer_idx = 0
+                continue
+            if self.layer_nodes_remaining[self.current_step_idx][self.current_layer_idx] == 0:
+                self._unload_layer(self.current_step_idx, self.current_layer_idx)
+                self.current_layer_idx += 1
+            else:
+                break
 
-        used_tensor_ids = list(used_tensor_ids)
-        if used_tensor_ids:
-            current_layer = self._find_layer_from_tensor(used_tensor_ids)
-            if current_layer is not None:
-                self.current_layer = current_layer
+        # Post-layer submission: a step's post nodes include the parent of the
+        # next step's pre node, so they must be queued BEFORE the pre block.
+        for step in range(self.num_steps):
+            if step in self.post_submitted:
+                continue
+            if all(r == 0 for r in self.layer_nodes_remaining[step]):
+                for nid in self.post_node_ids_per_step[step]:
+                    self.sys.compute(self.compute, self.sys.trace.node_map[nid])
+                self.post_submitted.add(step)
 
-        needed_tensor_ids = self._get_needed_tensor_ids()
-        tensors_in_heap = []
-        for _, _, tensor in self.heap.allocs:
-            tensors_in_heap.append(tensor.id)
+        # Pre-layer submission: one-shot per step, once current reaches it.
+        if (self.current_step_idx < self.num_steps
+                and self.current_step_idx not in self.pre_submitted):
+            for nid in self.pre_node_ids_per_step[self.current_step_idx]:
+                self.sys.compute(self.compute, self.sys.trace.node_map[nid])
+            self.pre_submitted.add(self.current_step_idx)
 
-        needed_dynamic_tensor_ids = []
-        needed_dynamic_pages = 0
-        resident_needed_dynamic_tensor_ids = []
-        missing_needed_dynamic_tensor_ids = []
-        missing_needed_dynamic_pages = 0
+        # Prefetch loop: start transfers for (step, layer) pairs within the
+        # prefetch_window of current, until we run out of slots or window.
+        num_layers = len(self.flex_layers)
+        current_mega = self.current_step_idx * num_layers + self.current_layer_idx
+        while self.next_prefetch_step_idx < self.num_steps:
+            next_mega = (
+                self.next_prefetch_step_idx * num_layers
+                + self.next_prefetch_layer_idx
+            )
+            if next_mega >= current_mega + self.prefetch_window:
+                break
 
-        tensor_map = self.sys.trace.tensor_map
-        for tensor_id in needed_tensor_ids:
-            tensor = tensor_map[tensor_id]
-            if not tensor.args["pin"]:
-                needed_dynamic_tensor_ids.append(tensor_id)
-                needed_dynamic_pages += tensor.num_pages
-                if tensor_id in tensors_in_heap:
-                    resident_needed_dynamic_tensor_ids.append(tensor_id)
-                else:
-                    missing_needed_dynamic_tensor_ids.append(tensor_id)
-                    missing_needed_dynamic_pages += tensor.num_pages
+            pref_step = self.next_prefetch_step_idx
+            pref_layer = self.next_prefetch_layer_idx
+            unpinned = self.unpinned_per_layer[pref_layer]
 
-        retire_tensor_ids = list(set(tensors_in_heap) - set(needed_tensor_ids))
+            if not unpinned:
+                # No load needed; just advance the pointer.
+                self._advance_prefetch_ptr()
+                continue
 
-        # Release won't be needed tensors
-        for tensor_id in retire_tensor_ids:
-            tensor = tensor_map[tensor_id]
-            if not tensor.args["pin"]:
-                if self.heap.free(tensor):
-                    mem_region = self.sys.find(self.memory, tensor)[0]
-                    self.sys.release(mem_region)
+            slot_idx = self._acquire_slot(pref_step, pref_layer)
+            if slot_idx is None:
+                # All slots busy; retry on a later tick once a layer frees one.
+                break
 
-        # Load will-be-needed tensors
-        batch = []
-        for tensor_id in needed_tensor_ids:
-            tensor = tensor_map[tensor_id]
-            if not tensor.args["pin"]:       # Dynamic Tensor
-                mem_region = self.sys.find(self.memory, tensor_id)
-                if not mem_region:
-                    alloc_page_idx = self.heap.alloc(tensor)
-                    if alloc_page_idx is None:
-                        args = {
-                            "from": self.name,
-                            "msg": "[FlexInfer] Failed to claim MemoryRegion for Dynamic Tensor",
-                            "current_layer": self.current_layer,
-                            "prefetch_window": self.prefetch_window,
-                            "heap": {
-                                "page_idx_heap_start": self.page_idx_heap_start,
-                                "page_idx_heap_end": self.page_idx_heap_end,
-                                "cap_pages": self.heap.cap,
-                                "used_pages": self._heap_used_pages(),
-                                "free_pages": self.heap.cap - self._heap_used_pages(),
-                                "free_spans": self.heap.free_spans(),
-                            },
-                            "tensor": {
-                                "id": tensor.id,
-                                "name": tensor.name,
-                                "requested_tensor_size": tensor.num_pages,
-                                "pin": tensor.args["pin"],
-                                "layer": tensor.args.get("layer"),
-                            },
-                            "needed_tensor_ids": needed_tensor_ids,
-                            "needed_dynamic_tensor_ids": needed_dynamic_tensor_ids,
-                            "needed_dynamic_pages": needed_dynamic_pages,
-                            "missing_needed_dynamic_tensor_ids": missing_needed_dynamic_tensor_ids,
-                            "missing_needed_dynamic_pages": missing_needed_dynamic_pages,
-                            "resident_tensor_ids_in_heap": tensors_in_heap,
-                        }
-                        self.sys.abort(args)
-                        return
+            batch = []
+            for tensor in unpinned:
+                page_idx = self._tensor_page_idx(pref_layer, slot_idx, tensor)
+                mem_region = self.sys.claim(self.memory, tensor, page_idx)
+                if mem_region is None:
+                    # sys.claim already signalled abort on the engine; stop
+                    # here so we don't hand a None dest to sys.transfer.
+                    return
+                stor_region = self.sys.find(self.storage, tensor)[0]
+                batch.append((stor_region, mem_region))
+                tensor.args["flexinfer"] = FlexInferStatus.MEMORY_LOADING
 
-                    mem_region = self.sys.claim(self.memory, tensor, alloc_page_idx)
-                    if mem_region is None:
-                        print("mem_region claim failed!")
-                    stor_region = self.sys.find(self.storage, tensor)[0]
-                    batch.append((stor_region, mem_region))
+            job_id = self.sys.transfer(batch)
+            self.prefetch_job_to_step_layer[job_id] = (pref_step, pref_layer)
+            self._advance_prefetch_ptr()
 
-        # Prefetch Tensors from storage
-        if batch:
-            self.sys.transfer(batch)
+        # Compute submission for the current layer, once all its unpinned
+        # tensors are loaded. Later layers wait for their turn as current
+        # advances on future ticks.
+        if self.current_step_idx < self.num_steps:
+            cur_key = (self.current_step_idx, self.current_layer_idx)
+            if cur_key not in self.compute_submitted:
+                unpinned = self.unpinned_per_layer[self.current_layer_idx]
+                if all(
+                    t.args["flexinfer"] == FlexInferStatus.MEMORY_LOADED
+                    for t in unpinned
+                ):
+                    for nid in self.layer_node_ids[self.current_step_idx][self.current_layer_idx]:
+                        self.sys.compute(self.compute, self.sys.trace.node_map[nid])
+                    self.compute_submitted.add(cur_key)
 
-        # Submit compute jobs
-        if Forward:
-            node_map = self.sys.trace.node_map
-            todo_start = -1
-            for node in node_map.values():
-                if node.status == NodeStatus.TODO:
-                    todo_start = node.id
-                    break
+        # [CLAUDE_END]
 
-            self.waiting_job_ids.clear()
-            for node_id in range(todo_start, todo_start + self.num_nodes_in_a_layer):
-                if node_id not in node_map:
-                    continue
 
-                node = node_map[node_id]
-                job_id = self.sys.compute(self.compute, node)
-                self.waiting_job_ids.add(job_id)
         return

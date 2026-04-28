@@ -2,11 +2,11 @@ from typing import Any
 
 from sim.core.log import Log
 from sim.core.job import BaseJob
-from sim.hw.compute.common import BaseCompute
+from sim.hw.compute.common import BaseGPU
 from sim.hw.memory.common import BaseMemory
 
 
-class SimpleGPU(BaseCompute):
+class SimpleGPU(BaseGPU):
     """
     Simplistic GPU model.
 

@@ -41,6 +41,12 @@ def end_log(job: ComputeJob, log: Log) -> None:
             "id": node.id,
             "name": node.name,
             "work_total": job.work_total
+        },
+        "Lifecycle": {
+            "timestamp_queued": job.timestamp_queued,
+            "timestamp_at_head": job.timestamp_at_head,
+            "timestamp_begin": job.timestamp_begin,
+            "timestamp_end": job.timestamp_end
         }
     }
 

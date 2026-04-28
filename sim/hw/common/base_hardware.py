@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from sim.core.sim_object import SimObject
 from sim.core.log import Log, TrackID
@@ -22,13 +22,15 @@ class WorkRate:
 
 class BaseHardware(SimObject):
     """Abstract base class for all hardwares in simulator"""
-    def __init__(self, obj_id: int, name: str, log: Log):
+    def __init__(self, obj_id: int, name: str, log: Log, args: dict[str, Any] | None = None):
         super().__init__(obj_id, name, log)
 
         self.job_running: list["BaseJob"] = []
 
-        # args field for arbitrary note
-        self.args: dict[str, Any] = {}
+        # Hardware config from YAML; concrete subclasses still pull their own
+        # specific keys, but the dict is preserved here for cross-cutting tags
+        # (e.g. `args["custom_dep"]` for TensorAtHWDep).
+        self.args: dict[str, Any] = args if args is not None else {}
 
         # Create logging tracks
         log.record(Log.subtrack(TrackID.Event, self.id, self.name))

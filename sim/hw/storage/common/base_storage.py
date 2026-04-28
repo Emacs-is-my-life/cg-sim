@@ -10,8 +10,8 @@ if TYPE_CHECKING:
 class BaseStorage(BaseHardware):
     """Base class for storage hardware models"""
 
-    def __init__(self, obj_id: int, name: str, log: Log):
-        super().__init__(obj_id, name, log)
+    def __init__(self, obj_id: int, name: str, log: Log, args: dict[str, Any] | None = None):
+        super().__init__(obj_id, name, log, args)
         from .storage_region import StorageSpace
         self.space: StorageSpace = StorageSpace(self)
         self.fixed_latency_micros: float = 0.0

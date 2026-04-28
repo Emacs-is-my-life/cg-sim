@@ -3,7 +3,7 @@
 # Simulator configuration
 logger:
   args:
-    result_path: "sim_result.json"
+    result_path: "tmp/flexinfer_result.json"
     log_level: 2             # Events, Counters
 
 # Trace(workload) loading
