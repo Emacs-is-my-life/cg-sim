@@ -41,6 +41,12 @@ def end_log(job: TransferJob, log: Log) -> None:
             "size_KB": total_transfer,
             "transfer_KBps": avg_rate,
             "batch": []
+        },
+        "Lifecycle": {
+            "timestamp_queued": job.timestamp_queued,
+            "timestamp_at_head": job.timestamp_at_head,
+            "timestamp_begin": job.timestamp_begin,
+            "timestamp_end": job.timestamp_end
         }
     }
 
