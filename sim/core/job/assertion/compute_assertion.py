@@ -13,17 +13,18 @@ if TYPE_CHECKING:
 
 def assertion(job: ComputeJob, sys: System) -> bool:
     # 0. Hardware Availability Check
+    node = job.node
     for hw in job.running_on:
         if not hw.can_run(job):
             return False
 
-        if job.hw & NodeHW.CPU:
+        if node.hw & NodeHW.CPU:
             if isinstance(hw, BaseCPU):
                 continue
-        elif job.hw & NodeHW.GPU:
+        elif node.hw & NodeHW.GPU:
             if isinstance(hw, BaseGPU):
                 continue
-        elif job.hw & NodeHW.NPU:
+        elif node.hw & NodeHW.NPU:
             if isinstance(hw, BaseNPU):
                 continue
         else:

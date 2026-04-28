@@ -8,8 +8,9 @@ from .base_compute import BaseCompute
 
 
 class BaseGPU(BaseCompute):
-    def __init__(self, obj_id: int, name: str, log: Log, memory: BaseMemory, args: dict[str, Any]):
-        pass
+    def __init__(self, obj_id: int, name: str, log: Log, memory: BaseMemory):
+        super().__init__(obj_id, name, log, memory)
+        return
 
     def can_run(self, job: BaseJob) -> bool:
         pass
