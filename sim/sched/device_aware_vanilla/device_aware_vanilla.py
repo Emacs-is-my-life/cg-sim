@@ -89,6 +89,21 @@ class DeviceAwareVanilla(BaseScheduler):
         # in-flight transfer). Retried every engine tick until all their
         # regions are freed — see _retry_pending_releases.
         self._pending_releases: set[int] = set()
+
+        # Timing shims: alias / dispatcher nodes need their CPU dispatch
+        # time charged but can't safely run as real ComputeJobs (the
+        # engine's compute_assertion would force phantom transfers for
+        # CUDA-tensor inputs on a CPU-thread node, or fail the output-
+        # IDLE check on aliased outputs). Solution: submit a synthetic
+        # Node with empty input/output tensors and the original's
+        # compute_time_micros, queued on cpu_compute. The engine runs it
+        # serially through the CPU like any other op (correctly charging
+        # the dispatch time and respecting CPU concurrency = 1) without
+        # ever asking about tensor residency. When the shim retires, the
+        # scheduler finalizes the original node's data semantics
+        # (dispatcher output promotion, child unblock, lifetime release).
+        self._shim_id_counter: int = 0
+        self._shim_to_original: dict[int, Node] = {}
         return
 
     # Tensor types that stay resident for the whole run. Everything else
@@ -370,15 +385,42 @@ class DeviceAwareVanilla(BaseScheduler):
 
         return None
 
-    def _retire_node_in_place(self, node: Node, kind: str) -> None:
-        """Mark a node DONE instantly and unblock its children.
+    def _submit_timing_shim(self, node: Node, kind: str) -> None:
+        """Submit a synthetic CPU ComputeJob carrying only the original
+        node's compute_time_micros — no input or output tensors.
 
-        For `dispatcher` nodes we additionally promote the output region
-        on each output tensor's home memory to ready/latest so downstream
-        consumers can read without an artificial transfer.
+        Why: the original node is a pure-alias or dispatcher op whose
+        real execution on the CPU thread is dispatch-only (pointer
+        arithmetic, cudaMalloc, etc.). It still costs CPU time. We can't
+        run the original directly because core's compute_assertion would
+        demand input residency on cpu.memory — wrong for CUDA tensors —
+        and refuse the output-IDLE check on aliased outputs. Submitting
+        a stripped synthetic ComputeJob charges the engine for the time
+        on the CPU thread (serially, respecting CPU max_concurrent_jobs)
+        without triggering any data-residency machinery.
 
-        Compute_time_micros is intentionally dropped: alias / allocator
-        dispatch is sub-microsecond overhead."""
+        On the shim's retirement, _retire_completed_nodes detects the
+        marker in args and runs _finalize_in_place_after_shim on the
+        original node — that handles dispatcher output promotion,
+        consumer counts, dead-output release, and child unblocking.
+        """
+        self._shim_id_counter += 1
+        shim_id = -1_000_000_000 - self._shim_id_counter
+        shim = Node(
+            shim_id,
+            f"shim<{node.name}>",
+            float(node.compute_time_micros),
+            args={"timing_shim_for": node.id, "shim_kind": kind},
+        )
+        self._shim_to_original[shim_id] = node
+        node.status = NodeStatus.WAITING
+        self.sys.compute(self.cpu_compute, shim)
+
+    def _finalize_in_place_after_shim(self, node: Node, kind: str) -> None:
+        """Run the data-side bookkeeping for a node whose timing shim
+        just retired. Same effects the old eager retire-in-place had,
+        but now happens after the engine has charged the CPU for the
+        node's compute_time."""
         node.status = NodeStatus.DONE
 
         if kind == "dispatcher":
@@ -386,9 +428,6 @@ class DeviceAwareVanilla(BaseScheduler):
                 if tensor_id in node.input_tensors:
                     continue
                 tensor = self.sys.trace.tensor_map[tensor_id]
-                # Dead dispatcher output: no consumer in the DAG. Skip the
-                # claim entirely — otherwise the region leaks for the rest
-                # of the run.
                 if self._remaining_consumers.get(tensor_id, 0) <= 0:
                     if tensor.args.get("tensor_type") not in self._PERMANENT_TYPES:
                         continue
@@ -407,6 +446,7 @@ class DeviceAwareVanilla(BaseScheduler):
                 target.is_latest = True
 
         self._consume_inputs(node)
+        self._release_dead_outputs(node)
 
         for child_id in node.children_nodes:
             if child_id not in self.pending_parent_count:
@@ -562,13 +602,23 @@ class DeviceAwareVanilla(BaseScheduler):
 
             compute = self._compute_for_node(node)
 
-            # Retire pure-alias / dispatcher nodes in place BEFORE any
-            # residency / claim work: they don't touch tensor data, so
-            # trying to resolve their inputs on the compute's memory would
-            # emit spurious cross-device transfers.
+            # Pure-alias / dispatcher nodes: route through a CPU timing
+            # shim so their dispatch time is charged on the CPU thread
+            # without triggering data-residency machinery (which would
+            # demand inputs on cpu.memory and fail for CUDA tensors).
+            # The shim consumes a CPU concurrency slot like any other
+            # CPU op, so respect cpu_compute's cap.
             kind = self._retire_kind(node)
             if kind is not None:
-                self._retire_node_in_place(node, kind)
+                shim_compute = self.cpu_compute
+                cap_shim = getattr(shim_compute, "max_concurrent_jobs", 1)
+                running_shim = len(shim_compute.job_running)
+                committed_shim = committed_per_compute.get(shim_compute, 0)
+                if running_shim + committed_shim >= cap_shim:
+                    self.ready_node_ids.append(node_id)
+                    continue
+                self._submit_timing_shim(node, kind)
+                committed_per_compute[shim_compute] = committed_shim + 1
                 submitted_any = True
                 continue
 
@@ -612,6 +662,16 @@ class DeviceAwareVanilla(BaseScheduler):
     def _retire_completed_nodes(self, retired_jobs: list[BaseJob]) -> None:
         for job in retired_jobs:
             if not isinstance(job, ComputeJob):
+                continue
+
+            shim_for = job.node.args.get("timing_shim_for")
+            if shim_for is not None:
+                # Timing shim retiring: fold its effect onto the original.
+                original = self._shim_to_original.pop(job.node.id, None)
+                if original is None:
+                    original = self.sys.trace.node_map.get(shim_for)
+                if original is not None:
+                    self._finalize_in_place_after_shim(original, job.node.args.get("shim_kind"))
                 continue
 
             self._consume_inputs(job.node)
