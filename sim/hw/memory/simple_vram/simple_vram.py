@@ -15,7 +15,7 @@ class SimpleVRAM(BaseMemory):
 
     def __init__(self, obj_id: int, name: str, log: Log, args: dict[str, Any]):
         memory_size_KB: int = int(args["memory_size_KB"])
-        super().__init__(obj_id, name, log, memory_size_KB)
+        super().__init__(obj_id, name, log, memory_size_KB, args=args)
         self.memory_bandwidth_KBps = float(args["memory_bandwidth_KBps"])
         self.max_concurrent_jobs = int(args.get("max_concurrent_jobs", 4))
         if self.max_concurrent_jobs <= 0:

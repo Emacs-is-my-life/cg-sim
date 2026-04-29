@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from sim.core.trace import Node, Tensor, TerminalNode, Trace, TraceLoader
+from sim.core.trace.custom_dep import NodeDoneDep
 from sim.hw.storage.common import BaseStorage
 
 from .utils import (
@@ -458,6 +459,7 @@ class PytorchProfile(TraceLoader):
         self._read_dot_edges(dot_edges, node_map, profile_to_node, profile_to_tensor)
         self._apply_storage_aliasing(node_map, tensor_map)
         self._mark_implicit_inputs(node_map, tensor_map)
+        self._annotate_alias_dispatcher_deps(node_map, tensor_map)
         if bool(self.args.get("add_temporal_data_control_edges", False)):
             self._add_temporal_data_control_edges(node_map)
         self._add_terminal_node(node_map)
@@ -494,22 +496,29 @@ class PytorchProfile(TraceLoader):
 
         Fully data-driven from the tensor map — no op-name heuristics.
 
-          1. **Initial-tensor aliasing** — tensors of type WEIGHT / INPUT
-             / LEAF are alive throughout the run, so any two sharing
-             (device, storage_id) are always true aliases (parameter
-             register_buffer, weight view set up before inference, etc.).
+        Pass A (lifetime-aware storage dedup): group every tensor by
+        (device, storage_id). Within a group, two tensors are aliases of
+        the same underlying allocation iff their lifetimes overlap. PyTorch
+        profile rows for views / aliases / register_buffer copies all share
+        the same storage_id with overlapping lifetimes — those merge.
+        Storage that gets freed and reallocated (allocator reuse) appears
+        as multiple rows with the same storage_id but disjoint lifetimes —
+        those stay separate.
 
-          2. **Per-node aliasing** — for every node, if any output tensor
-             shares (device, storage_id) with any input tensor, they
-             alias: the output is the same physical memory as the input.
-             View ops (aten::view, transpose, slice, ...), in-place ops
-             (aten::add_, ...), and any other "same-storage as input"
-             outputs all match this rule without naming them.
+        Tensors with type WEIGHT/INPUT/LEAF are treated as alive for the
+        entire run (birth=0, death=inf), so any other tensor sharing their
+        storage automatically merges into them.
+
+        Pass B (per-node aliasing): for every node, if any output tensor
+        shares (device, storage_id) with any input tensor, merge. This
+        is the same-time, same-op view check; with Pass A doing most of
+        the work it now mainly catches view ops on intermediates that
+        Pass A's lifetime sweep missed by margin.
 
         Allocator ops (aten::empty, etc.) have no inputs, so per-node
-        aliasing never merges their output with a prior tensor — even if
-        the allocator reuses a previously-freed storage slot, the sim
-        tensor stays distinct.
+        aliasing never merges their output with a prior tensor — they
+        stay distinct unless their lifetime overlaps with another
+        tensor's on the same storage_id, which Pass A handles correctly.
         """
         remap: dict[int, int] = {}
 
@@ -522,29 +531,143 @@ class PytorchProfile(TraceLoader):
                 remap[s] = tid  # path compression
             return tid
 
-        # Pass A: initial-tensor aliasing.
-        initial_by_storage: dict[tuple[str, object], int] = {}
-        for tid, tensor in list(tensor_map.items()):
-            if tensor.args.get("tensor_type") not in self._INITIAL_TYPES:
-                continue
+        # ---- Compute per-tensor lifetime [birth_ns, death_ns]. ----
+        INF = float("inf")
+        birth: dict[int, float] = {}
+        death: dict[int, float] = {}
+
+        for node in node_map.values():
+            s = node.args.get("start_ns")
+            e = node.args.get("end_ns")
+            if s is None: s = 0
+            if e is None: e = s
+            for tid in node.output_tensors:
+                if tid not in birth or s < birth[tid]:
+                    birth[tid] = s
+                if tid not in death or e > death[tid]:
+                    death[tid] = e
+            for tid in node.input_tensors:
+                # consumed during this node — extends death
+                if tid not in death or e > death[tid]:
+                    death[tid] = e
+                # if no producer ever recorded, consumer-only tensor is
+                # treated as alive from time 0
+                birth.setdefault(tid, 0)
+
+        # Permanent tensors (WEIGHT/INPUT/LEAF) live for the whole run.
+        for tid, tensor in tensor_map.items():
+            if tensor.args.get("tensor_type") in self._INITIAL_TYPES:
+                birth[tid] = 0
+                death[tid] = INF
+
+        def lifetime(tid: int) -> tuple[float, float]:
+            return (birth.get(tid, 0), death.get(tid, INF))
+
+        # Tensor ids that turn out to be aliases of a permanent buffer
+        # (WEIGHT/INPUT/LEAF). Their "producer" node is a view-setup or
+        # in-place op against the permanent buffer, not a real data write,
+        # so we drop them from any node.output_tensors during the rewrite.
+        # Otherwise the producer's begin_mutation would invalidate the
+        # permanent's region and claim a duplicate, double-allocating the
+        # buffer.
+        dropped_outputs: set[int] = set()
+
+        def merge_into(keeper_tid: int, victim_tid: int) -> None:
+            """Merge victim into keeper. Keeper's `size_bytes` is *never*
+            bumped up from a victim view — view rows can over-state the
+            underlying storage size when as_strided/expand creates an
+            oversized numel through replication / non-contiguous strides.
+            The keeper is chosen by the cluster-build loop to be the
+            authoritative size source (the WEIGHT row if one exists,
+            otherwise the smallest member of the cluster — which is a
+            tight upper bound on a contiguous view of the storage).
+            """
+            keeper = tensor_map[keeper_tid]
+            victim = tensor_map[victim_tid]
+            keeper.args["profile_tensor_aliases"].append(victim.args.get("profile_tensor_id"))
+            # Promote tensor_type: WEIGHT > INPUT > LEAF > INTERMEDIATE.
+            v_type = victim.args.get("tensor_type")
+            k_type = keeper.args.get("tensor_type")
+            if v_type == "WEIGHT":
+                keeper.args["tensor_type"] = "WEIGHT"
+            elif v_type == "INPUT" and k_type not in ("WEIGHT",):
+                keeper.args["tensor_type"] = "INPUT"
+            elif v_type == "LEAF" and k_type not in ("WEIGHT", "INPUT"):
+                keeper.args["tensor_type"] = "LEAF"
+            # If the keeper is a permanent buffer, the victim's producer
+            # is a view setup, not a write — drop it from outputs.
+            if keeper.args.get("tensor_type") in self._INITIAL_TYPES:
+                dropped_outputs.add(victim_tid)
+            # Update lifetime in case the keeper's was narrower.
+            kb, kd = lifetime(keeper_tid)
+            vb, vd = lifetime(victim_tid)
+            birth[keeper_tid] = min(kb, vb)
+            death[keeper_tid] = max(kd, vd)
+            remap[victim_tid] = keeper_tid
+
+        # ---- Pass A: lifetime-aware dedup grouped by (device, storage_id). ----
+        groups: dict[tuple[str | None, object], list[int]] = {}
+        for tid, tensor in tensor_map.items():
             sid = tensor.args.get("storage_id")
             if sid is None:
                 continue
             key = (tensor.args.get("device"), sid)
-            existing = initial_by_storage.get(key)
-            if existing is None:
-                initial_by_storage[key] = tid
+            groups.setdefault(key, []).append(tid)
+
+        for key, tids in groups.items():
+            if len(tids) < 2:
                 continue
-            keeper = tensor_map[existing]
-            if tensor.size_bytes > keeper.size_bytes:
-                keeper.size_bytes = tensor.size_bytes
-                keeper.num_pages = self._num_pages(tensor.size_bytes)
-            keeper.args["profile_tensor_aliases"].append(tensor.args.get("profile_tensor_id"))
-            if tensor.args.get("tensor_type") == "WEIGHT":
-                keeper.args["tensor_type"] = "WEIGHT"
-            elif tensor.args.get("tensor_type") == "INPUT" and keeper.args.get("tensor_type") != "WEIGHT":
-                keeper.args["tensor_type"] = "INPUT"
-            remap[tid] = existing
+            # Sort by birth time. Sweep clusters: tensors whose lifetime
+            # overlaps (b <= cluster_max_death) join the cluster.
+            tids_sorted = sorted(tids, key=lambda t: lifetime(t)[0])
+            clusters: list[list[int]] = []
+            cluster_deaths: list[float] = []
+            for tid in tids_sorted:
+                b, d = lifetime(tid)
+                # Find any open cluster this overlaps with.
+                placed = False
+                for ci in range(len(clusters)):
+                    if b <= cluster_deaths[ci]:
+                        clusters[ci].append(tid)
+                        if d > cluster_deaths[ci]:
+                            cluster_deaths[ci] = d
+                        placed = True
+                        break
+                if not placed:
+                    clusters.append([tid])
+                    cluster_deaths.append(d)
+            # Within each cluster, merge into a chosen anchor whose
+            # size_bytes best matches the underlying storage. Prefer
+            # WEIGHT/INPUT/LEAF rows (their size is set by the
+            # parameter's actual allocation, not a viewed numel). Among
+            # permanent rows we pick the *largest* — for a real param
+            # buffer the row recording the contiguous, full-size view
+            # has the buffer's true byte count, while smaller permanent
+            # rows may be partial views (e.g. weight-norm splits).
+            #
+            # If no permanent in the cluster, use the smallest size as a
+            # tight upper bound on the storage (views via as_strided /
+            # expand can over-state via overlapping strides).
+            for c in clusters:
+                if len(c) < 2:
+                    continue
+                permanent = [
+                    t for t in c
+                    if tensor_map[t].args.get("tensor_type") in self._INITIAL_TYPES
+                ]
+                if permanent:
+                    anchor = max(permanent, key=lambda t: tensor_map[t].size_bytes)
+                else:
+                    # Pure-intermediate cluster: take max as the best
+                    # estimate of the underlying storage. The downside
+                    # (overlapping as_strided views can over-state
+                    # numel) is small in practice for SDXL-style traces;
+                    # the alternative (min) under-counts real activations.
+                    anchor = max(c, key=lambda t: tensor_map[t].size_bytes)
+                for victim in c:
+                    if victim == anchor:
+                        continue
+                    merge_into(anchor, victim)
 
         # Pass B: per-node aliasing. Nodes in id order (= temporal order).
         for node_id in sorted(node_map.keys()):
@@ -574,10 +697,12 @@ class PytorchProfile(TraceLoader):
         if not remap:
             return
 
-        def rewrite(lst: list[int]) -> list[int]:
+        def rewrite(lst: list[int], drop_set: set[int] | None = None) -> list[int]:
             seen: set[int] = set()
             out: list[int] = []
             for t in lst:
+                if drop_set is not None and t in drop_set:
+                    continue
                 r = resolve(t)
                 if r not in seen:
                     seen.add(r)
@@ -586,12 +711,83 @@ class PytorchProfile(TraceLoader):
 
         for node in node_map.values():
             node.input_tensors = rewrite(node.input_tensors)
-            node.output_tensors = rewrite(node.output_tensors)
+            node.output_tensors = rewrite(node.output_tensors, drop_set=dropped_outputs)
 
         for removed_tid in list(remap.keys()):
             tensor_map.pop(removed_tid, None)
 
         return
+
+    def _annotate_alias_dispatcher_deps(self, node_map: dict[int, Node], tensor_map: dict[int, Tensor]) -> None:
+        """Tag pure-alias and dispatcher nodes with `custom_deps` so the
+        engine's compute_assertion bypasses its built-in
+        input-residency / output-IDLE checks — those assume "tensor data
+        is read on compute.memory", which is wrong for CPU-thread
+        pointer ops on CUDA tensors and for cross-device allocators.
+
+          - **Alias node** (every output_tensor_id appears in input_tensors
+            after storage-aliasing): a view / in-place op. Pure pointer
+            work, doesn't read/write tensor data. Only real dependency is
+            "all control-graph parents must be DONE".
+
+          - **Dispatcher node** (output home memory != compute.memory —
+            classic: aten::empty(device=cuda) on the CPU thread): same
+            thing. The scheduler pre-claims the output region on its
+            home memory before submit, then we **clear the dispatcher's
+            output_tensors** — otherwise core's begin_mutation would
+            invalidate every region of those tensors (marking the
+            pre-claimed region not-latest) before failing to find any
+            on compute.memory. Tagging the node `dispatcher` in args
+            lets the scheduler still know which outputs to pre-claim.
+
+        Both kinds get a NodeDoneDep per control-graph parent. That
+        replaces the engine's built-in `for p in parent_nodes: status==DONE`
+        check exactly, while skipping the inappropriate residency checks.
+
+        Standard nodes (real computes whose inputs/outputs match
+        compute.memory) get no custom_deps and run through the normal
+        data-flow path.
+        """
+        for node in node_map.values():
+            outs = node.output_tensors
+            ins = node.input_tensors
+
+            is_alias = bool(outs) and all(t in ins for t in outs)
+            is_dispatcher = self._loader_is_dispatcher(node, tensor_map)
+
+            if not (is_alias or is_dispatcher):
+                continue
+
+            if is_dispatcher and not is_alias:
+                # Stash the cross-device outputs for the scheduler to
+                # pre-claim, then clear them from the node so the engine
+                # doesn't invalidate the pre-claimed region.
+                cross = [t for t in outs if t not in ins]
+                node.args["dispatcher_outputs"] = list(cross)
+                node.output_tensors = [t for t in outs if t not in cross]
+
+            for parent_id in node.parent_nodes:
+                node.custom_deps.append(NodeDoneDep(parent_id))
+
+    @staticmethod
+    def _loader_is_dispatcher(node: Node, tensor_map: dict[int, Tensor]) -> bool:
+        """A node is dispatcher-style if it produces (non-aliased) outputs
+        on a device different from where the node itself runs. Determined
+        purely from the profile: cpu_leaf nodes producing CUDA tensors
+        and gpu_runtime nodes producing CPU tensors are dispatchers."""
+        role = node.args.get("runtime_role", "")
+        compute_dev = "cuda" if role == "gpu_runtime" else "cpu"
+        for tid in node.output_tensors:
+            if tid in node.input_tensors:
+                continue
+            tensor = tensor_map.get(tid)
+            if tensor is None:
+                continue
+            tdev = (tensor.args.get("device") or "cpu").lower()
+            tdev_short = "cuda" if tdev.startswith("cuda") else "cpu"
+            if tdev_short != compute_dev:
+                return True
+        return False
 
     def _mark_implicit_inputs(self, node_map: dict[int, Node], tensor_map: dict[int, Tensor]) -> None:
         producers_by_tensor: dict[int, list[int]] = {}
@@ -639,24 +835,49 @@ class PytorchProfile(TraceLoader):
 
         graph_source = str(self.args.get("graph_source", "csv")).lower()
         if graph_source == "dot":
-            return self._load_dot(bundle_dir, manifest)
-        if graph_source != "csv":
+            trace = self._load_dot(bundle_dir, manifest)
+        elif graph_source == "csv":
+            tensor_csv_path = resolve_path(manifest["tensor_csv"], bundle_dir)
+            node_csv_path = resolve_path(manifest["node_csv"], bundle_dir)
+            edge_csv_path = resolve_path(manifest["edge_csv"], bundle_dir)
+
+            tensor_map, profile_to_tensor = self._read_tensors(tensor_csv_path)
+            node_map, profile_to_node = self._read_nodes(node_csv_path)
+            self._read_edges(edge_csv_path, node_map, profile_to_node, profile_to_tensor)
+            self._apply_storage_aliasing(node_map, tensor_map)
+            self._mark_implicit_inputs(node_map, tensor_map)
+            self._annotate_alias_dispatcher_deps(node_map, tensor_map)
+            if bool(self.args.get("add_temporal_data_control_edges", False)):
+                self._add_temporal_data_control_edges(node_map)
+            self._add_terminal_node(node_map)
+            trace = Trace(self.id, self.name, self.log, node_map, tensor_map)
+        else:
             raise Exception(f"[PytorchProfile] Unsupported graph_source: {graph_source}")
 
-        tensor_csv_path = resolve_path(manifest["tensor_csv"], bundle_dir)
-        node_csv_path = resolve_path(manifest["node_csv"], bundle_dir)
-        edge_csv_path = resolve_path(manifest["edge_csv"], bundle_dir)
+        # Optional: inject a weight-streaming schedule so DAV simulates
+        # the schedule's effect via standard transfer-on-input-mismatch
+        # logic, without requiring ScheduleReplay. Path can be relative
+        # to the bundle dir.
+        inject_path = self.args.get("inject_schedule_path")
+        if inject_path:
+            inject_path_resolved = resolve_path(inject_path, bundle_dir)
+            try:
+                from graph_modifiers.inject_schedule import (
+                    inject_schedule_into_trace,
+                )
+            except ImportError as e:
+                raise Exception(
+                    "[PytorchProfile] inject_schedule_path requires "
+                    "graph_modifiers.inject_schedule to be importable. "
+                    f"Underlying: {e}"
+                )
+            print(f"[PytorchProfile] injecting schedule from {inject_path_resolved}",
+                  flush=True)
+            inject_schedule_into_trace(
+                trace, str(inject_path_resolved), model_evicts=False,
+            )
 
-        tensor_map, profile_to_tensor = self._read_tensors(tensor_csv_path)
-        node_map, profile_to_node = self._read_nodes(node_csv_path)
-        self._read_edges(edge_csv_path, node_map, profile_to_node, profile_to_tensor)
-        self._apply_storage_aliasing(node_map, tensor_map)
-        self._mark_implicit_inputs(node_map, tensor_map)
-        if bool(self.args.get("add_temporal_data_control_edges", False)):
-            self._add_temporal_data_control_edges(node_map)
-        self._add_terminal_node(node_map)
-
-        return Trace(self.id, self.name, self.log, node_map, tensor_map)
+        return trace
 
     def placement(self, trace: Trace, storage: BaseStorage) -> None:
         initial_tensor_types = set(self.args.get("initial_tensor_types", ["WEIGHT", "INPUT", "LEAF"]))
