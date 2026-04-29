@@ -4,6 +4,36 @@ from typing import Any
 from sim.core.trace import Tensor
 
 
+NODE_LAYER_PAT = re.compile(r'-(\d+)\b')
+NODE_POST_PAT = re.compile(r'^(norm|result_)')
+def categorize_node(name: str) -> str:
+    if NODE_POST_PAT.search(name):
+        return "POST"
+
+    m = NODE_LAYER_PAT.search(name)
+    if m:
+        return str(int(m.group(1)))
+
+    return "PRE"
+
+TENSOR_LAYER_PAT = re.compile(r'(?:-|_l|blk\.)(\d+)\b')
+def get_node_layer(name):
+    m = TENSOR_LAYER_PAT.search(name)
+    return int(m.group(1)) if m else None
+
+
+def categorize_tensor(name: str) -> str:
+    layer = get_node_layer(name)
+
+    if layer is None:
+        if re.search(r'(output|result|final)', name):
+            return "POST"
+        else:
+            return "PRE"
+    else:
+        layer
+
+
 def node_name_canonicalizer(label: str) -> str:
     """Dot graph node label -> canonical_name"""
     first_part = label.split('|')[0]

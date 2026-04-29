@@ -8,6 +8,7 @@ from sim.core.trace import Node, TerminalNode, Tensor, Trace, TraceLoader
 from sim.hw.storage.common import BaseStorage
 
 from .utils import node_name_canonicalizer, get_tensor_type, TensorWithSign, get_real_tensor_id
+from .utils import categorize_node, categorize_tensor
 
 
 class Llamacpp(TraceLoader):
@@ -172,6 +173,16 @@ class Llamacpp(TraceLoader):
         prev_node.add_child_node(node_id)
         NodeMap[node_id] = last_node
         node_id += 1
+
+        # Categorize Nodes based on their name
+        for node in NodeMap.values():
+            layer_info = categorize_node(node)
+            node.args["layer"] = layer_info
+
+        # Categorize Tensors based on their name
+        for tensor in TensorMap.values():
+            layer_info = categorize_tensor(tensor)
+            tensor.args["layer"] = layer_info
 
         return Trace(self.id, self.name, self.log, NodeMap, TensorMap)
 
