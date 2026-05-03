@@ -874,7 +874,9 @@ class PytorchProfile(TraceLoader):
             print(f"[PytorchProfile] injecting schedule from {inject_path_resolved}",
                   flush=True)
             inject_schedule_into_trace(
-                trace, str(inject_path_resolved), model_evicts=False,
+                trace, str(inject_path_resolved),
+                bundle_dir=bundle_dir,
+                disable_evict=bool(self.args.get("inject_disable_evict", False)),
             )
 
         return trace
