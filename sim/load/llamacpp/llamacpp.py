@@ -176,12 +176,12 @@ class Llamacpp(TraceLoader):
 
         # Categorize Nodes based on their name
         for node in NodeMap.values():
-            layer_info = categorize_node(node)
+            layer_info = categorize_node(node.name)
             node.args["layer"] = layer_info
 
         # Categorize Tensors based on their name
         for tensor in TensorMap.values():
-            layer_info = categorize_tensor(tensor)
+            layer_info = categorize_tensor(tensor.name)
             tensor.args["layer"] = layer_info
 
         return Trace(self.id, self.name, self.log, NodeMap, TensorMap)

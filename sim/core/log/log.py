@@ -145,7 +145,11 @@ class Log:
             return
 
         self._open_file()
-        self.worker = threading.Thread(target=self._run, name="LogWriterThread")
+        self.worker = threading.Thread(
+            target=self._run,
+            name="LogWriterThread",
+            daemon=True,
+        )
         self.worker.start()
         self._create_tracks()
         return

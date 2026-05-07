@@ -60,101 +60,108 @@ class Simulator:
         self.log = None
         self.engine = None
 
-        # Read input file(input.yaml), and parse fields
-        cfg = parse_config(config_file_path)
+        try:
+            # Read input file(input.yaml), and parse fields
+            cfg = parse_config(config_file_path)
 
-        sim_id = SimIdentityMgr()
+            sim_id = SimIdentityMgr()
 
-        # Logger
-        l_cfg = cfg["logger"]
-        l_cfg["args"]["input_path"] = config_file_path  # Supply input_path
-        log = Log(l_cfg["args"])
-        self.log = log
-        log.start()
+            # Logger
+            l_cfg = cfg["logger"]
+            l_cfg["args"]["input_path"] = config_file_path  # Supply input_path
+            log = Log(l_cfg["args"])
+            self.log = log
+            log.start()
 
-        # Trace
-        t_cfg = cfg["trace"]
-        t_cfg["args"]["input_path"] = config_file_path  # Supply input_path
-        TraceLoaderClass = LOAD_TRACE_CLASS(t_cfg["type"])
-        name = "Trace"
-        sim_id.check_name(name)
-        trace_loader = TraceLoaderClass(sim_id.get_id(), name, log, t_cfg["args"])
-        trace = trace_loader.load()
-
-        # Hardware Dictionary
-        hw = {}
-
-        # Storage
-        for s_cfg in cfg["hardware"]["storage"]:
-            StorageClass = LOAD_STORAGE_CLASS(s_cfg["type"])
-            name = s_cfg["name"]
+            # Trace
+            t_cfg = cfg["trace"]
+            t_cfg["args"]["input_path"] = config_file_path  # Supply input_path
+            TraceLoaderClass = LOAD_TRACE_CLASS(t_cfg["type"])
+            name = "Trace"
             sim_id.check_name(name)
-            storage_hw = StorageClass(sim_id.get_id(), name, log, s_cfg["args"])
-            hw[storage_hw.name] = storage_hw
+            trace_loader = TraceLoaderClass(sim_id.get_id(), name, log, t_cfg["args"])
+            trace = trace_loader.load()
 
-        # Place initial tensors into the Storage device
-        if not hw:
-            raise Exception("[Engine] There is no storage device available!")
-        else:
-            # Place tensors in the very first storage device
-            init_storage = hw[next(iter(hw))]
-            trace_loader.placement(trace, init_storage)
-            init_storage.initial_placement = True
+            # Hardware Dictionary
+            hw = {}
 
-        # Memory
-        for m_cfg in cfg["hardware"]["memory"]:
-            MemoryClass = LOAD_MEMORY_CLASS(m_cfg["type"])
-            name = m_cfg["name"]
+            # Storage
+            for s_cfg in cfg["hardware"]["storage"]:
+                StorageClass = LOAD_STORAGE_CLASS(s_cfg["type"])
+                name = s_cfg["name"]
+                sim_id.check_name(name)
+                storage_hw = StorageClass(sim_id.get_id(), name, log, s_cfg["args"])
+                hw[storage_hw.name] = storage_hw
+
+            # Place initial tensors into the Storage device
+            if not hw:
+                raise Exception("[Engine] There is no storage device available!")
+            else:
+                # Place tensors in the very first storage device
+                init_storage = hw[next(iter(hw))]
+                trace_loader.placement(trace, init_storage)
+                init_storage.initial_placement = True
+
+            # Memory
+            for m_cfg in cfg["hardware"]["memory"]:
+                MemoryClass = LOAD_MEMORY_CLASS(m_cfg["type"])
+                name = m_cfg["name"]
+                sim_id.check_name(name)
+                memory_hw = MemoryClass(sim_id.get_id(), name, log, m_cfg["args"])
+                hw[memory_hw.name] = memory_hw
+
+            # Compute - Compute units must be initialized after memory units
+            for c_cfg in cfg["hardware"]["compute"]:
+                ComputeClass = LOAD_COMPUTE_CLASS(c_cfg["type"])
+                local_memory = hw[c_cfg["args"]["memory"]]
+                name = c_cfg["name"]
+                sim_id.check_name(name)
+                compute_hw = ComputeClass(sim_id.get_id(), name, log, local_memory, c_cfg["args"])
+                hw[compute_hw.name] = compute_hw
+
+            # Validate custom_dep_tag values: must be unique across hw, and every
+            # TensorAtHWDep on a trace node must reference a declared tag.
+            tag_owners: dict[str, list[str]] = {}
+            for h in hw.values():
+                tag = h.args.get("custom_dep_tag")
+                if tag is not None:
+                    tag_owners.setdefault(tag, []).append(h.name)
+
+            for tag, owners in tag_owners.items():
+                if len(owners) > 1:
+                    raise Exception(
+                        f"[Simulator] custom_dep_tag {tag!r} shared by hw: {owners}. Tags must be unique."
+                    )
+
+            for node in trace.node_map.values():
+                for dep in node.custom_deps:
+                    if isinstance(dep, TensorAtHWDep):
+                        if dep.custom_dep_tag not in tag_owners:
+                            raise Exception(
+                                f"[Simulator] node {node.id} ({node.name}) references custom_dep_tag "
+                                f"{dep.custom_dep_tag!r} but no hw declares it."
+                            )
+
+            # System
+            sys = System(trace, hw)
+
+            # Scheduler
+            sched_cfg = cfg["scheduler"]
+            SchedulerClass = LOAD_SCHEDULER_CLASS(sched_cfg["type"])
+            name = "Scheduler"
             sim_id.check_name(name)
-            memory_hw = MemoryClass(sim_id.get_id(), name, log, m_cfg["args"])
-            hw[memory_hw.name] = memory_hw
+            sched = SchedulerClass(sim_id.get_id(), name, log, sys, sched_cfg["args"])
 
-        # Compute - Compute units must be initialized after memory units
-        for c_cfg in cfg["hardware"]["compute"]:
-            ComputeClass = LOAD_COMPUTE_CLASS(c_cfg["type"])
-            local_memory = hw[c_cfg["args"]["memory"]]
-            name = c_cfg["name"]
+            # Engine
+            name = "Engine"
             sim_id.check_name(name)
-            compute_hw = ComputeClass(sim_id.get_id(), name, log, local_memory, c_cfg["args"])
-            hw[compute_hw.name] = compute_hw
+            self.engine = Engine(sim_id.get_id(), name, log, sys, sched)
 
-        # Validate custom_dep_tag values: must be unique across hw, and every
-        # TensorAtHWDep on a trace node must reference a declared tag.
-        tag_owners: dict[str, list[str]] = {}
-        for h in hw.values():
-            tag = h.args.get("custom_dep_tag")
-            if tag is not None:
-                tag_owners.setdefault(tag, []).append(h.name)
+        except BaseException:
+            if self.log is not None:
+                self.log.stop()
+            raise
 
-        for tag, owners in tag_owners.items():
-            if len(owners) > 1:
-                raise Exception(
-                    f"[Simulator] custom_dep_tag {tag!r} shared by hw: {owners}. Tags must be unique."
-                )
-
-        for node in trace.node_map.values():
-            for dep in node.custom_deps:
-                if isinstance(dep, TensorAtHWDep):
-                    if dep.custom_dep_tag not in tag_owners:
-                        raise Exception(
-                            f"[Simulator] node {node.id} ({node.name}) references custom_dep_tag "
-                            f"{dep.custom_dep_tag!r} but no hw declares it."
-                        )
-
-        # System
-        sys = System(trace, hw)
-
-        # Scheduler
-        sched_cfg = cfg["scheduler"]
-        SchedulerClass = LOAD_SCHEDULER_CLASS(sched_cfg["type"])
-        name = "Scheduler"
-        sim_id.check_name(name)
-        sched = SchedulerClass(sim_id.get_id(), name, log, sys, sched_cfg["args"])
-
-        # Engine
-        name = "Engine"
-        sim_id.check_name(name)
-        self.engine = Engine(sim_id.get_id(), name, log, sys, sched)
         return
 
     def run(self):
