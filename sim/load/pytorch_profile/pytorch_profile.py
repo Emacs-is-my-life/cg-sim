@@ -460,6 +460,7 @@ class PytorchProfile(TraceLoader):
         self._apply_storage_aliasing(node_map, tensor_map)
         self._mark_implicit_inputs(node_map, tensor_map)
         self._annotate_alias_dispatcher_deps(node_map, tensor_map)
+        self._annotate_memcpy_transfer_nodes(node_map, tensor_map)
         if bool(self.args.get("add_temporal_data_control_edges", False)):
             self._add_temporal_data_control_edges(node_map)
         self._add_terminal_node(node_map)
@@ -769,6 +770,103 @@ class PytorchProfile(TraceLoader):
             for parent_id in node.parent_nodes:
                 node.custom_deps.append(NodeDoneDep(parent_id))
 
+    def _annotate_memcpy_transfer_nodes(
+        self,
+        node_map: dict[int, Node],
+        tensor_map: dict[int, Tensor],
+    ) -> None:
+        """Treat `Memcpy HtoD/DtoH/DtoD` gpu_runtime nodes as transfers,
+        not as compute jobs that demand co-located inputs.
+
+        Why: a Memcpy node is a transfer event — it reads its source from
+        ``src_device`` memory and writes its dest into ``dst_device``
+        memory. PyTorch's profile records the source as one of the node's
+        ``data_input`` edges. cg-sim's scheduler runs the node as a
+        ComputeJob on its compute device (cuda for ``gpu_runtime``) and
+        invokes ``_ensure_inputs_resident``, which claims a VRAM region
+        for any cpu-resident input and stages it RAM->VRAM. For accelerate
+        offload, that's how 1420 cpu source tensors end up permanently
+        stamped into VRAM.
+
+        The fix: strip cross-device data inputs from the Memcpy node and
+        replace them with control-only ``NodeDoneDep`` references to each
+        source's producer (so the Memcpy still gates on "source is
+        ready"). Same-device inputs are left intact. The dst tensor stays
+        as the node's output and gets claimed via the normal output path.
+        Compute duration on the node's home compute is unchanged, so
+        timing modelling continues to work; bandwidth contention modelling
+        would require routing this through a TransferJob, but that's a
+        scheduler-side change not needed for VRAM accounting.
+
+        Mirrors the pattern of ``_annotate_alias_dispatcher_deps`` but on
+        the input side.
+        """
+        producers_by_tensor: dict[int, list[int]] = {}
+        for node in node_map.values():
+            for tid in node.output_tensors:
+                producers_by_tensor.setdefault(tid, []).append(node.id)
+
+        annotated = 0
+        for node in node_map.values():
+            if node.args.get("runtime_role") != "gpu_runtime":
+                continue
+            op_name = node.args.get("op_name") or ""
+            # Scope: only HtoD memcpys. DtoH/DtoD have different semantics
+            # (cuda input on cuda compute = same-device, no stripping
+            # needed; OR cpu->cpu via DtoH, where cpu output is handled
+            # by dispatcher annotation). Limiting to HtoD avoids
+            # introducing scheduler deadlocks that the broader rule
+            # was triggering on DtoH cases.
+            if not op_name.startswith("Memcpy HtoD"):
+                continue
+
+            # Compute device for a gpu_runtime node is cuda.
+            compute_dev_short = "cuda"
+
+            cross_inputs: list[int] = []
+            for tid in list(node.input_tensors):
+                tensor = tensor_map.get(tid)
+                if tensor is None:
+                    continue
+                tdev = (tensor.args.get("device") or "cpu").lower()
+                tdev_short = "cuda" if tdev.startswith("cuda") else "cpu"
+                if tdev_short != compute_dev_short:
+                    cross_inputs.append(tid)
+
+            if not cross_inputs:
+                continue
+
+            transfer_kind = (
+                "HtoD" if "HtoD" in op_name
+                else "DtoH" if "DtoH" in op_name
+                else "DtoD" if "DtoD" in op_name
+                else "Memcpy"
+            )
+            node.args["transfer_kind"] = transfer_kind
+            node.args["transfer_src_tids"] = list(cross_inputs)
+
+            # Strip cross-device inputs and replace each with a control dep
+            # on every node that produces it (so source-readiness is still
+            # gated, but no VRAM staging is forced).
+            node.input_tensors = [t for t in node.input_tensors if t not in cross_inputs]
+            # NOTE: source-readiness via NodeDoneDeps is intentionally NOT
+            # added here. The trace's control-graph parent_nodes already
+            # cover ordering — the original data_input was an
+            # ordering+residency edge, and we're replacing only the
+            # residency aspect (the ordering aspect is redundant with the
+            # existing control edges). Adding NodeDoneDeps caused
+            # deadlocks because they conflict with the engine's normal
+            # node-readiness logic when an input's producer was an
+            # alias/dispatcher node that itself had cleared outputs.
+            annotated += 1
+
+        if annotated:
+            print(
+                f"[PytorchProfile] annotated {annotated} memcpy nodes as transfers "
+                f"(stripped cross-device data inputs).",
+                flush=True,
+            )
+
     @staticmethod
     def _loader_is_dispatcher(node: Node, tensor_map: dict[int, Tensor]) -> bool:
         """A node is dispatcher-style if it produces (non-aliased) outputs
@@ -847,6 +945,7 @@ class PytorchProfile(TraceLoader):
             self._apply_storage_aliasing(node_map, tensor_map)
             self._mark_implicit_inputs(node_map, tensor_map)
             self._annotate_alias_dispatcher_deps(node_map, tensor_map)
+            self._annotate_memcpy_transfer_nodes(node_map, tensor_map)
             if bool(self.args.get("add_temporal_data_control_edges", False)):
                 self._add_temporal_data_control_edges(node_map)
             self._add_terminal_node(node_map)

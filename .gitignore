@@ -7,6 +7,9 @@ exp/
 __pycache__/
  .mypy_cache
 
+# version maintanence
+*.deprecated
+
 # Clankers
 .codex/
 .aider/
