@@ -57,6 +57,9 @@ class Simulator:
     """
 
     def __init__(self, config_file_path: str):
+        self.log = None
+        self.engine = None
+
         # Read input file(input.yaml), and parse fields
         cfg = parse_config(config_file_path)
 
@@ -66,6 +69,7 @@ class Simulator:
         l_cfg = cfg["logger"]
         l_cfg["args"]["input_path"] = config_file_path  # Supply input_path
         log = Log(l_cfg["args"])
+        self.log = log
         log.start()
 
         # Trace
@@ -155,6 +159,13 @@ class Simulator:
 
     def run(self):
         print("Simulation is starting ...")
-        self.engine.run()
-        print("Simulation is finished.")
+        try:
+            self.engine.run()
+            print("Simulation is finished.")
+        except KeyboardInterrupt:
+            print("\nSimulation interrupted by user.")
+            raise SystemExit(130)
+        finally:
+            if self.log is not None:
+                self.log.stop()
         return
