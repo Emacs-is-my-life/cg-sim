@@ -42,6 +42,18 @@ def main() -> None:
                    help="Order in which candidates are admitted.")
     p.add_argument("--no-drop-infeasible", dest="drop_infeasible",
                    action="store_false", default=True)
+    p.add_argument("--peak-target-mb", type=float, default=None,
+                   help=(
+                       "Stop admitting prefetches once per-launch peak "
+                       "weight VRAM ≤ TARGET_MB. Minimises streaming "
+                       "(an E2E proxy) under a peak cap — same dual as "
+                       "ct_milp_oracle's --peak-target-mb but with "
+                       "bw_aware's heuristic admission instead of an "
+                       "MILP. Note: the peak the scheduler tracks is "
+                       "static-residency only; sim peak typically sits "
+                       "above this by the activation/intermediate "
+                       "footprint, so calibrate the target accordingly."
+                   ))
     add_calibration_args(p)
     args = p.parse_args()
 
@@ -53,10 +65,15 @@ def main() -> None:
     iter_wall_ns = resolve_calibration(args, hw)
     locked = {t.strip() for t in args.lock.split(",") if t.strip()}
 
+    peak_target_bytes = (
+        int(round(args.peak_target_mb * 1e6))
+        if args.peak_target_mb is not None else None
+    )
     knobs = BWAwareKnobs(
         bw_target=float(args.bw_target),
         drop_infeasible=bool(args.drop_infeasible),
         value_model=str(args.value_model),
+        peak_target_bytes=peak_target_bytes,
     )
 
     neutral = solve_neutral(

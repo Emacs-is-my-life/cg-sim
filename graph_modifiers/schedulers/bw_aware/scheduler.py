@@ -83,6 +83,7 @@ class BWAwareKnobs:
     drop_infeasible: bool = True
     value_model: str = "start_ns"
     iter_wall_ns: int | None = None
+    peak_target_bytes: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -191,9 +192,99 @@ def _value(j: UseJob, model: str) -> float:
     raise ValueError(f"unknown value_model: {model}")
 
 
+def _build_peak_state(
+    tl: UnifiedTimeline, jobs: list[UseJob], locked_uids: set[int],
+) -> tuple[dict[tuple[int, int], int], dict[tuple[int, int], int],
+           dict[int, set[tuple[int, int]]], int]:
+    """Per-launch peak state used by the peak-target admission.
+
+    Returns ``(launch_active_bytes, kept_not_active, consumers_of_uid,
+    forced_keep_bytes)`` where:
+
+      * ``launch_active_bytes[(g, l)]`` — bytes of feasible tensors
+        consumed AT this launch (always resident there, regardless of
+        streaming choice).
+      * ``kept_not_active[(g, l)]`` — bytes of feasible tensors that
+        are still "kept" (not yet marked for streaming) and are NOT
+        consumed at this launch.  Initially this is ``feasible_total
+        − launch_active_bytes[(g, l)]``; after a tensor is admitted
+        for streaming we subtract its size from every launch where it
+        is *not* consumed.
+      * ``consumers_of_uid[uid]`` — set of ``(g, l)`` keys at which
+        the tensor is consumed.  Used to update ``kept_not_active``
+        on admission.
+      * ``forced_keep_bytes`` — sum of locked tensor sizes (constant).
+    """
+    feasible_uids: set[int] = {j.tensor_uid for j in jobs}
+    feasible_total = sum(
+        int(tl.tensors[uid].size_bytes) for uid in feasible_uids
+    )
+    launch_active: dict[tuple[int, int], int] = {}
+    consumers_of_uid: dict[int, set[tuple[int, int]]] = {}
+    # For non-feasible tensors (no admissible UseJobs — e.g. all-uses
+    # gap < transfer duration), they're effectively "always kept"
+    # contributing to peak at every launch.  Treat them as part of the
+    # forced-keep baseline.
+    non_feasible_active: dict[tuple[int, int], int] = {}
+    forced_keep = 0
+    for tensor in tl.tensors:
+        size = int(tensor.size_bytes)
+        if tensor.uid in feasible_uids and tensor.uid not in locked_uids:
+            seen: set[tuple[int, int]] = set()
+            for pos in tensor.uses:
+                t = tl.tasks[pos]
+                seen.add((int(t.graph_id), int(t.launch_id)))
+            consumers_of_uid[tensor.uid] = seen
+            for k in seen:
+                launch_active[k] = launch_active.get(k, 0) + size
+        else:
+            forced_keep += size
+            # We still need to know which launches this tensor is "active"
+            # at so we don't double-count via kept_not_active later — but
+            # since it's part of forced_keep (always resident, all
+            # launches), and kept_not_active is about *feasible* tensors
+            # only, no further accounting is needed.
+
+    kept_not_active: dict[tuple[int, int], int] = {}
+    for k, active in launch_active.items():
+        kept_not_active[k] = feasible_total - active
+    # Some launches may have only forced-keep / locked consumers; they
+    # have launch_active = 0 in our feasible-only map but still see
+    # peak = forced_keep + feasible_total + 0.  Make sure those launches
+    # are represented so _max_peak considers them.
+    for tensor in tl.tensors:
+        if tensor.uid in feasible_uids and tensor.uid not in locked_uids:
+            continue
+        for pos in tensor.uses:
+            t = tl.tasks[pos]
+            k = (int(t.graph_id), int(t.launch_id))
+            if k not in launch_active:
+                launch_active[k] = 0
+                kept_not_active[k] = feasible_total
+
+    return launch_active, kept_not_active, consumers_of_uid, forced_keep
+
+
+def _max_peak(
+    launch_active: dict[tuple[int, int], int],
+    kept_not_active: dict[tuple[int, int], int],
+    forced_keep: int,
+) -> int:
+    """Per-launch peak under the current streaming choice."""
+    max_p = forced_keep
+    for k, active in launch_active.items():
+        p = forced_keep + active + kept_not_active.get(k, 0)
+        if p > max_p:
+            max_p = p
+    return max_p
+
+
 def _forward_admit(
     jobs: list[UseJob], hw: HwParams, knobs: BWAwareKnobs,
     iter_wall_ns: int,
+    *,
+    tl: UnifiedTimeline | None = None,
+    locked_uids: set[int] | None = None,
 ) -> _AdmitState:
     state = _AdmitState()
     if not jobs:
@@ -213,6 +304,11 @@ def _forward_admit(
     # runs out we keep the highest-value reloads.  ``tensor_size`` is
     # the natural choice for "minimize peak VRAM" since the largest
     # tensors are the biggest contributors to peak.
+    peak_target = knobs.peak_target_bytes
+    do_peak_target = (
+        peak_target is not None and tl is not None
+        and locked_uids is not None
+    )
     if knobs.value_model == "start_ns":
         order = sorted(
             jobs,
@@ -222,8 +318,28 @@ def _forward_admit(
     else:
         order = sorted(jobs, key=lambda j: -_value(j, knobs.value_model))
 
+    if do_peak_target:
+        launch_active, kept_not_active, consumers_of_uid, forced_keep = (
+            _build_peak_state(tl, jobs, locked_uids)
+        )
+        current_peak = _max_peak(launch_active, kept_not_active, forced_keep)
+        if current_peak <= peak_target:
+            for job in order:
+                if job.use_index == 0:
+                    state.startup.add(job.tensor_uid)
+                else:
+                    state.dropped.append(job)
+            return state
+        streamed_uids: set[int] = set()
+
     admitted_bytes = 0
     for job in order:
+        if do_peak_target and current_peak <= peak_target:
+            if job.use_index == 0:
+                state.startup.add(job.tensor_uid)
+            else:
+                state.dropped.append(job)
+            continue
         # 1. Global byte budget — stop admitting once we've committed
         #    enough lane time to risk lengthening the iter.
         if admitted_bytes + job.size_bytes > budget_bytes:
@@ -249,7 +365,42 @@ def _forward_admit(
         state.admitted.append(job)
         admitted_bytes += job.size_bytes
 
+        if do_peak_target and job.tensor_uid not in streamed_uids:
+            streamed_uids.add(job.tensor_uid)
+            size = int(job.size_bytes)
+            consumers = consumers_of_uid.get(job.tensor_uid, set())
+            for k in launch_active:
+                if k not in consumers:
+                    kept_not_active[k] = max(0, kept_not_active[k] - size)
+            current_peak = _max_peak(
+                launch_active, kept_not_active, forced_keep,
+            )
+
     return state
+
+
+def _final_model_peak(
+    state: _AdmitState,
+    launch_active: dict[tuple[int, int], int],
+    kept_not_active: dict[tuple[int, int], int],
+    consumers_of_uid: dict[int, set[tuple[int, int]]],
+    forced_keep: int,
+    tl: UnifiedTimeline,
+) -> int:
+    """Replay the admission's streamed-uid set against a clean
+    ``kept_not_active`` to get the per-launch model peak the admission
+    actually achieved — used by the peak-target search to decide whether
+    a candidate ``bw_target`` reaches the cap.
+    """
+    streamed: set[int] = {j.tensor_uid for j in state.admitted}
+    kna = dict(kept_not_active)
+    for uid in streamed:
+        size = int(tl.tensors[uid].size_bytes)
+        consumers = consumers_of_uid.get(uid, set())
+        for k in launch_active:
+            if k not in consumers:
+                kna[k] = max(0, kna[k] - size)
+    return _max_peak(launch_active, kna, forced_keep)
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +466,61 @@ def solve_neutral(
         infeasible = []
         feasible = jobs
 
-    state = _forward_admit(feasible, hw, knobs, iter_wall_ns)
+    if knobs.peak_target_bytes is not None:
+        # Peak-target mode: combine the per-tensor early-stop with an
+        # outer search for the smallest ``bw_target`` that still meets
+        # the cap. Lower bw_target = wider per-window utilisation
+        # headroom = fewer concurrent prefetches = less stall (since
+        # the simulator water-fills the H2D lane). Early-stop within
+        # the chosen bw_target keeps total streamed bytes minimal.
+        # The combination targets the user's stated objective: minimum
+        # E2E (= baseline + minimum stall) under the peak cap.
+        from dataclasses import replace
+        la, kna_init, cou, fk = _build_peak_state(tl, feasible, locked_uids)
+        target = knobs.peak_target_bytes
+
+        def _solve_at(bw_t: float) -> tuple[_AdmitState, int]:
+            k = replace(knobs, bw_target=bw_t)
+            s = _forward_admit(
+                feasible, hw, k, iter_wall_ns,
+                tl=tl, locked_uids=locked_uids,
+            )
+            p = _final_model_peak(s, la, kna_init, cou, fk, tl)
+            return s, p
+
+        hi_cap = max(0.05, min(1.0, float(knobs.bw_target)))
+        state_hi, peak_hi = _solve_at(hi_cap)
+        if peak_hi > target:
+            # Even at the user's bw cap we can't reach the target.
+            # Return the most aggressive admission as best-effort.
+            state = state_hi
+            chosen_bw = hi_cap
+        else:
+            # Binary-search down for the smallest bw_target that still
+            # admits enough (with early-stop) to meet the peak cap.
+            lo = 0.01
+            hi = hi_cap
+            best_state = state_hi
+            best_bw = hi_cap
+            for _ in range(8):
+                mid = (lo + hi) / 2
+                s_mid, p_mid = _solve_at(mid)
+                if p_mid <= target:
+                    hi = mid
+                    best_state = s_mid
+                    best_bw = mid
+                else:
+                    lo = mid
+                if hi - lo < 0.005:
+                    break
+            state = best_state
+            chosen_bw = best_bw
+        knobs.bw_target = chosen_bw
+    else:
+        state = _forward_admit(
+            feasible, hw, knobs, iter_wall_ns,
+            tl=tl, locked_uids=locked_uids,
+        )
 
     # Build an adapter so the shared emission helper can read it.
     from graph_modifiers.schedulers.jit_sim_prune.scheduler import PruneKnobs
@@ -359,6 +564,10 @@ def solve_neutral(
             "bw_target": knobs.bw_target,
             "drop_infeasible": knobs.drop_infeasible,
             "value_model": knobs.value_model,
+            "peak_target_mb": (
+                round(knobs.peak_target_bytes / 1e6, 2)
+                if knobs.peak_target_bytes is not None else None
+            ),
         },
         "graph_order": tl.graph_order,
         "graph_multiplicity": {

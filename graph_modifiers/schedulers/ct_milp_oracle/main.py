@@ -69,7 +69,13 @@ def main() -> None:
             "TARGET_MB. Single MILP solve — equivalent to running "
             "sim_loop with --objective=min_e2e but without the per-"
             "iteration cg-sim overhead. Default (omitted) keeps the "
-            "min-peak behaviour."
+            "min-peak behaviour. NOTE: The model peak (printed as "
+            "milp_peak_mb) now includes intermediate activations and "
+            "non-sidecar weights from the trace, but is still typically "
+            "10-20%% above sim peak due to allocator-level dedup the "
+            "model can't see. Calibrate by running default min_peak "
+            "first, sim it, then add (model_peak - sim_peak) when "
+            "picking your target."
         ),
     )
     add_calibration_args(p)

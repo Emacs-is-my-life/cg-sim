@@ -166,6 +166,120 @@ class _MilpResult:
     diagnostics: dict[str, Any]
 
 
+def _compute_live_intermediates_per_launch(
+    trace: Trace,
+    tl: UnifiedTimeline,
+) -> tuple[dict[tuple[int, int], int], int]:
+    """Compute trace-derived VRAM contributions the MILP doesn't see directly.
+
+    Returns ``(launch_intermediate_bytes, extra_static_bytes)``.
+
+    * ``launch_intermediate_bytes[(g, l)]`` — peak live INTERMEDIATE
+      bytes during any firing of compiled launch ``(g, l)``.  An
+      intermediate is "live" from its first-producer task through its
+      last-consumer task; we walk tasks in execution order and sample
+      the live-byte total at each task, then take the max per ``(g, l)``.
+
+    * ``extra_static_bytes`` — VRAM-resident WEIGHT/INPUT/LEAF bytes
+      from the trace that the MILP's sidecar view (``tl.tensors``)
+      misses.  Computed as ``Σ trace.tensor_map[t].size_bytes`` for
+      types in ``initial_tensor_types`` minus ``Σ tl.tensors.size_bytes``.
+      Tensors in this delta can't be streamed — the compiled tensor
+      map didn't expose them — so they form a constant residency
+      floor below every launch.
+
+    Both pieces are constants from the LP's view: they raise the
+    per-launch peak baseline so the MILP's claimed P matches what
+    the simulator's allocator actually places.
+    """
+    initial_types = {"WEIGHT", "INPUT", "LEAF"}
+
+    # Storage-group dedup is essential here. PyTorch traces typically
+    # include alias Tensor objects (e.g. q, k, v from a `qkv.chunk(3)`
+    # call are three distinct Tensor.ids backed by one underlying
+    # storage). The simulator's allocator claims one VRAM region per
+    # storage group, but a naive per-Tensor.id sum would count each
+    # alias separately — on SDXL UNet, that inflates intermediate live
+    # bytes by ~3×.
+
+    def _sgid(tensor, tid):
+        return (
+            tensor.args.get("storage_group_id")
+            or tensor.args.get("storage_id")
+            or ("tid", tid)  # tagged so it never collides with a real sgid
+        )
+
+    # Initial-placed (non-streaming) bytes, deduped by storage group.
+    initial_storage_bytes: dict[Any, int] = {}
+    # Intermediate storage groups: sgid -> size_bytes (constant per group;
+    # we take the max across aliases as a safety, though they should match).
+    intermediate_sgid_size: dict[Any, int] = {}
+    # Map every tensor.id to its sgid for fast lookup during the sweep.
+    tid_to_sgid: dict[int, Any] = {}
+    for tid, tensor in trace.tensor_map.items():
+        ttype = tensor.args.get("tensor_type")
+        sgid = _sgid(tensor, tid)
+        if ttype == "INTERMEDIATE":
+            tid_to_sgid[tid] = sgid
+            prev = intermediate_sgid_size.get(sgid, 0)
+            intermediate_sgid_size[sgid] = max(prev, int(tensor.size_bytes))
+        elif ttype in initial_types:
+            prev = initial_storage_bytes.get(sgid, 0)
+            initial_storage_bytes[sgid] = max(prev, int(tensor.size_bytes))
+
+    initial_total_bytes = sum(initial_storage_bytes.values())
+    sidecar_total_bytes = sum(int(t.size_bytes) for t in tl.tensors)
+    extra_static = max(0, initial_total_bytes - sidecar_total_bytes)
+
+    if not intermediate_sgid_size:
+        return {}, extra_static
+
+    # First producer / last consumer per *storage group*. Walk tasks in
+    # execution order. A group becomes live the first time any of its
+    # alias Tensor.ids is produced; it stays live until the last time
+    # any of its aliases is consumed.
+    first_producer: dict[Any, int] = {}
+    last_consumer: dict[Any, int] = {}
+    for pos, task in enumerate(tl.tasks):
+        node = trace.node_map.get(task.node_id)
+        if node is None:
+            continue
+        for tid in node.output_tensors:
+            sgid = tid_to_sgid.get(tid)
+            if sgid is not None and sgid not in first_producer:
+                first_producer[sgid] = pos
+        for tid in node.input_tensors:
+            sgid = tid_to_sgid.get(tid)
+            if sgid is not None:
+                last_consumer[sgid] = pos  # monotonic; final write = last
+
+    # Pre-bucket which sgids start / end at each task position so the
+    # sweep is O(num_tasks + num_sgids).
+    starts_at: dict[int, list[Any]] = {}
+    ends_at: dict[int, list[Any]] = {}
+    for sgid, pos in first_producer.items():
+        starts_at.setdefault(pos, []).append(sgid)
+    for sgid, pos in last_consumer.items():
+        ends_at.setdefault(pos, []).append(sgid)
+
+    # Sweep tasks in execution order, maintain live byte total.
+    # Convention: add at producer position BEFORE sampling, remove at
+    # last-consumer position AFTER sampling — so the consumer's task
+    # sees the bytes it's actually about to read.
+    live_bytes = 0
+    per_launch_peak: dict[tuple[int, int], int] = {}
+    for pos, task in enumerate(tl.tasks):
+        for sgid in starts_at.get(pos, ()):
+            live_bytes += intermediate_sgid_size[sgid]
+        key = (int(task.graph_id), int(task.launch_id))
+        if live_bytes > per_launch_peak.get(key, 0):
+            per_launch_peak[key] = live_bytes
+        for sgid in ends_at.get(pos, ()):
+            live_bytes -= intermediate_sgid_size[sgid]
+
+    return per_launch_peak, extra_static
+
+
 def _solve_milp(
     tl: UnifiedTimeline,
     hw: HwParams,
@@ -177,6 +291,8 @@ def _solve_milp(
     bw_overcommit_frac: float = 0.9,
     lp_relaxation: bool = False,
     peak_target_bytes: int | None = None,
+    launch_intermediate_bytes: dict[tuple[int, int], int] | None = None,
+    extra_static_bytes: int = 0,
 ) -> _MilpResult:
     # Pre-filter: split tensors into forced_keep vs feasible.
     forced_keep: set[int] = set(locked_uids)
@@ -331,10 +447,20 @@ def _solve_milp(
         dtype=np.float64,
     )
 
+    # ``launch_intermediate_bytes`` adds peak live activations at each
+    # launch (computed from the cg-sim trace).  ``extra_static_bytes``
+    # adds VRAM-resident weights/inputs the sidecar map can't see.
+    # Both are constants from the LP's view: they raise the per-launch
+    # peak baseline so the MILP's claimed P reflects total VRAM, not
+    # just sidecar weight residency.
+    launch_inter = launch_intermediate_bytes or {}
+    constant_floor = float(forced_keep_bytes) + float(extra_static_bytes)
+
     for row_idx, key in enumerate(representative_launches):
         consumers_set = set(launch_consumers.get(key, []))
         a_active_feasible = float(launch_active_bytes.get(key, 0))
-        rhs = -(float(forced_keep_bytes) + a_active_feasible)
+        intermediate_bytes = float(launch_inter.get(key, 0))
+        rhs = -(constant_floor + a_active_feasible + intermediate_bytes)
 
         # -P
         rows.append(row_idx)
@@ -664,18 +790,20 @@ def _solve_milp(
         # min_streams mode the LP only requires P ≤ target and HiGHS
         # may leave x[P_IDX] pinned to the upper bound, hiding any peak
         # slack the chosen z actually has.
-        achieved_peak = float(forced_keep_bytes)
+        achieved_peak = constant_floor
         for key in representative_launches:
             consumers_set = set(launch_consumers.get(key, []))
             a_active_feasible = float(launch_active_bytes.get(key, 0))
+            intermediate_bytes = float(launch_inter.get(key, 0))
             kept_not_active = 0.0
             for i in range(nv):
                 if i in consumers_set:
                     continue
                 kept_not_active += float(x[i]) * float(sizes[i])
             launch_peak = (
-                float(forced_keep_bytes)
+                constant_floor
                 + a_active_feasible
+                + intermediate_bytes
                 + kept_not_active
             )
             if launch_peak > achieved_peak:
@@ -687,8 +815,10 @@ def _solve_milp(
         # it so the caller can surface infeasibility cleanly.
         for uid in feasible_uids:
             z_solution[uid] = 1.0
+        max_inter = max(launch_inter.values()) if launch_inter else 0
         peak = int(
-            forced_keep_bytes
+            constant_floor
+            + max_inter
             + sum(int(tl.tensors[u].size_bytes) for u in feasible_uids)
         )
         if peak_target_bytes is not None and peak > peak_target_bytes:
@@ -716,6 +846,10 @@ def _solve_milp(
             int(peak_target_bytes) if peak_target_bytes is not None else 0
         ),
         "target_infeasible": bool(target_infeasible),
+        "peak_intermediate_bytes": int(
+            max(launch_inter.values()) if launch_inter else 0
+        ),
+        "extra_static_bytes": int(extra_static_bytes),
     }
 
     # Informational aggregate "budget": h2d_bw × pipeline duration. With
@@ -1182,6 +1316,10 @@ def solve_neutral(
         t.uid for t in tl.tensors if t.graph_input_name in locked
     }
 
+    launch_intermediate_bytes, extra_static_bytes = (
+        _compute_live_intermediates_per_launch(trace, tl)
+    )
+
     result = _solve_milp(
         tl, hw,
         locked_uids=locked_uids,
@@ -1191,6 +1329,8 @@ def solve_neutral(
         bw_overcommit_frac=bw_overcommit_frac,
         lp_relaxation=lp_relaxation,
         peak_target_bytes=peak_target_bytes,
+        launch_intermediate_bytes=launch_intermediate_bytes,
+        extra_static_bytes=extra_static_bytes,
     )
 
     prefetches, evicts, evicted, cold_start_set = _emit_neutral(tl, hw, result)
@@ -1242,6 +1382,12 @@ def solve_neutral(
         ),
         "target_infeasible": result.diagnostics.get(
             "target_infeasible", False,
+        ),
+        "peak_intermediate_mb": round(
+            result.diagnostics.get("peak_intermediate_bytes", 0) / 1e6, 2,
+        ),
+        "extra_static_mb": round(
+            result.diagnostics.get("extra_static_bytes", 0) / 1e6, 2,
         ),
         "duplex": duplex,
         "disable_per_rank_deadlines": disable_per_rank_deadlines,
