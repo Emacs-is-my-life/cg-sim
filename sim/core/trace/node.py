@@ -51,6 +51,12 @@ class Node:
         """
         self.parent_nodes: list[int] = []   # Control Dependency
         self.children_nodes: list[int] = []
+
+        # Debugging breakpoints. These will transfer to Job object.
+        self.BREAK_AT_JOB_SUBMITTED: bool = False
+        self.BREAK_AT_JOB_HEAD: bool = False
+        self.BREAK_AT_JOB_DISPATCHED: bool = False
+        self.BREAK_AT_JOB_RETIRED: bool = False
         return
 
     def add_parent_node(self, node_id: int):

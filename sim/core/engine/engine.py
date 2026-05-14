@@ -65,6 +65,17 @@ class Engine(SimObject):
     def submit(self, job: BaseJob) -> None:
         job.timestamp_queued = self.timestamp_now
         self.job_waiting.append(job)
+
+        # DEBUG: BREAK_AT_JOB_SUBMITTED
+        if self.debugger.BREAK_IN_RUNTIME_STAGE and job.BREAK_AT_JOB_SUBMITTED:
+            debug = self.debugger
+            timestamp_now = self.timestamp_now
+            job_waiting = self.job_waiting
+            job_running = self.job_running
+            hw = self.sys.hw
+            trace = self.sys.trace
+            self.debugger.break_in_runtime_stage("JOB_SUBMITTED")
+
         return
 
     def signal(self, signal: EngineSignal) -> None:
@@ -231,6 +242,16 @@ class Engine(SimObject):
             # Inspect retired jobs
             retired_jobs = self._runtime_forward()
             for job in retired_jobs:
+                # DEBUG: BREAK_AT_JOB_RETIRED
+                if self.debugger.BREAK_IN_RUNTIME_STAGE and job.BREAK_AT_JOB_RETIRED:
+                    debug = self.debugger
+                    timestamp_now = self.timestamp_now
+                    job_waiting = self.job_waiting
+                    job_running = self.job_running
+                    hw = self.sys.hw
+                    trace = self.sys.trace
+                    self.debugger.break_in_runtime_stage("JOB_RETIRED")
+
                 # Check if simulation is finished
                 if isinstance(job, ComputeJob) and isinstance(job.node, TerminalNode):
                     return
@@ -246,6 +267,17 @@ class Engine(SimObject):
             while self.job_waiting:
                 job_w = self.job_waiting[0]
 
+                # DEBUG: BREAK_AT_JOB_HEAD
+                if self.debugger.BREAK_IN_RUNTIME_STAGE and job_w.BREAK_AT_JOB_HEAD:
+                    debug = self.debugger
+                    timestamp_now = self.timestamp_now
+                    job = job_w
+                    job_waiting = self.job_waiting
+                    job_running = self.job_running
+                    hw = self.sys.hw
+                    trace = self.sys.trace
+                    self.debugger.break_in_runtime_stage("JOB_HEAD")
+
                 # Mark its head arrivale time if not set
                 if job_w.timestamp_at_head is None:
                     job_w.timestamp_at_head = self.timestamp_now
@@ -255,6 +287,18 @@ class Engine(SimObject):
                     self.job_waiting.popleft()
                     job_w.begin(self.log, self.sys, self.timestamp_now)
                     self.job_running.append(job_w)  # Use append here, as ETA are None for new jobs
+
+                    # DEBUG: BREAK_AT_JOB_DISPATCHED
+                    if self.debugger.BREAK_IN_RUNTIME_STAGE and job_w.BREAK_AT_JOB_DISPATCHED:
+                        debug = self.debugger
+                        timestamp_now = self.timestamp_now
+                        job = job_w
+                        job_waiting = self.job_waiting
+                        job_running = self.job_running
+                        hw = self.sys.hw
+                        trace = self.sys.trace
+                        self.debugger.break_in_runtime_stage("JOB_DISPATCHED")
+
                 else:
                     # Head-of-the-line blocking w/ no running job now
                     if len(self.job_running) == 0:

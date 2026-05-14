@@ -19,6 +19,17 @@ if TYPE_CHECKING:
 _shell = InteractiveShellEmbed()
 
 
+_RUNTIME_BREAK_TIP = (
+    "Set BREAK_AT_* flags on any Node to break during the runtime stage.\n"
+    "Example:\n"
+    "  node.BREAK_AT_JOB_SUBMITTED  = True   # break when its Job is submitted\n"
+    "  node.BREAK_AT_JOB_HEAD       = True   # break when its Job reaches the head of job_waiting\n"
+    "  node.BREAK_AT_JOB_DISPATCHED = True   # break when its Job is dispatched to job_running\n"
+    "  node.BREAK_AT_JOB_RETIRED    = True   # break when its Job is retired\n"
+    "(Equivalent flags can also be set directly on Job objects.)"
+)
+
+
 @dataclass
 class _Symbol:
     name: str
@@ -85,11 +96,13 @@ class Debugger(SimObject):
         self.BREAK_AFTER_HW_INIT: bool = False
         self.BREAK_AFTER_COMPILE_STAGE: bool = False
         self.BREAK_AFTER_LAYOUT_STAGE: bool = False
+        self.BREAK_IN_RUNTIME_STAGE: bool = False
         self.BREAK_AFTER_RUNTIME_STAGE: bool = False
 
         # Active breakpoint context (set on entry, consumed by `help()`).
         self._current_breakpoint: str | None = None
         self._current_variables: list[_Symbol] = []
+        self._current_tip: str | None = None
         return
 
     def log_counters(self) -> dict[str, Any] | None:
@@ -121,7 +134,7 @@ class Debugger(SimObject):
         """
         breakpoints = [
             name for name, value in vars(self).items()
-            if name.startswith("BREAK_AFTER_") and isinstance(value, bool)
+            if name.startswith("BREAK_") and isinstance(value, bool)
         ]
         if not breakpoints:
             return
@@ -162,7 +175,7 @@ class Debugger(SimObject):
             # one more — track both so we can erase everything on success.
             extra = 0
             while True:
-                user_input = input("Enter breakpoint # to enable ('c' to continue): ").strip()
+                user_input = input("Enter breakpoint # to toggle ('c' to continue): ").strip()
                 extra += 1
                 if user_input.lower() == "c":
                     _finish()
@@ -176,7 +189,7 @@ class Debugger(SimObject):
                     print(f"Invalid input: {user_input!r}")
                 extra += 1
 
-            setattr(self, breakpoints[idx], True)
+            setattr(self, breakpoints[idx], not getattr(self, breakpoints[idx]))
             _erase(table_h + extra)
         return
 
@@ -209,24 +222,30 @@ class Debugger(SimObject):
 
     def help(self) -> None:
         """
-        Re-print the entry message (banner + variable table) for the
-        currently-active breakpoint. Intended to be called from the REPL.
+        Re-print the entry message (banner + variable table + optional
+        tip) for the currently-active breakpoint. Intended to be called
+        from the REPL.
         """
         if self._current_breakpoint is None:
             print("No active breakpoint.")
             return
         self._print_banner(self._current_breakpoint)
         symbolPrint(self._current_variables)
+        if self._current_tip:
+            print()
+            print("Tip:")
+            print(self._current_tip)
         return
 
-    def _enter_breakpoint(self, name: str, variables: list[_Symbol]) -> None:
+    def _enter_breakpoint(self, name: str, variables: list[_Symbol], tip: str | None = None) -> None:
         """
-        Register `name`/`variables` as the active breakpoint, print the
-        entry message, and drop into the IPython shell scoped to the
+        Register `name`/`variables`/`tip` as the active breakpoint, print
+        the entry message, and drop into the IPython shell scoped to the
         caller of the originating `break_after_*` method.
         """
         self._current_breakpoint = name
         self._current_variables = variables
+        self._current_tip = tip
         self.help()
         # Frames: 0=_enter_breakpoint, 1=break_after_*, 2=actual caller.
         caller_frame = sys._getframe(2)
@@ -238,6 +257,7 @@ class Debugger(SimObject):
         # simulator's subsequent log output starts on a clean screen.
         self._current_breakpoint = None
         self._current_variables = []
+        self._current_tip = None
         # ESC[2J = erase entire screen; ESC[H = move cursor to top-left.
         sys.stdout.write("\033[2J\033[H")
         sys.stdout.flush()
@@ -263,17 +283,21 @@ class Debugger(SimObject):
             _Symbol("trace", "Trace", "Execution trace"),
             _Symbol("trace.node_map", "dict[int, Node]", "Dictionary: node_id -> Node"),
             _Symbol("trace.tensor_map", "dict[int, Tensor]", "Dictionary: tensor_id -> Tensor"),
-        ])
+        ], tip=_RUNTIME_BREAK_TIP)
         return
 
     def break_after_layout_stage(self, hw) -> None:
         self._enter_breakpoint("break_after_layout_stage", [
             _Symbol("hw", "dict[str, BaseHardware]", "Dictionary: hw_name -> BaseHardware"),
-        ])
+        ], tip=_RUNTIME_BREAK_TIP)
         return
 
-    def break_in_runtime_stage(self) -> None:
-        self._enter_breakpoint("break_after_runtime_stage", [
+    def break_in_runtime_stage(self, bp_name: str) -> None:
+        self._enter_breakpoint(f"break_in_runtime_stage[{bp_name}]", [
+            _Symbol("timestamp_now", "float", "Current simulator time"),
+            _Symbol("job", "BaseJob", "Job triggered this breakpoint"),
+            _Symbol("job_waiting", "list[BaseJob]", "Queue of jobs waiting to be dispatched"),
+            _Symbol("job_running", "list[BaseJob]", "Queue of currently running jobs"),
             _Symbol("hw", "dict[str, BaseHardware]", "Dictionary: hw_name -> BaseHardware"),
             _Symbol("trace", "Trace", "Execution trace"),
             _Symbol("trace.node_map", "dict[int, Node]", "Dictionary: node_id -> Node"),
