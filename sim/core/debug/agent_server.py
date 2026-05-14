@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any
 
 from mcp.server.fastmcp import FastMCP
 
+from .agent_runner import Phase
+
 if TYPE_CHECKING:
     from .agent_runner import AgentSession
 
@@ -207,6 +209,7 @@ _NO_BOUND_DEBUGGER = {
 _BIND_WAIT_SECS = 60.0
 
 
+<<<<<<< Updated upstream
 def _bound_or_error(session: "AgentSession") -> dict[str, Any] | None:
     """Return None if a Debugger is bound, else an error dict.
 
@@ -216,6 +219,28 @@ def _bound_or_error(session: "AgentSession") -> dict[str, Any] | None:
     if session.debugger is not None:
         return None
     session.restart_complete.wait(timeout=_BIND_WAIT_SECS)
+=======
+_BOUND_PHASES = (Phase.READY, Phase.RUNNING, Phase.FINISHED)
+
+
+def _bound_or_error(session: "AgentSession") -> dict[str, Any] | None:
+    """Return None if a Debugger is bound (or becomes bound within
+    `_BIND_WAIT_SECS`), else an error dict.
+
+    Waits under `session.cv` for the phase to settle into one of the
+    bound phases (READY/RUNNING/FINISHED). If construction fails
+    (`CONSTRUCT_FAILED`) or the session shuts down before then, return
+    the error dict — agents can interpret "no simulator bound" as
+    "call restart_simulation with a valid input_path".
+    """
+    if session.debugger is not None:
+        return None
+    session.wait_until(
+        lambda: session.phase in _BOUND_PHASES
+                or session.phase in (Phase.CONSTRUCT_FAILED, Phase.SHUTDOWN),
+        timeout=_BIND_WAIT_SECS,
+    )
+>>>>>>> Stashed changes
     if session.debugger is not None:
         return None
     return dict(_NO_BOUND_DEBUGGER)
@@ -277,7 +302,25 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
         err = _bound_or_error(session)
         if err is not None:
             return err
+<<<<<<< Updated upstream
         return session.debugger.agent_start_simulation()
+=======
+        # Atomically check we're in READY and transition to RUNNING.
+        # The main loop is waiting on `phase != READY`; this transition
+        # wakes it and it proceeds into `sim.run()`. The worker then
+        # parks at the first enabled breakpoint and sets
+        # `_state_changed_event`, which `_wait_for_state_change()` waits
+        # on below.
+        with session.cv:
+            if session.phase != Phase.READY:
+                return {"ok": False, "error": "Simulation already started."}
+            dbg = session.debugger
+            dbg._state_changed_event.clear()
+            dbg._start_event.set()  # legacy marker; harmless to keep
+            session.phase = Phase.RUNNING
+            session.cv.notify_all()
+        return dbg._wait_for_state_change()
+>>>>>>> Stashed changes
 
     @server.tool(
         description=(
@@ -378,8 +421,20 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
         input_path: str | None = None,
         reload: bool = True,
     ) -> dict[str, Any]:
+<<<<<<< Updated upstream
         dbg = session.debugger
         if dbg is not None and not dbg._simulation_finished:
+=======
+        # Restart is legal from READY ("before the first run"), FINISHED
+        # (between runs), or CONSTRUCT_FAILED (recover from a bad path).
+        # If we're stuck in RUNNING, refuse — the agent must drive the
+        # current run to completion first.
+        ok_phases = (Phase.READY, Phase.FINISHED, Phase.CONSTRUCT_FAILED)
+        if not session.wait_until(
+                lambda: session.phase in ok_phases
+                        or session.phase == Phase.SHUTDOWN,
+                timeout=_BIND_WAIT_SECS):
+>>>>>>> Stashed changes
             return {
                 "ok": False,
                 "error": (
@@ -388,6 +443,7 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
                     "`shutdown` to abort."
                 ),
             }
+<<<<<<< Updated upstream
         if input_path:
             session.next_input_path = input_path
         # Invalidate sys.modules BEFORE signaling restart, so the main
@@ -401,15 +457,59 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
         session.request("restart")
         reached = session.restart_complete.wait(timeout=120.0)
         if not reached:
+=======
+
+        # Atomically: snapshot args, evict modules, transition.
+        # Doing all three under the cv prevents a concurrent restart
+        # from clobbering our input_path between the read and the
+        # transition, and prevents the lost-edge race a bare-Event
+        # protocol had.
+        reloaded_count = 0
+        with session.cv:
+            if session.phase == Phase.SHUTDOWN:
+                return {
+                    "ok": False,
+                    "error": "Session has been shut down.",
+                }
+            if session.phase not in ok_phases:
+                # Raced with another transition; reject.
+                return {
+                    "ok": False,
+                    "error": (
+                        "Current simulation is not finished. Drive it to "
+                        "completion via `continue_simulation` first, or "
+                        "call `shutdown` to abort."
+                    ),
+                }
+            if input_path:
+                session.next_input_path = input_path
+            if reload:
+                reloaded_count = len(_hot_reload_user_modules())
+            session.debugger = None
+            session.phase = Phase.CONSTRUCTING
+            session.cv.notify_all()
+
+        # Wait for the next construction to settle.
+        if not session.wait_until(
+                lambda: session.phase in (Phase.READY,
+                                          Phase.CONSTRUCT_FAILED,
+                                          Phase.SHUTDOWN),
+                timeout=120.0):
+>>>>>>> Stashed changes
             return {
                 "ok": False,
                 "error": "Simulator construction timed out.",
                 "timed_out": True,
             }
-        if session.debugger is None:
+        if session.phase == Phase.CONSTRUCT_FAILED:
             return {
                 "ok": False,
                 "error": "Simulator construction failed; see process stderr.",
+            }
+        if session.phase == Phase.SHUTDOWN:
+            return {
+                "ok": False,
+                "error": "Session has been shut down.",
             }
         state = session.debugger.agent_current_state()
         return {
@@ -427,12 +527,18 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
         )
     )
     def shutdown() -> dict[str, Any]:
-        # Release any parked simulator so the run completes naturally
-        # before the main loop tears it down.
-        dbg = session.debugger
-        if dbg is not None and dbg._at_breakpoint:
-            dbg._continue_event.set()
-        session.request("shutdown")
+        # Atomically: release any parked worker, signal shutdown.
+        # SHUTDOWN takes priority — even if a concurrent restart raced
+        # in, the next loop iteration will observe SHUTDOWN and exit.
+        # Main loop's RUNNING-phase exit also checks for SHUTDOWN
+        # before transitioning to FINISHED, so a shutdown during a
+        # live run still terminates cleanly after sim.run() returns.
+        with session.cv:
+            dbg = session.debugger
+            if dbg is not None and dbg._at_breakpoint:
+                dbg._continue_event.set()
+            session.phase = Phase.SHUTDOWN
+            session.cv.notify_all()
         return {"ok": True}
 
     return server

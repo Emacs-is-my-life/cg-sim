@@ -11,15 +11,29 @@ The simulator's `print()` traffic would corrupt the JSON-RPC stream if
 both shared fd 1. We duplicate the real stdin/stdout fds for MCP, then
 redirect fd 1 to fd 2 (stderr) so every simulator `print()` lands on
 stderr — keeping the protocol stream clean without touching engine code.
+
+Lifecycle synchronization: `AgentSession` exposes one `threading.Condition`
+plus an explicit `Phase` enum. The main loop (in `main_agent.py`) and
+the FastMCP tool handlers cooperate through `transition_to`/`wait_until`
+under the cv. This replaces an earlier pair of raw `threading.Event`s
+(`action_event` + `restart_complete`) whose clear/set protocol could not
+atomically express "wait until the *next* construction completes" — a
+lost-edge race that caused `restart_simulation` called before the first
+run to silently no-op. `Debugger`'s own three Events (`_continue_event`,
+`_start_event`, `_state_changed_event`) coordinate breakpoint park/resume
+on the worker thread and remain untouched here; they live on a different
+axis (high-frequency, per-Debugger) and are guarded only by their own
+internal locks.
 """
 
 from __future__ import annotations
 
+import enum
 import os
 import sys
 import threading
 from io import TextIOWrapper
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import anyio
 from mcp.server.stdio import stdio_server
@@ -28,34 +42,83 @@ if TYPE_CHECKING:
     from .debug import Debugger
 
 
+class Phase(enum.Enum):
+    """Lifecycle state of the simulator owned by the main thread.
+
+    Transitions (all under `AgentSession.cv`):
+
+        CONSTRUCTING ──ok──> READY ──start──> RUNNING ──finish──> FINISHED
+             │                  │                                     │
+             │                  └──restart──> CONSTRUCTING             │
+             │                  └──shutdown─> SHUTDOWN                 │
+             │                                                         │
+             ├─fail──> CONSTRUCT_FAILED ──restart──> CONSTRUCTING      │
+             │                          └──shutdown─> SHUTDOWN         │
+             │                                                         │
+             └─shutdown (daemon-disconnect race)─> SHUTDOWN  <──restart/shutdown
+    """
+    CONSTRUCTING = "constructing"
+    READY = "ready"
+    RUNNING = "running"
+    FINISHED = "finished"
+    CONSTRUCT_FAILED = "construct_failed"
+    SHUTDOWN = "shutdown"
+
+
 class AgentSession:
     """Shared state between the long-lived MCP daemon and the
     `main_agent.py` simulator loop.
 
-    The daemon owns one of these. Each simulator run binds its
-    `Debugger` via `bind()`, and on completion the main loop waits on
-    `action_event` for the agent to request either a `restart` (build
-    a fresh Simulator with `next_input_path`) or a `shutdown`.
+    State invariants (held under `self.cv`):
+      - `debugger is not None` iff `phase in {READY, RUNNING, FINISHED}`.
+      - `next_input_path` is consulted by `_construct_and_bind` whenever
+        the main loop is about to enter `CONSTRUCTING`; tools update it
+        under `cv` before requesting a transition.
+      - `phase == SHUTDOWN` is terminal — `transition_to(SHUTDOWN)` is
+        legal from every other phase, including `CONSTRUCTING` (used by
+        the daemon-disconnect path so a hung initial bind doesn't trap
+        the main thread).
     """
 
     def __init__(self, default_input_path: str):
         self.default_input_path = default_input_path
         self.next_input_path: str = default_input_path
         self.debugger: Optional["Debugger"] = None
-        self.action_event = threading.Event()
-        self.next_action: Optional[str] = None  # "restart" | "shutdown"
-        self.restart_complete = threading.Event()
+        self.cv = threading.Condition()
+        self.phase: Phase = Phase.CONSTRUCTING
 
-    def bind(self, debugger: "Debugger") -> None:
-        self.debugger = debugger
+    # -- Synchronization helpers (caller MUST hold or acquire `cv`) -----
 
-    def unbind(self) -> None:
-        self.debugger = None
+    def transition_to(self, new_phase: Phase, **attrs: Any) -> None:
+        """Atomically set `phase` (plus any attribute kwargs) and notify
+        all waiters. `SHUTDOWN` is absorbing — once set, no other phase
+        overwrites it (except the redundant SHUTDOWN-to-SHUTDOWN no-op).
+        Attribute kwargs are still applied so the caller's bookkeeping
+        completes, but the phase remains SHUTDOWN. Re-entrant: acquires
+        `cv` if not held."""
+        with self.cv:
+            for k, v in attrs.items():
+                setattr(self, k, v)
+            if self.phase != Phase.SHUTDOWN:
+                self.phase = new_phase
+            self.cv.notify_all()
 
-    def request(self, action: str) -> None:
-        """Signal the main loop's next move. Idempotent within one cycle."""
-        self.next_action = action
-        self.action_event.set()
+    def wait_until(
+        self,
+        predicate: Callable[[], bool],
+        timeout: float | None = None,
+    ) -> bool:
+        """Block until `predicate()` is true. Returns True if the
+        predicate became true, False on timeout. The predicate is
+        re-evaluated under `cv` on every `notify_all` — that's the
+        property that closes the lost-edge race a bare `Event` cannot."""
+        with self.cv:
+            return self.cv.wait_for(predicate, timeout=timeout)
+
+    # -- Convenience views (cheap snapshots; no lock needed for reads) --
+
+    def is_terminal(self) -> bool:
+        return self.phase == Phase.SHUTDOWN
 
 
 def start_agent_server(session: AgentSession) -> threading.Thread:
@@ -97,14 +160,17 @@ def start_agent_server(session: AgentSession) -> threading.Thread:
             import traceback as _tb
             _tb.print_exc(file=sys.stderr)
         finally:
-            # Client disconnected — wake the current run so the simulator
-            # finishes naturally, then push the main loop toward shutdown.
+            # Client disconnected. Wake any worker parked at a Debugger
+            # event so the current run completes naturally, then transition
+            # the session to SHUTDOWN — legal from every phase, including
+            # CONSTRUCTING, so a hung initial bind doesn't trap the main
+            # thread waiting on the cv.
             dbg = session.debugger
             if dbg is not None:
                 dbg._start_event.set()
                 dbg._continue_event.set()
                 dbg._state_changed_event.set()
-            session.request("shutdown")
+            session.transition_to(Phase.SHUTDOWN)
 
     thread = threading.Thread(
         target=_thread_target, name="cg-sim-mcp-server", daemon=True
