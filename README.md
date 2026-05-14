@@ -29,7 +29,9 @@ uv pip install docs/requirements.txt
 
 ### Run a Simulation
 ```bash
-python main.py -i <path-to-input.yaml>
+# python main.py -i <path-to-input.yaml>
+python main.py -i examples/llama3-flexinfer/input.yaml           # Normal run
+python main.py -i examples/llama3-flexinfer/input.yaml +debug=on # Debugging mode
 ```
 
 ### Debugging
