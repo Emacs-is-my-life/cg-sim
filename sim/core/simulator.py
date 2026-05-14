@@ -60,6 +60,7 @@ class Simulator:
     def __init__(self, config_file_path: str):
         self.log = None
         self.engine = None
+        self.debugger = None
 
         try:
             # Read input file(input.yaml), and parse fields
@@ -76,8 +77,11 @@ class Simulator:
 
             # Debugger
             debugger = Debugger(sim_id.get_id(), "Debug", log)
+            self.debugger = debugger
             if "debug" in cfg:
                 debugger.welcome_prompt()
+            elif "debug_agent" in cfg:
+                debugger.welcome_prompt_agent()
 
             # Trace
             t_cfg = cfg["trace"]

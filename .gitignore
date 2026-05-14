@@ -8,5 +8,6 @@ __pycache__/
 
 # Clankers
 .codex/
+.claude/
 .aider/
 .aider.*

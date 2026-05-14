@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import os
 import shutil
 import sys
 import textwrap
+import threading
+import traceback
 from IPython.terminal.embed import InteractiveShellEmbed
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
@@ -103,6 +108,21 @@ class Debugger(SimObject):
         self._current_breakpoint: str | None = None
         self._current_variables: list[_Symbol] = []
         self._current_tip: str | None = None
+
+        # Mode: "human" drops into IPython; "agent" parks on an Event and
+        # exposes the breakpoint state to an MCP server. Set by
+        # `run_agent_mode()` before `engine.run()` is invoked.
+        self.mode: str = "human"
+
+        # Agent-mode suspension state. The worker thread runs the engine
+        # and blocks on `_continue_event` whenever it hits a breakpoint;
+        # the MCP server reads `_at_breakpoint` / `_exec_namespace` and
+        # signals the event via `agent_continue()` to resume.
+        self._continue_event = threading.Event()
+        self._start_event = threading.Event()
+        self._at_breakpoint: bool = False
+        self._simulation_finished: bool = False
+        self._exec_namespace: dict[str, Any] = {}
         return
 
     def log_counters(self) -> dict[str, Any] | None:
@@ -120,6 +140,36 @@ class Debugger(SimObject):
 
         timestamp = 0 if self.engine is None else self.engine.timestamp_now
         self._log.record(Log.engine(self.id, "DEBUG_MSG", timestamp, args))
+        return
+
+    def welcome_prompt_agent(self) -> None:
+        """
+        Agent-mode counterpart to `welcome_prompt` — no interactive UI.
+
+        Starts the MCP server on a daemon thread *before* the rest of
+        `Simulator.__init__` runs, so init-time breakpoints (e.g.
+        BREAK_AFTER_TRACE_INIT) have an agent on the other side. Then
+        blocks the main thread on `_start_event` so the agent has a
+        chance to configure breakpoints via `list_breakpoints` /
+        `toggle_breakpoint` before invoking `start_simulation`.
+
+        As a convenience for environment-driven setups,
+        `CG_SIM_BREAKPOINTS` (comma-separated flag names) is honored —
+        any listed `BREAK_*` flag is pre-set True before the server
+        starts.
+        """
+        self.mode = "agent"
+        raw = os.environ.get("CG_SIM_BREAKPOINTS", "")
+        for name in (s.strip() for s in raw.split(",") if s.strip()):
+            if name.startswith("BREAK_") and isinstance(getattr(self, name, None), bool):
+                setattr(self, name, True)
+
+        # Imported lazily so non-agent runs don't pay the MCP import cost.
+        from .agent_runner import start_agent_server
+        start_agent_server(self)
+
+        # Block until the agent calls `start_simulation`.
+        self._start_event.wait()
         return
 
     def welcome_prompt(self) -> None:
@@ -239,30 +289,136 @@ class Debugger(SimObject):
 
     def _enter_breakpoint(self, name: str, variables: list[_Symbol], tip: str | None = None) -> None:
         """
-        Register `name`/`variables`/`tip` as the active breakpoint, print
-        the entry message, and drop into the IPython shell scoped to the
-        caller of the originating `break_after_*` method.
+        Register `name`/`variables`/`tip` as the active breakpoint and
+        dispatch to the human (IPython) or agent (MCP) handoff depending
+        on `self.mode`.
         """
         self._current_breakpoint = name
         self._current_variables = variables
         self._current_tip = tip
-        self.help()
+
         # Frames: 0=_enter_breakpoint, 1=break_after_*, 2=actual caller.
         caller_frame = sys._getframe(2)
+
+        if self.mode == "agent":
+            self._handoff_to_agent(caller_frame)
+        else:
+            self.help()
+            self._handoff_to_human(caller_frame)
+
+        # Clear active breakpoint context.
+        self._current_breakpoint = None
+        self._current_variables = []
+        self._current_tip = None
+        self._exec_namespace = {}
+
+        if self.mode == "human":
+            # ESC[2J = erase entire screen; ESC[H = move cursor to top-left.
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.flush()
+            print(f"[{name}] Resuming simulator execution...")
+        return
+
+    def _handoff_to_human(self, caller_frame) -> None:
+        """Drop into the embedded IPython shell scoped to caller_frame."""
         _shell.mainloop(
             local_ns=caller_frame.f_locals,
             module=sys.modules.get(caller_frame.f_globals.get("__name__")),
         )
-        # Clear active breakpoint context and wipe the terminal so the
-        # simulator's subsequent log output starts on a clean screen.
-        self._current_breakpoint = None
-        self._current_variables = []
-        self._current_tip = None
-        # ESC[2J = erase entire screen; ESC[H = move cursor to top-left.
-        sys.stdout.write("\033[2J\033[H")
-        sys.stdout.flush()
-        print(f"[{name}] Resuming simulator execution...")
         return
+
+    def _handoff_to_agent(self, caller_frame) -> None:
+        """
+        Park the worker thread until the MCP server signals `continue`.
+        The breakpoint's locals are snapshotted into `_exec_namespace`
+        so agent-side `execute(code)` calls share a persistent namespace
+        across one breakpoint. `debug` is exposed so the agent can use
+        `debug.record(...)` from inside `execute`.
+        """
+        ns = dict(caller_frame.f_locals)
+        ns.update(caller_frame.f_globals)
+        ns["debug"] = self
+        self._exec_namespace = ns
+        self._continue_event.clear()
+        self._at_breakpoint = True
+        try:
+            self._continue_event.wait()
+        finally:
+            self._at_breakpoint = False
+        return
+
+    # -------- Agent-mode helpers (called by MCP tools) -----------------
+
+    def agent_current_state(self) -> dict[str, Any]:
+        """Return a JSON-serializable snapshot of the current breakpoint."""
+        return {
+            "at_breakpoint": self._at_breakpoint,
+            "breakpoint": self._current_breakpoint,
+            "variables": [
+                {"name": v.name, "type": v._type, "description": v.description}
+                for v in self._current_variables
+            ],
+            "tip": self._current_tip,
+            "simulation_finished": self._simulation_finished,
+        }
+
+    def agent_list_breakpoints(self) -> dict[str, bool]:
+        """Return a {flag_name: enabled} mapping for all BREAK_* flags."""
+        return {
+            name: getattr(self, name)
+            for name in vars(self)
+            if name.startswith("BREAK_") and isinstance(getattr(self, name), bool)
+        }
+
+    def agent_toggle_breakpoint(self, name: str) -> dict[str, Any]:
+        """Flip a BREAK_* flag. Returns the new value or an error."""
+        if not name.startswith("BREAK_") or not isinstance(getattr(self, name, None), bool):
+            return {"ok": False, "error": f"No such breakpoint flag: {name!r}"}
+        new_value = not getattr(self, name)
+        setattr(self, name, new_value)
+        return {"ok": True, "name": name, "new_value": new_value}
+
+    def agent_execute(self, code: str) -> dict[str, Any]:
+        """
+        Execute `code` against the persistent breakpoint namespace.
+        Echoes the value of a bare last expression like the Python REPL,
+        captures stdout, and returns tracebacks as strings rather than
+        raising. No-op if not currently parked at a breakpoint.
+        """
+        if not self._at_breakpoint:
+            return {"ok": False, "error": "Not at a breakpoint."}
+
+        stdout_buf = io.StringIO()
+        try:
+            # `single` mode echoes the value of a bare expression like the
+            # interactive REPL does. Fall back to `exec` for multi-stmt input.
+            try:
+                compiled = compile(code, "<mcp>", "single")
+            except SyntaxError:
+                compiled = compile(code, "<mcp>", "exec")
+            with contextlib.redirect_stdout(stdout_buf):
+                exec(compiled, self._exec_namespace)
+            return {"ok": True, "output": stdout_buf.getvalue(), "error": None}
+        except BaseException:
+            return {
+                "ok": False,
+                "output": stdout_buf.getvalue(),
+                "error": traceback.format_exc(),
+            }
+
+    def agent_continue(self) -> dict[str, Any]:
+        """Release the parked worker thread so the simulator can resume."""
+        if not self._at_breakpoint:
+            return {"ok": False, "error": "Not at a breakpoint."}
+        self._continue_event.set()
+        return {"ok": True}
+
+    def agent_start_simulation(self) -> dict[str, Any]:
+        """Release the worker thread from its initial pre-run park."""
+        if self._start_event.is_set():
+            return {"ok": False, "error": "Simulation already started."}
+        self._start_event.set()
+        return {"ok": True}
 
     def break_after_trace_init(self) -> None:
         self._enter_breakpoint("break_after_trace_init", [
