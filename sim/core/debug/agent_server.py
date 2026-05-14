@@ -209,17 +209,6 @@ _NO_BOUND_DEBUGGER = {
 _BIND_WAIT_SECS = 60.0
 
 
-<<<<<<< Updated upstream
-def _bound_or_error(session: "AgentSession") -> dict[str, Any] | None:
-    """Return None if a Debugger is bound, else an error dict.
-
-    If unbound, briefly waits on `session.restart_complete` (set after
-    each `_construct_and_bind` completes) before giving up.
-    """
-    if session.debugger is not None:
-        return None
-    session.restart_complete.wait(timeout=_BIND_WAIT_SECS)
-=======
 _BOUND_PHASES = (Phase.READY, Phase.RUNNING, Phase.FINISHED)
 
 
@@ -240,7 +229,6 @@ def _bound_or_error(session: "AgentSession") -> dict[str, Any] | None:
                 or session.phase in (Phase.CONSTRUCT_FAILED, Phase.SHUTDOWN),
         timeout=_BIND_WAIT_SECS,
     )
->>>>>>> Stashed changes
     if session.debugger is not None:
         return None
     return dict(_NO_BOUND_DEBUGGER)
@@ -302,9 +290,6 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
         err = _bound_or_error(session)
         if err is not None:
             return err
-<<<<<<< Updated upstream
-        return session.debugger.agent_start_simulation()
-=======
         # Atomically check we're in READY and transition to RUNNING.
         # The main loop is waiting on `phase != READY`; this transition
         # wakes it and it proceeds into `sim.run()`. The worker then
@@ -320,7 +305,6 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
             session.phase = Phase.RUNNING
             session.cv.notify_all()
         return dbg._wait_for_state_change()
->>>>>>> Stashed changes
 
     @server.tool(
         description=(
@@ -421,10 +405,6 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
         input_path: str | None = None,
         reload: bool = True,
     ) -> dict[str, Any]:
-<<<<<<< Updated upstream
-        dbg = session.debugger
-        if dbg is not None and not dbg._simulation_finished:
-=======
         # Restart is legal from READY ("before the first run"), FINISHED
         # (between runs), or CONSTRUCT_FAILED (recover from a bad path).
         # If we're stuck in RUNNING, refuse — the agent must drive the
@@ -434,7 +414,6 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
                 lambda: session.phase in ok_phases
                         or session.phase == Phase.SHUTDOWN,
                 timeout=_BIND_WAIT_SECS):
->>>>>>> Stashed changes
             return {
                 "ok": False,
                 "error": (
@@ -443,21 +422,6 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
                     "`shutdown` to abort."
                 ),
             }
-<<<<<<< Updated upstream
-        if input_path:
-            session.next_input_path = input_path
-        # Invalidate sys.modules BEFORE signaling restart, so the main
-        # loop's subsequent `Simulator(...)` triggers fresh imports of
-        # any user-edited code. Action_event provides the happens-before
-        # relationship between this thread and the main loop's reads.
-        reloaded_count = 0
-        if reload:
-            reloaded_count = len(_hot_reload_user_modules())
-        session.restart_complete.clear()
-        session.request("restart")
-        reached = session.restart_complete.wait(timeout=120.0)
-        if not reached:
-=======
 
         # Atomically: snapshot args, evict modules, transition.
         # Doing all three under the cv prevents a concurrent restart
@@ -495,7 +459,6 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
                                           Phase.CONSTRUCT_FAILED,
                                           Phase.SHUTDOWN),
                 timeout=120.0):
->>>>>>> Stashed changes
             return {
                 "ok": False,
                 "error": "Simulator construction timed out.",
