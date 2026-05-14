@@ -111,7 +111,7 @@ class Log:
             else:
                 parts.append(",\n")
 
-            parts.append(orjson.dumps(log_event, option=orjson.OPT_INDENT_2).decode().replace("  ", "\t"))
+            parts.append(orjson.dumps(log_event, option=orjson.OPT_INDENT_2).decode())
 
         self.file_ptr.write("".join(parts))
         self.file_ptr.flush()

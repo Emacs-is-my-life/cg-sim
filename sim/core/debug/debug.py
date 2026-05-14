@@ -18,7 +18,10 @@ from sim.core.sim_object import SimObject
 from sim.core.log import Log, TrackID, Level
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
     from sim.core.engine import Engine
+    from sim.core.system import System
 
 
 _shell = InteractiveShellEmbed()
@@ -102,6 +105,32 @@ class Debugger(SimObject):
         self.BREAK_AFTER_LAYOUT_STAGE: bool = False
         self.BREAK_IN_RUNTIME_STAGE: bool = False
         self.BREAK_AFTER_RUNTIME_STAGE: bool = False
+        # Safety-net: defaults On. Fires at each engine abort site (deadlock,
+        # invalid Job submission) so the agent can inspect why & state before
+        # the run tears down. Toggle off for fail-fast batch/CI runs.
+        self.BREAK_ON_ABORT: bool = True
+        # Hard-failure counterpart: defaults On. Fires when an uncaught
+        # exception propagates out of `engine.run()` so the agent can inspect
+        # the failing frame instead of chasing a stderr traceback after the
+        # fact. Toggle off if you want exceptions to propagate silently.
+        self.BREAK_ON_EXCEPTION: bool = True
+
+        # Free-form scratchpad dict, mirroring the `.args` convention on
+        # hardware/scheduler classes. Use it to stash notes, intermediate
+        # values, working hypotheses — anything you want to carry across
+        # breakpoints within one run. Lives for the lifetime of this
+        # Debugger; cleared on `restart_simulation`. For records that
+        # survive the run, use `record()` instead.
+        self.args: dict[str, Any] = {}
+
+        # User-supplied predicate `(engine: Engine, sys: System) -> bool`,
+        # evaluated each runtime-loop iteration after retiring jobs and
+        # before updating progress. Returning True fires
+        # `break_in_runtime_stage[LAMBDA]`. Lets agents/humans express
+        # arbitrary stop conditions without writing a new BREAK_* flag.
+        # Auto-cleared if the predicate raises (so a buggy lambda can't
+        # crash the run on every tick).
+        self.break_lambda: Callable[[Engine, System], bool] | None = None
 
         # Active breakpoint context (set on entry, consumed by `help()`).
         self._current_breakpoint: str | None = None
@@ -145,6 +174,54 @@ class Debugger(SimObject):
         self._log.record(Log.engine(self.id, "DEBUG_MSG", timestamp, args))
         return
 
+    @property
+    def log_path(self) -> Path:
+        """Absolute path to the simulation log file.
+
+        Where `record()` writes and where the final SIMULATION_RESULT
+        / per-track events end up. Useful for post-mortem inspection
+        after `simulation_finished=True`.
+        """
+        return self._log.result_path
+
+    def _break_lambda(self, engine, system) -> None:
+        """Evaluate `self.break_lambda(engine, system)`; if it returns
+        True, fire `break_in_runtime_stage[LAMBDA]`. Called once per
+        runtime-loop iteration by Engine._runtime (after retiring jobs,
+        before updating progress).
+
+        Auto-clears `self.break_lambda` on any exception so a buggy
+        predicate can't crash the run on every tick — the user/agent
+        can set it again after fixing.
+
+        The runtime-stage locals expected at the breakpoint (`debug`,
+        `engine`, `timestamp_now`, `job_waiting`, `job_running`, `hw`,
+        `trace`) are bound in this frame so `_enter_breakpoint`'s
+        2-frames-up lookup picks them up. No `job` is bound: a lambda
+        stop has no triggering Job.
+        """
+        if self.break_lambda is None:
+            return
+        try:
+            should_break = self.break_lambda(engine, system)
+        except BaseException:
+            traceback.print_exc()
+            print("[Debugger] break_lambda raised; cleared. Set it again to re-enable.")
+            self.break_lambda = None
+            return
+        if should_break is not True:
+            return
+
+        # Bind the runtime-stage namespace for the breakpoint REPL.
+        debug = self
+        timestamp_now = engine.timestamp_now
+        job_waiting = engine.job_waiting
+        job_running = engine.job_running
+        hw = system.hw
+        trace = system.trace
+        self.break_in_runtime_stage("LAMBDA")
+        return
+
     def apply_env_breakpoints(self) -> None:
         """Pre-enable any BREAK_* flags listed in `CG_SIM_BREAKPOINTS`.
 
@@ -166,7 +243,16 @@ class Debugger(SimObject):
         a REPL loop: each integer input toggles the matching breakpoint to
         On and re-renders the table. Returns when every breakpoint is On
         or when the user enters 'c'.
+
+        No-op under agent mode: `main_agent.py` sets `CG_SIM_AGENT_MODE`
+        before construction, and `input()` here would race the MCP server
+        for stdin bytes (both ends inherit fd 0 from the dup in
+        `start_agent_server`). Agents toggle flags via `toggle_breakpoint`
+        instead.
         """
+        if os.environ.get("CG_SIM_AGENT_MODE"):
+            return
+
         breakpoints = [
             name for name, value in vars(self).items()
             if name.startswith("BREAK_") and isinstance(value, bool)
@@ -243,6 +329,9 @@ class Debugger(SimObject):
         commands = [
             ("debug.help()", "Show breakpoint context"),
             ("debug.record(dict)", "Leave information in simulation log file, in Engine -> Debug track."),
+            ("debug.args", "Free-form scratchpad dict for ad-hoc notes/findings during this run."),
+            ("debug.break_lambda", "Set to fn(engine, sys)->bool; fires break_in_runtime_stage[LAMBDA] when True."),
+            ("debug.log_path", "Path to the simulation log file (where debug.record() writes)."),
             ("exit()", "Continue simulator execution"),
         ]
         cmd_w = max(len("Command"), *(len(c) for c, _ in commands))
@@ -441,6 +530,8 @@ class Debugger(SimObject):
 
     def break_before_compile_stage(self) -> None:
         self._enter_breakpoint("break_before_compile_stage", [
+            _Symbol("debug", "Debugger", "Debugger — debug.record(dict) to log, debug.help() to re-print, debug.args dict for notes, debug.break_lambda for custom-predicate runtime stop, debug.log_path for log file path."),
+            _Symbol("engine", "Engine", "Engine — exposes engine.sched (scheduler), engine.sys, engine.signal_abort, engine.job_stats, and internal state."),
             _Symbol("trace", "Trace", "Execution trace"),
             _Symbol("trace.node_map", "dict[int, Node]", "Dictionary: node_id -> Node"),
             _Symbol("trace.tensor_map", "dict[int, Tensor]", "Dictionary: tensor_id -> Tensor"),
@@ -450,6 +541,8 @@ class Debugger(SimObject):
 
     def break_after_compile_stage(self) -> None:
         self._enter_breakpoint("break_after_compile_stage", [
+            _Symbol("debug", "Debugger", "Debugger — debug.record(dict) to log, debug.help() to re-print, debug.args dict for notes, debug.break_lambda for custom-predicate runtime stop, debug.log_path for log file path."),
+            _Symbol("engine", "Engine", "Engine — exposes engine.sched (scheduler), engine.sys, engine.signal_abort, engine.job_stats, and internal state."),
             _Symbol("trace", "Trace", "Execution trace"),
             _Symbol("trace.node_map", "dict[int, Node]", "Dictionary: node_id -> Node"),
             _Symbol("trace.tensor_map", "dict[int, Tensor]", "Dictionary: tensor_id -> Tensor"),
@@ -458,6 +551,8 @@ class Debugger(SimObject):
 
     def break_after_layout_stage(self, hw) -> None:
         self._enter_breakpoint("break_after_layout_stage", [
+            _Symbol("debug", "Debugger", "Debugger — debug.record(dict) to log, debug.help() to re-print, debug.args dict for notes, debug.break_lambda for custom-predicate runtime stop, debug.log_path for log file path."),
+            _Symbol("engine", "Engine", "Engine — exposes engine.sched (scheduler), engine.sys, engine.signal_abort, engine.job_stats, and internal state."),
             _Symbol("hw", "dict[str, BaseHardware]", "Dictionary: hw_name -> BaseHardware"),
             _Symbol("trace", "Trace", "Execution trace"),
             _Symbol("trace.node_map", "dict[int, Node]", "Dictionary: node_id -> Node"),
@@ -466,9 +561,18 @@ class Debugger(SimObject):
         return
 
     def break_in_runtime_stage(self, bp_name: str) -> None:
-        self._enter_breakpoint(f"break_in_runtime_stage[{bp_name}]", [
+        # `LAMBDA` fires from _break_lambda, where no triggering job exists.
+        # Per-Job breakpoints (JOB_*) bind `job` in the caller's frame.
+        variables = [
+            _Symbol("debug", "Debugger", "Debugger — debug.record(dict) to log, debug.help() to re-print, debug.args dict for notes, debug.break_lambda for custom-predicate runtime stop, debug.log_path for log file path."),
+            _Symbol("engine", "Engine", "Engine — exposes engine.sched (scheduler), engine.sys, engine.signal_abort, engine.job_stats, and internal state."),
             _Symbol("timestamp_now", "float", "Current simulator time"),
-            _Symbol("job", "BaseJob", "Job triggered this breakpoint"),
+        ]
+        if bp_name != "LAMBDA":
+            variables.append(
+                _Symbol("job", "BaseJob", "Job triggered this breakpoint")
+            )
+        variables.extend([
             _Symbol("job_waiting", "list[BaseJob]", "Queue of jobs waiting to be dispatched"),
             _Symbol("job_running", "list[BaseJob]", "Queue of currently running jobs"),
             _Symbol("hw", "dict[str, BaseHardware]", "Dictionary: hw_name -> BaseHardware"),
@@ -476,10 +580,100 @@ class Debugger(SimObject):
             _Symbol("trace.node_map", "dict[int, Node]", "Dictionary: node_id -> Node"),
             _Symbol("trace.tensor_map", "dict[int, Tensor]", "Dictionary: tensor_id -> Tensor"),
         ])
+        self._enter_breakpoint(f"break_in_runtime_stage[{bp_name}]", variables)
         return
+
+    def break_on_abort(self) -> None:
+        """Fired by `Engine._log_abort` for *any* abort path — engine-
+        internal deadlocks, scheduler-issued `sys.abort(...)`, job
+        assertion failures, mutation invariant breaks. Logging happens
+        first; this breakpoint fires after it but before `signal_abort`
+        is set, so the agent can inspect `abort_args` and the live
+        runtime state.
+
+        Caller's frame (`_log_abort`) must bind: `debug`, `engine`,
+        `abort_args`, `timestamp_now`, `job_waiting`, `job_running`,
+        `hw`, `trace`. `_enter_breakpoint`'s 2-frames-up lookup reads
+        them from there.
+
+        No discriminator in the breakpoint name — `abort_args['msg']`
+        and `abort_args['from']` describe WHY; the agent reads them.
+        """
+        self._enter_breakpoint("break_on_abort", [
+            _Symbol("debug", "Debugger", "Debugger — debug.record(dict) to log, debug.help() to re-print, debug.args dict for notes, debug.break_lambda for custom-predicate runtime stop, debug.log_path for log file path."),
+            _Symbol("engine", "Engine", "Engine — exposes engine.sched (scheduler), engine.sys, engine.signal_abort, engine.job_stats, and internal state."),
+            _Symbol("abort_args", "dict", "The args dict logged by _log_abort. `msg` and `from` describe the abort; specific aborts (e.g. runtime deadlock) may add `job` details."),
+            _Symbol("abort_stack", "list[FrameInfo]", "Full call chain at the abort site (via inspect.stack()). abort_stack[0]=_log_abort itself; [1]=its direct caller (e.g. Engine._layout, System.abort, or your scheduler's runtime). Each entry: .filename, .lineno, .function, .frame.f_locals — read .frame.f_locals to inspect that frame's variables."),
+            _Symbol("timestamp_now", "float", "Simulator time when the abort was raised."),
+            _Symbol("job_waiting", "list[BaseJob]", "Queue of jobs waiting to be dispatched (head is usually the stuck job for deadlocks)"),
+            _Symbol("job_running", "list[BaseJob]", "Queue of currently running jobs (empty at deadlock)"),
+            _Symbol("hw", "dict[str, BaseHardware]", "Dictionary: hw_name -> BaseHardware"),
+            _Symbol("trace", "Trace", "Execution trace"),
+            _Symbol("trace.node_map", "dict[int, Node]", "Dictionary: node_id -> Node"),
+            _Symbol("trace.tensor_map", "dict[int, Tensor]", "Dictionary: tensor_id -> Tensor"),
+        ])
+        return
+
+    def break_on_exception(self, exc_type_name: str) -> None:
+        """Fired by `Simulator.run`'s outermost handler when an uncaught
+        exception propagates out of `engine.run()`. Hard-failure
+        counterpart of `break_on_abort` — same shape, different source:
+        the failing frames are no longer on the live Python stack
+        (they've unwound during exception propagation), so the call
+        chain comes from `exception.__traceback__` instead of
+        `inspect.stack()`.
+
+        Caller's frame must bind: `debug`, `engine`, `exception`,
+        `exception_origin` (dict), `exception_stack` (list of
+        traceback objects walked from `exception.__traceback__`).
+
+        Breakpoint name carries the exception type for at-a-glance
+        triage from `current_state.breakpoint` (no `execute` needed):
+        `break_on_exception[KeyError]`, etc.
+        """
+        self._enter_breakpoint(f"break_on_exception[{exc_type_name}]", [
+            _Symbol("debug", "Debugger", "Debugger — debug.record(dict) to log, debug.help() to re-print, debug.args dict for notes, debug.break_lambda for custom-predicate runtime stop, debug.log_path for log file path."),
+            _Symbol("engine", "Engine", "Engine — exposes engine.sched (scheduler), engine.sys, engine.signal_abort, engine.job_stats, and internal state."),
+            _Symbol("exception", "BaseException", "The caught exception object. Read `str(exception)`, `exception.args`, `exception.__cause__` for further detail."),
+            _Symbol("exception_origin", "dict", "Where the exception was raised: {'file': str, 'line': int, 'function': str}. Same info as the deepest traceback frame — surfaced top-level for at-a-glance triage."),
+            _Symbol("exception_stack", "list[traceback]", "Full traceback chain walked from exception.__traceback__. [0]=outermost frame (engine.run); [-1]=failing frame (== exception_origin). Each entry: .tb_frame, .tb_lineno, .tb_frame.f_code.co_filename, .tb_frame.f_code.co_name, .tb_frame.f_locals — read .tb_frame.f_locals to inspect that frame's variables. Same navigation pattern as abort_stack."),
+        ])
+        return
+
+    @staticmethod
+    def _exception_origin(exc: BaseException) -> dict:
+        """Deepest traceback frame as a {file, line, function} dict —
+        i.e., the actual raise site. Returns None values if `exc` has
+        no traceback (shouldn't happen for a normally-raised exception
+        caught at runtime, but handled defensively)."""
+        tb = exc.__traceback__
+        if tb is None:
+            return {"file": None, "line": None, "function": None}
+        while tb.tb_next is not None:
+            tb = tb.tb_next
+        return {
+            "file": tb.tb_frame.f_code.co_filename,
+            "line": tb.tb_lineno,
+            "function": tb.tb_frame.f_code.co_name,
+        }
+
+    @staticmethod
+    def _exception_stack(exc: BaseException) -> list:
+        """Flatten `exc.__traceback__` into a list of traceback objects
+        ordered outer→inner (parallel to `abort_stack` semantics but
+        sourced from the preserved traceback rather than the live
+        stack, since the stack has unwound by the time we catch)."""
+        chain = []
+        tb = exc.__traceback__
+        while tb is not None:
+            chain.append(tb)
+            tb = tb.tb_next
+        return chain
 
     def break_after_runtime_stage(self) -> None:
         self._enter_breakpoint("break_after_runtime_stage", [
+            _Symbol("debug", "Debugger", "Debugger — debug.record(dict) to log, debug.help() to re-print, debug.args dict for notes, debug.break_lambda for custom-predicate runtime stop, debug.log_path for log file path."),
+            _Symbol("engine", "Engine", "Engine — exposes engine.sched (scheduler), engine.sys, engine.signal_abort, engine.job_stats, and internal state."),
             _Symbol("hw", "dict[str, BaseHardware]", "Dictionary: hw_name -> BaseHardware"),
             _Symbol("trace", "Trace", "Execution trace"),
             _Symbol("trace.node_map", "dict[int, Node]", "Dictionary: node_id -> Node"),

@@ -4,6 +4,7 @@ from typing import Any, TYPE_CHECKING
 from enum import Enum, auto
 from collections import deque
 import heapq
+import inspect
 import orjson
 
 from sim.core.sim_object import SimObject
@@ -69,6 +70,7 @@ class Engine(SimObject):
         # DEBUG: BREAK_AT_JOB_SUBMITTED
         if self.debugger.BREAK_IN_RUNTIME_STAGE and job.BREAK_AT_JOB_SUBMITTED:
             debug = self.debugger
+            engine = self
             timestamp_now = self.timestamp_now
             job_waiting = self.job_waiting
             job_running = self.job_running
@@ -87,6 +89,7 @@ class Engine(SimObject):
     def run(self) -> None:
         if self.debugger.BREAK_BEFORE_COMPILE_STAGE:
             debug = self.debugger
+            engine = self
             trace = self.sys.trace
             hw = self.sys.hw
             self.debugger.break_before_compile_stage()
@@ -96,6 +99,7 @@ class Engine(SimObject):
         self._compile()
         if self.debugger.BREAK_AFTER_COMPILE_STAGE:
             debug = self.debugger
+            engine = self
             trace = self.sys.trace
             self.debugger.break_after_compile_stage()
 
@@ -109,6 +113,7 @@ class Engine(SimObject):
         self._layout()
         if self.debugger.BREAK_AFTER_LAYOUT_STAGE:
             debug = self.debugger
+            engine = self
             hw = self.sys.hw
             self.debugger.break_after_layout_stage(self.sys.hw)
 
@@ -117,6 +122,7 @@ class Engine(SimObject):
         self._runtime()
         if self.debugger.BREAK_AFTER_RUNTIME_STAGE:
             debug = self.debugger
+            engine = self
             hw = self.sys.hw
             trace = self.sys.trace
             self.debugger.break_after_runtime_stage()
@@ -251,6 +257,7 @@ class Engine(SimObject):
                 # DEBUG: BREAK_AT_JOB_RETIRED
                 if self.debugger.BREAK_IN_RUNTIME_STAGE and job.BREAK_AT_JOB_RETIRED:
                     debug = self.debugger
+                    engine = self
                     timestamp_now = self.timestamp_now
                     job_waiting = self.job_waiting
                     job_running = self.job_running
@@ -261,6 +268,13 @@ class Engine(SimObject):
                 # Check if simulation is finished
                 if isinstance(job, ComputeJob) and isinstance(job.node, TerminalNode):
                     return
+
+            # DEBUG: break_lambda — generic custom-predicate breakpoint
+            # checked once per loop, after retiring jobs and before
+            # advancing progress. The wrapper handles its own namespace
+            # for the breakpoint REPL.
+            if self.debugger.break_lambda is not None:
+                self.debugger._break_lambda(self, self.sys)
 
             # Update progress
             for job in self.job_running:
@@ -276,6 +290,7 @@ class Engine(SimObject):
                 # DEBUG: BREAK_AT_JOB_HEAD
                 if self.debugger.BREAK_IN_RUNTIME_STAGE and job_w.BREAK_AT_JOB_HEAD:
                     debug = self.debugger
+                    engine = self
                     timestamp_now = self.timestamp_now
                     job = job_w
                     job_waiting = self.job_waiting
@@ -297,6 +312,7 @@ class Engine(SimObject):
                     # DEBUG: BREAK_AT_JOB_DISPATCHED
                     if self.debugger.BREAK_IN_RUNTIME_STAGE and job_w.BREAK_AT_JOB_DISPATCHED:
                         debug = self.debugger
+                        engine = self
                         timestamp_now = self.timestamp_now
                         job = job_w
                         job_waiting = self.job_waiting
@@ -375,8 +391,31 @@ class Engine(SimObject):
         return
 
     def _log_abort(self, args: dict[str, Any] | None = None) -> None:
+        # Central choke point for *all* aborts — engine-internal sites,
+        # scheduler-driven `sys.abort(...)`, job assertion failures,
+        # mutation invariant breaks. After logging the reason and before
+        # `signal_abort=True` tears the run down, fire `break_on_abort`
+        # so the agent can inspect `abort_args` and the surrounding
+        # runtime state (job queues, hardware, trace) while it's still
+        # intact. Any future caller of `_log_abort` is covered
+        # automatically — no per-site wiring needed.
         args = args if args is not None else {}
         self.log.record(Log.engine(self.id, "SIMULATION_ABORT", self.timestamp_now, args))
+        if self.debugger.BREAK_ON_ABORT:
+            debug = self.debugger
+            engine = self
+            abort_args = args
+            timestamp_now = self.timestamp_now
+            job_waiting = self.job_waiting
+            job_running = self.job_running
+            hw = self.sys.hw
+            trace = self.sys.trace
+            # Snapshot the full call chain so the agent can inspect the
+            # actual decision-making frame (Scheduler, assertion, etc.),
+            # not just this `_log_abort` frame. abort_stack[0] is this
+            # function; abort_stack[1] is its direct caller, and so on.
+            abort_stack = inspect.stack()
+            self.debugger.break_on_abort()
         return
 
     def log_counters(self) -> dict[str, Any] | None:

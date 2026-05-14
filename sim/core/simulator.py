@@ -183,6 +183,36 @@ class Simulator:
         except KeyboardInterrupt:
             print("\nSimulation interrupted by user.")
             raise SystemExit(130)
+        except BaseException as exc:
+            # Hard-failure path. Counterpart to the soft-abort flow
+            # centralized in Engine._log_abort: log a structured record so
+            # the post-run log has the same shape regardless of failure
+            # mode, fire the dedicated exception breakpoint (the agent
+            # gets exception_origin / exception_stack — same navigation
+            # idea as abort_stack, but sourced from __traceback__ since
+            # the live stack has unwound), then end the run gracefully
+            # so restart_simulation works. Zero-cost on the success path
+            # in Python 3.11+.
+            import traceback as _tb
+            exc_args = {
+                "from": "Simulator",
+                "msg": f"Uncaught {type(exc).__name__}: {exc}",
+                "exception_type": type(exc).__name__,
+                "exception_message": str(exc),
+                "traceback": _tb.format_exception(exc),
+            }
+            self.log.record(Log.engine(
+                self.engine.id, "SIMULATION_EXCEPTION",
+                self.engine.timestamp_now, exc_args))
+            if self.debugger.BREAK_ON_EXCEPTION:
+                debug = self.debugger
+                engine = self.engine
+                exception = exc
+                exception_origin = self.debugger._exception_origin(exc)
+                exception_stack = self.debugger._exception_stack(exc)
+                self.debugger.break_on_exception(type(exc).__name__)
+            print(f"Simulation ended with {type(exc).__name__}: {exc}")
+            self.debugger.notify_simulation_finished()
         finally:
             if self.log is not None:
                 self.log.stop()

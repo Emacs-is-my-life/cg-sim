@@ -62,6 +62,11 @@ def start_agent_server(session: AgentSession) -> threading.Thread:
     """Spawn the MCP server on a daemon thread and return it."""
     from .agent_server import build_mcp_server
 
+    # Mark this process as agent-mode so `Debugger.welcome_prompt`
+    # short-circuits — its `input()` would race the MCP server for the
+    # original fd 0 (both ends see it after the dup below).
+    os.environ["CG_SIM_AGENT_MODE"] = "1"
+
     real_stdout_fd = os.dup(1)
     real_stdin_fd = os.dup(0)
     os.dup2(2, 1)
