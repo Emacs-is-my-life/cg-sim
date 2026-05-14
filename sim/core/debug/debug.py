@@ -97,8 +97,7 @@ class Debugger(SimObject):
         self._log.record(Log.subtrack(TrackID.Engine, self.id, "Debug"))
 
         # Debugging flags
-        self.BREAK_AFTER_TRACE_INIT: bool = False
-        self.BREAK_AFTER_HW_INIT: bool = False
+        self.BREAK_BEFORE_COMPILE_STAGE: bool = False
         self.BREAK_AFTER_COMPILE_STAGE: bool = False
         self.BREAK_AFTER_LAYOUT_STAGE: bool = False
         self.BREAK_IN_RUNTIME_STAGE: bool = False
@@ -114,12 +113,16 @@ class Debugger(SimObject):
         # `run_agent_mode()` before `engine.run()` is invoked.
         self.mode: str = "human"
 
-        # Agent-mode suspension state. The worker thread runs the engine
-        # and blocks on `_continue_event` whenever it hits a breakpoint;
-        # the MCP server reads `_at_breakpoint` / `_exec_namespace` and
-        # signals the event via `agent_continue()` to resume.
+        # Agent-mode suspension state. `start_simulation` and
+        # `continue_simulation` are *blocking* RPCs: each releases the
+        # worker via its event, then waits on `_state_changed_event` —
+        # which the worker sets when it reaches the next breakpoint or
+        # finishes — and returns the new state in the same response.
+        # This eliminates client-side polling.
         self._continue_event = threading.Event()
         self._start_event = threading.Event()
+        self._state_changed_event = threading.Event()
+        self._wait_timeout: float = 50.0
         self._at_breakpoint: bool = False
         self._simulation_finished: bool = False
         self._exec_namespace: dict[str, Any] = {}
@@ -142,34 +145,16 @@ class Debugger(SimObject):
         self._log.record(Log.engine(self.id, "DEBUG_MSG", timestamp, args))
         return
 
-    def welcome_prompt_agent(self) -> None:
-        """
-        Agent-mode counterpart to `welcome_prompt` — no interactive UI.
+    def apply_env_breakpoints(self) -> None:
+        """Pre-enable any BREAK_* flags listed in `CG_SIM_BREAKPOINTS`.
 
-        Starts the MCP server on a daemon thread *before* the rest of
-        `Simulator.__init__` runs, so init-time breakpoints (e.g.
-        BREAK_AFTER_TRACE_INIT) have an agent on the other side. Then
-        blocks the main thread on `_start_event` so the agent has a
-        chance to configure breakpoints via `list_breakpoints` /
-        `toggle_breakpoint` before invoking `start_simulation`.
-
-        As a convenience for environment-driven setups,
-        `CG_SIM_BREAKPOINTS` (comma-separated flag names) is honored —
-        any listed `BREAK_*` flag is pre-set True before the server
-        starts.
+        Called per simulator construction by `main_agent.py` so each
+        run honors the env var with a freshly-built Debugger.
         """
-        self.mode = "agent"
         raw = os.environ.get("CG_SIM_BREAKPOINTS", "")
         for name in (s.strip() for s in raw.split(",") if s.strip()):
             if name.startswith("BREAK_") and isinstance(getattr(self, name, None), bool):
                 setattr(self, name, True)
-
-        # Imported lazily so non-agent runs don't pay the MCP import cost.
-        from .agent_runner import start_agent_server
-        start_agent_server(self)
-
-        # Block until the agent calls `start_simulation`.
-        self._start_event.wait()
         return
 
     def welcome_prompt(self) -> None:
@@ -177,7 +162,7 @@ class Debugger(SimObject):
         Asks user to register breakpoints for debugging.
 
         Prints an Org-style table of available breakpoints (the
-        `BREAK_AFTER_*` flags) with their current On/Off status, then runs
+        `BREAK_*` flags) with their current On/Off status, then runs
         a REPL loop: each integer input toggles the matching breakpoint to
         On and re-renders the table. Returns when every breakpoint is On
         or when the user enters 'c'.
@@ -341,6 +326,7 @@ class Debugger(SimObject):
         self._exec_namespace = ns
         self._continue_event.clear()
         self._at_breakpoint = True
+        self._state_changed_event.set()
         try:
             self._continue_event.wait()
         finally:
@@ -406,30 +392,58 @@ class Debugger(SimObject):
                 "error": traceback.format_exc(),
             }
 
+    def _wait_for_state_change(self) -> dict[str, Any]:
+        """Block until the worker reaches a breakpoint or finishes.
+
+        Returns the same fields as `agent_current_state` plus `ok` and
+        `timed_out`. On timeout, the caller can read `current_state` to
+        decide whether to keep waiting.
+        """
+        reached = self._state_changed_event.wait(timeout=self._wait_timeout)
+        return {"ok": True, "timed_out": not reached, **self.agent_current_state()}
+
     def agent_continue(self) -> dict[str, Any]:
-        """Release the parked worker thread so the simulator can resume."""
+        """Release the worker, then block until the next observable state.
+
+        Returns when the simulator reaches its next breakpoint or runs
+        to completion, with the resulting state in the response — so the
+        agent never has to poll.
+        """
         if not self._at_breakpoint:
             return {"ok": False, "error": "Not at a breakpoint."}
+        self._state_changed_event.clear()
         self._continue_event.set()
-        return {"ok": True}
+        return self._wait_for_state_change()
 
     def agent_start_simulation(self) -> dict[str, Any]:
-        """Release the worker thread from its initial pre-run park."""
+        """Release the simulator from pre-run park; block until first state.
+
+        Like `agent_continue`, this is a blocking RPC: it returns once
+        the simulator hits its first enabled breakpoint or finishes.
+        """
         if self._start_event.is_set():
             return {"ok": False, "error": "Simulation already started."}
+        self._state_changed_event.clear()
         self._start_event.set()
-        return {"ok": True}
+        return self._wait_for_state_change()
 
-    def break_after_trace_init(self) -> None:
-        self._enter_breakpoint("break_after_trace_init", [
+    def notify_simulation_finished(self) -> None:
+        """Mark the run as cleanly finished and wake any waiter.
+
+        Called by `Simulator.run()` after `engine.run()` returns. In
+        human mode this is a no-op; in agent mode the daemon stays
+        alive across runs, so no stdio-flush sleep is needed here.
+        """
+        if self.mode != "agent":
+            return
+        self._simulation_finished = True
+        self._state_changed_event.set()
+
+    def break_before_compile_stage(self) -> None:
+        self._enter_breakpoint("break_before_compile_stage", [
             _Symbol("trace", "Trace", "Execution trace"),
             _Symbol("trace.node_map", "dict[int, Node]", "Dictionary: node_id -> Node"),
             _Symbol("trace.tensor_map", "dict[int, Tensor]", "Dictionary: tensor_id -> Tensor"),
-        ])
-        return
-
-    def break_after_hw_init(self, hw) -> None:
-        self._enter_breakpoint("break_after_hw_init", [
             _Symbol("hw", "dict[str, BaseHardware]", "Dictionary: hw_name -> BaseHardware"),
         ])
         return
@@ -445,6 +459,9 @@ class Debugger(SimObject):
     def break_after_layout_stage(self, hw) -> None:
         self._enter_breakpoint("break_after_layout_stage", [
             _Symbol("hw", "dict[str, BaseHardware]", "Dictionary: hw_name -> BaseHardware"),
+            _Symbol("trace", "Trace", "Execution trace"),
+            _Symbol("trace.node_map", "dict[int, Node]", "Dictionary: node_id -> Node"),
+            _Symbol("trace.tensor_map", "dict[int, Tensor]", "Dictionary: tensor_id -> Tensor"),
         ], tip=_RUNTIME_BREAK_TIP)
         return
 

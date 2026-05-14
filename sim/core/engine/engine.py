@@ -85,6 +85,12 @@ class Engine(SimObject):
         return
 
     def run(self) -> None:
+        if self.debugger.BREAK_BEFORE_COMPILE_STAGE:
+            debug = self.debugger
+            trace = self.sys.trace
+            hw = self.sys.hw
+            self.debugger.break_before_compile_stage()
+
         print("[Engine] Compile stage start")
         self.log.record(Log.engine(self.id, "COMPILE_STAGE_START", self.timestamp_now))
         self._compile()

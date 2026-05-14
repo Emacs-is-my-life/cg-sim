@@ -80,8 +80,6 @@ class Simulator:
             self.debugger = debugger
             if "debug" in cfg:
                 debugger.welcome_prompt()
-            elif "debug_agent" in cfg:
-                debugger.welcome_prompt_agent()
 
             # Trace
             t_cfg = cfg["trace"]
@@ -91,10 +89,6 @@ class Simulator:
             sim_id.check_name(name)
             trace_loader = TraceLoaderClass(sim_id.get_id(), name, log, t_cfg["args"])
             trace = trace_loader.load()
-
-            if debugger.BREAK_AFTER_TRACE_INIT:
-                debug = debugger
-                debugger.break_after_trace_init()
 
             # Hardware Dictionary
             hw = {}
@@ -132,10 +126,6 @@ class Simulator:
                 sim_id.check_name(name)
                 compute_hw = ComputeClass(sim_id.get_id(), name, log, local_memory, c_cfg["args"])
                 hw[compute_hw.name] = compute_hw
-
-            if debugger.BREAK_AFTER_HW_INIT:
-                debug = debugger
-                debugger.break_after_hw_init(hw)
 
             # Validate custom_dep_tag values: must be unique across hw, and every
             # TensorAtHWDep on a trace node must reference a declared tag.
@@ -189,6 +179,7 @@ class Simulator:
         try:
             self.engine.run()
             print("Simulation is finished.")
+            self.debugger.notify_simulation_finished()
         except KeyboardInterrupt:
             print("\nSimulation interrupted by user.")
             raise SystemExit(130)
