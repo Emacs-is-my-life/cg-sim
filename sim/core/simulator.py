@@ -5,6 +5,7 @@ from pathlib import Path
 
 from sim.core.system import System
 from sim.core.log import Log
+from sim.core.debug import Debugger
 from sim.core.engine import Engine
 from sim.core.trace.custom_dep import TensorAtHWDep
 
@@ -73,6 +74,13 @@ class Simulator:
             self.log = log
             log.start()
 
+            # Debugger
+            debugger = Debugger(sim_id.get_id(), "Debug", log)
+
+            # Debugger prompt if debug mode is on
+            if "debug" in cfg:
+                pass
+
             # Trace
             t_cfg = cfg["trace"]
             t_cfg["args"]["input_path"] = config_file_path  # Supply input_path
@@ -81,6 +89,10 @@ class Simulator:
             sim_id.check_name(name)
             trace_loader = TraceLoaderClass(sim_id.get_id(), name, log, t_cfg["args"])
             trace = trace_loader.load()
+
+            if debugger.BREAK_AFTER_TRACE_INIT:
+                debug = debugger
+                debugger.break_after_trace_init()
 
             # Hardware Dictionary
             hw = {}
@@ -119,6 +131,10 @@ class Simulator:
                 compute_hw = ComputeClass(sim_id.get_id(), name, log, local_memory, c_cfg["args"])
                 hw[compute_hw.name] = compute_hw
 
+            if debugger.BREAK_AFTER_HW_INIT:
+                debug = debugger
+                debugger.break_after_hw_init(hw)
+
             # Validate custom_dep_tag values: must be unique across hw, and every
             # TensorAtHWDep on a trace node must reference a declared tag.
             tag_owners: dict[str, list[str]] = {}
@@ -155,7 +171,7 @@ class Simulator:
             # Engine
             name = "Engine"
             sim_id.check_name(name)
-            self.engine = Engine(sim_id.get_id(), name, log, sys, sched)
+            self.engine = Engine(sim_id.get_id(), name, log, sys, sched, debugger)
 
         except BaseException:
             if self.log is not None:

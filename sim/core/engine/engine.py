@@ -10,6 +10,7 @@ from sim.core.sim_object import SimObject
 from sim.core.log import Log, TrackID, Level
 from sim.core.trace import TerminalNode
 from sim.core.job import BaseJob, ComputeJob, TransferJob
+from sim.core.debug import Debugger
 from sim.hw.memory.common import BaseMemory
 from sim.hw.storage.common import BaseStorage
 from sim.sched.common import BaseScheduler
@@ -31,7 +32,7 @@ class Engine(SimObject):
     Engine is central point of simulation.
     """
 
-    def __init__(self, obj_id: int, name: str, log: Log, sys: System, sched: BaseScheduler):
+    def __init__(self, obj_id: int, name: str, log: Log, sys: System, sched: BaseScheduler, debugger: Debugger):
         super().__init__(obj_id, name, log)
 
         # Key Objects
@@ -39,6 +40,7 @@ class Engine(SimObject):
         self.sys = sys
         self.sys.engine = self
         self.sched = sched
+        self.debugger = debugger
 
         # Signals
         self.signal_abort: bool = False
@@ -75,6 +77,10 @@ class Engine(SimObject):
         print("[Engine] Compile stage start")
         self.log.record(Log.engine(self.id, "COMPILE_STAGE_START", self.timestamp_now))
         self._compile()
+        if self.debugger.BREAK_AFTER_COMPILE_STAGE:
+            debug = self.debugger
+            trace = self.sys.trace
+            self.debugger.break_after_compile_stage()
 
         # node_map and tensor_map dump
         arg_nodes, arg_tensors = self.log.get_trace_log(self.sys.trace)
@@ -84,10 +90,19 @@ class Engine(SimObject):
         print("[Engine] Layout stage start")
         self.log.record(Log.engine(self.id, "LAYOUT_STAGE_START", self.timestamp_now))
         self._layout()
+        if self.debugger.BREAK_AFTER_LAYOUT_STAGE:
+            debug = self.debugger
+            hw = self.sys.hw
+            self.debugger.break_after_layout_stage(self.sys.hw)
 
         print("[Engine] Runtime stage start")
         self.log.record(Log.engine(self.id, "RUNTIME_STAGE_START", self.timestamp_now))
         self._runtime()
+        if self.debugger.BREAK_AFTER_RUNTIME_STAGE:
+            debug = self.debugger
+            hw = self.sys.hw
+            trace = self.sys.trace
+            self.debugger.break_after_runtime_stage()
 
         self._cleanup()
         return
