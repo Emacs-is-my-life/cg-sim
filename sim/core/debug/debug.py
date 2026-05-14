@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import contextlib
 import io
 import json
@@ -182,7 +183,7 @@ class Debugger(SimObject):
         / per-track events end up. Useful for post-mortem inspection
         after `simulation_finished=True`.
         """
-        return self._log.result_path
+        return self._log.result_path.resolve()
 
     def _break_lambda(self, engine, system) -> None:
         """Evaluate `self.break_lambda(engine, system)`; if it returns
@@ -465,14 +466,22 @@ class Debugger(SimObject):
 
         stdout_buf = io.StringIO()
         try:
-            # `single` mode echoes the value of a bare expression like the
-            # interactive REPL does. Fall back to `exec` for multi-stmt input.
-            try:
-                compiled = compile(code, "<mcp>", "single")
-            except SyntaxError:
-                compiled = compile(code, "<mcp>", "exec")
+            # Mirror Python REPL semantics: if the final top-level statement
+            # is a bare expression, evaluate it and echo its repr (unless
+            # None). Everything before runs as `exec`. Both halves share one
+            # namespace dict so assignments in the head are visible to the
+            # trailing expression.
+            tree = ast.parse(code, "<mcp>", "exec")
             with contextlib.redirect_stdout(stdout_buf):
-                exec(compiled, self._exec_namespace)
+                if tree.body and isinstance(tree.body[-1], ast.Expr):
+                    head = ast.Module(body=tree.body[:-1], type_ignores=[])
+                    tail = ast.Expression(body=tree.body[-1].value)
+                    exec(compile(head, "<mcp>", "exec"), self._exec_namespace)
+                    value = eval(compile(tail, "<mcp>", "eval"), self._exec_namespace)
+                    if value is not None:
+                        print(repr(value))
+                else:
+                    exec(compile(tree, "<mcp>", "exec"), self._exec_namespace)
             return {"ok": True, "output": stdout_buf.getvalue(), "error": None}
         except BaseException:
             return {
