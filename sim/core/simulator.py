@@ -76,10 +76,8 @@ class Simulator:
 
             # Debugger
             debugger = Debugger(sim_id.get_id(), "Debug", log)
-
-            # Debugger prompt if debug mode is on
             if "debug" in cfg:
-                pass
+                debugger.welcome_prompt()
 
             # Trace
             t_cfg = cfg["trace"]
@@ -172,6 +170,8 @@ class Simulator:
             name = "Engine"
             sim_id.check_name(name)
             self.engine = Engine(sim_id.get_id(), name, log, sys, sched, debugger)
+            debugger.engine = self.engine
+
 
         except BaseException:
             if self.log is not None:

@@ -25,6 +25,11 @@ uv pip install docs/requirements.txt
 python main.py -i <path-to-input.yaml>
 ```
 
+### Debugging
+Append `+debug=on` flag at the end, when running main.py  
+You can set breakpoints at various points of simulator lifecycle  
+IPython REPL session will launch for interactive inspection & manipulation  
+
 # Codebase Overview
 ## Simulator core
 - `cg-sim/core/`: Base directory for simulator core
@@ -33,6 +38,7 @@ python main.py -i <path-to-input.yaml>
   - `cg-sim/core/init/`: Initialization logic to import trace, intialize logger, hardwares and scheduler for simulation run 
   - `cg-sim/core/job/`: Represents jobs. Scheduler requests job, hardware models calculate how much would it take, then engine simulates time advance
   - `cg-sim/core/engine/`: Core engine that interacts with hardware & scheduler, asserts actions they do, and processes discrete events
+  - `cg-sim/core/debug/`: Debugging infrastructure
   
 ## Trace Importer
 - `cg-sim/load/`: Base directory for trace importers
