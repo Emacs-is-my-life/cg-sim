@@ -21,7 +21,7 @@ This simulator has following characteristics:
 ```bash
 $ git clone https://github.com/Emacs-is-my-life/cg-sim.git
 $ cd cg-sim
-$ uv pip install docs/requirements.txt
+$ pip install -r docs/requirements.txt
 
 # graphviz should be installed separately
 # Use your system package manager: apt / yum / pacman / guix / ...
