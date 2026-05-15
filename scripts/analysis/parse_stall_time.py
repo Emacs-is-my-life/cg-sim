@@ -121,16 +121,8 @@ def difference_length(
     return total - overlap
 
 
-def main(argv: list[str]) -> int:
-    if len(argv) - 1 < 3:
-        print("Usage: python parse_stall_time.py <event_log.json> <compute_hw_name> <memory_hw_name>")
-        return 2
-
-    path = Path(argv[1])
-    compute_hw = argv[2]
-    memory_hw = argv[3]
-
-    events = load_events(path)
+def main(log_path: Path, compute_hw: str, memory_hw: str) -> None:
+    events = load_events(log_path)
     t_start = find_runtime_start(events)
 
     compute_iv = merge_intervals(collect_compute_intervals(events, compute_hw, t_start))
@@ -140,15 +132,17 @@ def main(argv: list[str]) -> int:
     compute_total = sum(end - start for start, end in compute_iv)
     stall = difference_length(transfer_iv, compute_iv)
 
-    print(f"event log          : {path}")
+    print(f"event log          : {log_path}")
     print(f"compute hardware   : {compute_hw}")
     print(f"memory hardware    : {memory_hw}")
     print(f"runtime start (us) : {t_start:.3f}")
     print(f"compute intervals  : {len(compute_iv)}  (total {compute_total:.3f} us)")
     print(f"transfer intervals : {len(transfer_iv)}  (total {transfer_total:.3f} us)")
     print(f"stall time (us)    : {stall:.3f}")
-    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    if len(sys.argv) != 4:
+        print("Usage: python parse_stall_time.py <event_log.json> <compute_hw_name> <memory_hw_name>")
+        sys.exit(2)
+    main(Path(sys.argv[1]), sys.argv[2], sys.argv[3])

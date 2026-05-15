@@ -617,6 +617,60 @@ runs of `main.py`) — one for each failure mode:
   `exception_stack[-1].tb_frame.f_locals` for what the failing code
   was doing.
 
+## Analyzing simulation results
+
+Every `main.py` / `main_agent.py` run writes a Chrome-trace JSON event
+log to `logger.args.result_path` (also reachable as `debug.log_path`
+at any breakpoint). Post-run analysis scripts live in
+`scripts/analysis/` and consume that log. Plotting recipes that pair
+with their output live in `scripts/visualization/`.
+
+### Why agents should use these scripts
+`engine.job_stats` at `break_after_runtime_stage` gives raw totals
+(compute time, transfer time, byte counts) but cannot distinguish a
+prefetcher that overlaps transfer with compute (good) from one that
+doesn't (bad) — both report the same `transfer_total_time`. The
+analysis scripts derive the quantities that actually answer those
+questions, so reach for them whenever raw totals are not enough.
+
+During parameter sweeps, set `logger.args.result_path` to a distinct
+path per run (via the `overrides` arg of `restart_simulation`) so
+each run's log is preserved for post-mortem.
+
+### Convention for `scripts/analysis/*.py`
+Every script in this directory follows the same shape so it can be
+invoked uniformly — by humans on the CLI, by agents via `Bash`, or by
+other Python code via `import`:
+
+- **Signature:** `def main(log_path: Path, *script_specific_args) -> None`
+  — first positional argument is the Chrome-trace JSON path; any
+  script-specific knobs (hardware names, thresholds, …) follow as
+  additional positional arguments with parsed Python types (`str`,
+  `int`, …). The function prints human-readable results to stdout and
+  returns `None`.
+- **CLI:** `python scripts/analysis/<script>.py <log_path> [extra args...]`
+  — the `if __name__ == "__main__":` block parses `sys.argv` into the
+  `main()` signature, prints a usage line and `sys.exit(2)`s on misuse.
+- **Importable:** because `main()` takes parsed Python values rather
+  than `argv`, agent code can `from parse_stall_time import main` and
+  call `main(Path(result_path), "cpu", "ram")` directly after a run
+  finishes, with no subprocess hop.
+
+When adding a new analysis script, copy `parse_stall_time.py` as a
+template and keep the same structure.
+
+### Current scripts
+- `parse_stall_time.py <log.json> <compute_hw_name> <memory_hw_name>`
+  — exposed-transfer stall via interval-set arithmetic:
+  `|union(TRANSFER_JOB intervals into memory_hw) \ union(COMPUTE_JOB
+  intervals on compute_hw)|`, restricted to runtime-stage events.
+  This is the prefetcher-quality metric — wall-time speedup of a
+  memory-saving scheduler comes from shrinking *this*, not from
+  shrinking raw `transfer_total_time`. Example:
+  ```
+  python scripts/analysis/parse_stall_time.py tmp/flexinfer_result.json cpu ram
+  ```
+
 # Codebase Overview
 ## Simulator core
 - `cg-sim/core/`: Base directory for simulator core
