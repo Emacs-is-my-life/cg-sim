@@ -87,6 +87,11 @@ class Engine(SimObject):
         return
 
     def run(self) -> None:
+        # Abort handling
+        if self.signal_abort:
+            self._cleanup()
+            return
+
         if self.debugger.BREAK_BEFORE_COMPILE_STAGE:
             debug = self.debugger
             engine = self
@@ -97,6 +102,11 @@ class Engine(SimObject):
         print("[Engine] Compile stage start")
         self.log.record(Log.engine(self.id, "COMPILE_STAGE_START", self.timestamp_now))
         self._compile()
+        # Abort handling
+        if self.signal_abort:
+            self._cleanup()
+            return
+
         if self.debugger.BREAK_AFTER_COMPILE_STAGE:
             debug = self.debugger
             engine = self
@@ -111,6 +121,11 @@ class Engine(SimObject):
         print("[Engine] Layout stage start")
         self.log.record(Log.engine(self.id, "LAYOUT_STAGE_START", self.timestamp_now))
         self._layout()
+        # Abort handling
+        if self.signal_abort:
+            self._cleanup()
+            return
+
         if self.debugger.BREAK_AFTER_LAYOUT_STAGE:
             debug = self.debugger
             engine = self
@@ -170,11 +185,15 @@ class Engine(SimObject):
         # Multi-step layout
         finished = False
         while not finished:
+            # Abort handling
+            if self.signal_abort:
+                break
+
             # Scheduler Placement
             finished = self.sched.layout(init_storage)
 
             # Run all jobs
-            while self.job_waiting:
+            while self.job_waiting and not self.signal_abort:
                 job_w = self.job_waiting[0]
                 if job_w.is_runnable(self.sys):
                     self.job_waiting.popleft()
@@ -193,8 +212,16 @@ class Engine(SimObject):
                     self.signal_abort = True
                     break
 
+            # Abort handling
+            if self.signal_abort:
+                break
+
             # Retire all jobs
             self._layout_forward()
+
+            # Abort handling
+            if self.signal_abort:
+                break
 
         # Turn logging back on
         self.log.on = True
@@ -282,6 +309,8 @@ class Engine(SimObject):
 
             # Scheduler Decisions
             self.sched.runtime(retired_jobs)
+            if self.signal_abort:
+                break
 
             # Drain all runnable jobs from job_waiting to job_running, in FIFO manner
             while self.job_waiting:

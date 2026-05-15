@@ -153,18 +153,19 @@ class Simulator:
             # System
             sys = System(trace, hw)
 
+            # Engine
+            name = "Engine"
+            sim_id.check_name(name)
+            self.engine = Engine(sim_id.get_id(), name, log, sys, None, debugger)
+            debugger.engine = self.engine
+
             # Scheduler
             sched_cfg = cfg["scheduler"]
             SchedulerClass = LOAD_SCHEDULER_CLASS(sched_cfg["type"])
             name = "Scheduler"
             sim_id.check_name(name)
             sched = SchedulerClass(sim_id.get_id(), name, log, sys, sched_cfg["args"])
-
-            # Engine
-            name = "Engine"
-            sim_id.check_name(name)
-            self.engine = Engine(sim_id.get_id(), name, log, sys, sched, debugger)
-            debugger.engine = self.engine
+            self.engine.sched = sched
 
 
         except BaseException:
