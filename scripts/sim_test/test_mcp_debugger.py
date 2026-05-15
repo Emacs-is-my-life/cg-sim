@@ -20,7 +20,7 @@ exercises every advertised debugging feature in sequence:
  13. `restart_simulation` rebuilds the simulator.
  14. `shutdown` ends the process.
 
-Run from repo root:  python scripts/test_mcp_debugger.py
+Run from repo root:  python scripts/sim_test/test_mcp_debugger.py
 """
 
 from __future__ import annotations

@@ -1,5 +1,4 @@
-# Introduction
-## What is cg-sim?
+# cg-sim
 **cg-sim**(Compute Graph Simulator) is a testbed for testing various data(weight, intermediate, KV cache, ...) placement strategies for ML workload.  
 This simulator has following characteristics:  
 
@@ -16,46 +15,50 @@ This simulator has following characteristics:
   - `cg-sim/hw/`: Write your own hardware(compute, memory, storage) model
   - `cg-sim/sched/`: Write your own scheduler policy
 
-## How to use
-### Installation
+# How to use
+
+## Installation
 ```bash
-git clone https://github.com/Emacs-is-my-life/cg-sim.git
-cd cg-sim
-uv pip install docs/requirements.txt
+$ git clone https://github.com/Emacs-is-my-life/cg-sim.git
+$ cd cg-sim
+$ uv pip install docs/requirements.txt
 
 # graphviz should be installed separately
 # Use your system package manager: apt / yum / pacman / guix / ...
+
+# Install cg-sim-mcp for agentic-run
+$ claude mcp add cg-sim-mcp -- python main_agent.py
 ```
 
-### Run a Simulation
+## Run cg-sim (For Human)
 ```bash
 # python main.py -i <path-to-input.yaml>
-python main.py -i examples/llama3-flexinfer/input.yaml           # Normal run
-python main.py -i examples/llama3-flexinfer/input.yaml +debug=on # Debugging mode
+$ python main.py -i examples/llama3-flexinfer/input.yaml           # Normal run
+$ python main.py -i examples/llama3-flexinfer/input.yaml +debug=on # Debugging mode
 ```
 
-#### Overriding input.yaml config from the command line
+### Overriding input.yaml config from the command line
 `main.py` parses extra positional args with [Hydra](https://hydra.cc/)'s override
 syntax, so any leaf in the input YAML can be overridden without editing the file.
 Dotted paths address nested keys; integer indices address list elements.
 
 ```bash
 # Override a scalar
-python main.py -i examples/llama3-flexinfer/input.yaml \
-    scheduler.args.prefetch_window=8
+$ python main.py -i examples/llama3-flexinfer/input.yaml \
+      scheduler.args.prefetch_window=8
 
 # Override a list element by index (hardware.memory is a list)
-python main.py -i examples/llama3-flexinfer/input.yaml \
-    hardware.memory.0.args.memory_size_KB=10485760
+$ python main.py -i examples/llama3-flexinfer/input.yaml \
+      hardware.memory.0.args.memory_size_KB=10485760
 ```
 
-Useful for parameter sweeps from a shell loop — `scripts/flexinfer.sh` does
-exactly this, sweeping `hardware.memory.0.args.memory_size_KB` and redirecting
-each run's output via `logger.args.result_path`:
+Useful for parameter sweeps from a shell loop — `scripts/sim_run/flexinfer.sh`
+does exactly this, sweeping `hardware.memory.0.args.memory_size_KB` and
+redirecting each run's output via `logger.args.result_path`:
 ```bash
-python main.py -i "$INPUT_CFG" \
-    logger.args.result_path="${result}" \
-    hardware.memory.0.args.memory_size_KB="${kb}"
+$ python main.py -i "$INPUT_CFG" \
+      logger.args.result_path="${result}" \
+      hardware.memory.0.args.memory_size_KB="${kb}"
 ```
 
 The `+debug=on` form above is the same mechanism (the leading `+` adds a key
@@ -64,7 +67,6 @@ that doesn't exist in the YAML); see Hydra's
 the full syntax (append `+`, force-override `++`, delete `~`, etc.).
 
 ### Debugging
-#### For Human
 Append `+debug=on` flag at the end, when running `main.py`  
 You can set breakpoints at various points of simulator lifecycle  
 IPython REPL session will launch for interactive inspection & manipulation  
@@ -87,29 +89,34 @@ At every breakpoint, the banner table lists the available commands:
 
 `BREAK_ON_ABORT` and `BREAK_ON_EXCEPTION` are Off by default in human
 mode. If you enable either, see the *Abort breakpoint* and *Exception
-breakpoint* sections under *For Agent* below — the variable names
-(`abort_stack`, `exception_stack`) and frame-inspection idioms
-(`abort_stack[i].frame.f_locals`, `exception_stack[i].tb_frame.f_locals`)
+breakpoint* sections under *Run cg-sim-mcp (For Agent)* below — the
+variable names (`abort_stack`, `exception_stack`) and frame-inspection
+idioms (`abort_stack[i].frame.f_locals`, `exception_stack[i].tb_frame.f_locals`)
 apply identically inside the IPython REPL.
 
-#### For Agent (LLM)
+## Run cg-sim-mcp (For Agent)
 Run `main_agent.py` instead of `main.py`. It boots an MCP (Model Context
 Protocol) server on its stdio and drives a loop so an agent can run the
 simulator repeatedly — inspect state, resume execution, then `restart_simulation`
 for a fresh run (optionally with a new input YAML), all via tool calls and
 without restarting the process.
 
-##### One-time setup (Human must do!)
+### One-time setup (Human must do!)
 Register cg-sim as an MCP server with your agent. For Claude Code:
 ```bash
-# claude mcp add cg-sim-debugger -- \
-#     python main_agent.py -i <path-to-input.yaml>
+# Recommended — no default config; the agent picks an input.yaml per run.
+$ claude mcp add cg-sim-mcp -- python main_agent.py
 
-$ claude mcp add cg-sim-debugger -- \
+# Alternative — pin a default config; the agent can still switch later.
+$ claude mcp add cg-sim-mcp -- \
       python main_agent.py -i examples/llama3-flexinfer/input.yaml
 ```
-The `-i` path supplies the default input; the agent can switch to a different
-YAML on any subsequent run via `restart_simulation(input_path=...)`.
+`-i` is optional. The recommended form omits it, so the same MCP registration
+serves every simulator config the agent might want — the first
+`restart_simulation(input_path=..., overrides=...)` call builds the Simulator.
+With `-i`, the named YAML is the default for the first run and the agent can
+still switch on any subsequent run via `restart_simulation(input_path=...)`.
+
 Substitute absolute paths for both `python` and the input file if your agent
 launches the server from a different working directory. Start a new agent
 session after registering — tool lists are snapshotted at session start.
@@ -119,7 +126,7 @@ session after registering — tool lists are snapshotted at session start.
 > `sim/core/debug/agent_server.py`, `_SERVER_INSTRUCTIONS`). Keep this
 > section and that string in sync.
 
-##### Tool surface
+### Tool surface
 The server exposes eight tools:
 - `list_breakpoints` — return all `BREAK_*` flags and their On/Off status.
 - `toggle_breakpoint(name)` — flip a flag.
@@ -138,9 +145,13 @@ The server exposes eight tools:
   the next breakpoint fires or the run finishes, with the resulting state
   in the response.
 - `restart_simulation(input_path=None, overrides=None, reload=True)` — tear
-  down the just-finished simulator and build a fresh one. Only callable after
-  `simulation_finished=true` (or before the first run). Pass `input_path` to
-  switch the YAML config. Pass `overrides` (a list of Hydra-style strings
+  down the just-finished simulator and build a fresh one. Also the *first*
+  call when the server was launched without `-i` (no default config) —
+  pass `input_path=...` to build the initial Simulator. Otherwise only
+  callable after `simulation_finished=true` (or before the first run when
+  a default `-i` was supplied). Pass `input_path` to switch the YAML
+  config (required on first construction when no `-i` was given;
+  sticky otherwise). Pass `overrides` (a list of Hydra-style strings
   like `["scheduler.args.prefetch_window=8"]`) to apply CLI-equivalent
   config overrides — see *Config overrides at restart* below for the
   full semantics. With `reload=True` (default), drops user-editable
@@ -150,7 +161,10 @@ The server exposes eight tools:
 - `shutdown` — end the agent session and exit the process. If the simulator is
   parked at a breakpoint, releases it first so the current run drains cleanly.
 
-##### Typical session
+### Typical session
+0. (Only if the server was registered without `-i`) `restart_simulation(
+   input_path="examples/.../input.yaml", overrides=[...])` to build the
+   first Simulator. With `-i`, this is unnecessary on the first run.
 1. `list_breakpoints` → see available flags.
 2. `toggle_breakpoint("BREAK_BEFORE_COMPILE_STAGE")` → enable the ones you want.
 3. `start_simulation` → blocks; response carries the new state.
@@ -160,7 +174,7 @@ The server exposes eight tools:
 7. `restart_simulation()` (optionally with a new `input_path`) to go again
    from step 1, or `shutdown` to exit the process.
 
-##### Stage breakpoints
+### Stage breakpoints
 The five coarse `BREAK_*` flags fire once per simulator stage:
 - `BREAK_BEFORE_COMPILE_STAGE` — before the scheduler's compile pass.
 - `BREAK_AFTER_COMPILE_STAGE` — after compile, before layout.
@@ -169,7 +183,7 @@ The five coarse `BREAK_*` flags fire once per simulator stage:
   breakpoints below.
 - `BREAK_AFTER_RUNTIME_STAGE` — after the runtime loop exits.
 
-##### Per-Node / per-Job breakpoints
+### Per-Node / per-Job breakpoints
 To break on a *specific* compute graph node or job during the runtime stage,
 set a `BREAK_AT_JOB_*` flag on the Node or Job object itself via `execute`.
 Typical flow: enable `BREAK_AFTER_COMPILE_STAGE`, inspect `trace.node_map` to
@@ -198,7 +212,7 @@ Flags persist across `continue_simulation` calls, so disarm them
 (`target.BREAK_AT_JOB_RETIRED = False`) once you're done if you want the run
 to finish without stopping again.
 
-##### Abort breakpoint (BREAK_ON_ABORT, default On for MCP)
+### Abort breakpoint (BREAK_ON_ABORT, default On for MCP)
 Generic soft-failure safety net. **Every** abort path in the simulator
 funnels through `Engine._log_abort(args)`:
 
@@ -246,7 +260,7 @@ Continuing from the breakpoint lets the normal abort flow proceed
 fail-fast batch runs that should not pause on aborts,
 `toggle_breakpoint("BREAK_ON_ABORT")` to disable.
 
-##### Exception breakpoint (BREAK_ON_EXCEPTION, default On for MCP)
+### Exception breakpoint (BREAK_ON_EXCEPTION, default On for MCP)
 Hard-failure counterpart of `BREAK_ON_ABORT`. When an uncaught
 exception propagates out of `engine.run()` — bug in your scheduler,
 HW model, trace loader, or any user code — `Simulator.run`'s
@@ -296,7 +310,7 @@ To let exceptions propagate up to `main_agent.py` instead of pausing,
 `toggle_breakpoint("BREAK_ON_EXCEPTION")` to disable. Logging and
 graceful-end behavior remain — only the breakpoint stop is gated.
 
-##### Breakpoint namespace
+### Breakpoint namespace
 The exact set is in `current_state.variables` for the current breakpoint.
 Every breakpoint always binds at least:
 - `debug` — the Debugger (see *Debugger methods* below).
@@ -310,7 +324,7 @@ The namespace **persists across `execute` calls within one breakpoint** —
 locals you assign survive until the next `continue_simulation`, then are
 cleared.
 
-##### Debugger methods / accessors
+### Debugger methods / accessors
 Reachable from inside `execute` (since `debug` is in scope):
 - `debug.record(dict_args)` — write a JSON-serializable dict into the
   simulation log file under track Engine → Debug. Use this to leave
@@ -348,7 +362,7 @@ Reachable from inside `execute` (since `debug` is in scope):
   execute("import json; [json.loads(l) for l in open(debug.log_path)][-3:]")
   ```
 
-##### Config overrides at restart
+### Config overrides at restart
 `restart_simulation(overrides=[...])` accepts a list of Hydra-style override
 strings — the same syntax as the CLI overrides documented under
 *Overriding input.yaml config from the command line* above. This lets the
@@ -386,7 +400,7 @@ agent can verify. Invalid override strings raise during construction
 session lands in `CONSTRUCT_FAILED`; recover by calling
 `restart_simulation` again with corrected `overrides`.
 
-##### Hot-reloading user code
+### Hot-reloading user code
 `restart_simulation(reload=True)` (the default) drops user-editable modules
 from `sys.modules` before rebuilding the Simulator, so the agent can edit
 source files on disk and pick up the changes on the next run without
@@ -422,7 +436,7 @@ restart_simulation(reload=True)
 # 3. The next start_simulation runs against the freshly-imported FlexInfer.
 ```
 
-##### Environment knobs
+### Environment knobs
 - `CG_SIM_BREAKPOINTS` — comma-separated `BREAK_*` flag names to pre-enable
   before the server starts (alternative to calling `toggle_breakpoint`).
   Re-applied to each fresh Debugger built by `restart_simulation`, so it
@@ -432,13 +446,15 @@ restart_simulation(reload=True)
   `welcome_prompt` (whose `input()` would otherwise race the MCP server
   for stdin). Do not set this manually.
 
-### Writing a new Scheduler
+# Workflows
+
+## Writing a new Scheduler
 
 A worked example that ties the debugging surface to a real authoring
 workflow. The same pattern applies to writing new hardware models or
 trace loaders; the file layout below changes accordingly.
 
-#### 0. Scaffold
+### 0. Scaffold
 Copy the simplest existing scheduler as a starting point and rename:
 ```bash
 cp -r sim/sched/vanilla sim/sched/myscheduler
@@ -452,9 +468,10 @@ scheduler:
   type: "MyScheduler"
   args: { ... }
 ```
-Register `cg-sim` as an MCP server (see *For Agent* above) and connect.
+Register `cg-sim` as an MCP server (see *Run cg-sim-mcp (For Agent)* above)
+and connect.
 
-#### 1. First run — surface construction errors
+### 1. First run — surface construction errors
 ```
 toggle_breakpoint("BREAK_BEFORE_COMPILE_STAGE")
 start_simulation
@@ -462,7 +479,7 @@ start_simulation
 If `Simulator.__init__` blows up (bad import, wrong base class, missing
 required `args` key, …), the failure surfaces here. Fix in source.
 
-#### 2. Inspect what your scheduler is handed
+### 2. Inspect what your scheduler is handed
 At `break_before_compile_stage`, the namespace exposes `trace`, `hw`,
 and `engine`:
 ```python
@@ -472,7 +489,7 @@ execute("list(hw.keys())")
 ```
 Confirm your scheduler's `compile(trace)` is seeing what you expect.
 
-#### 3. Iterate without restarting the agent
+### 3. Iterate without restarting the agent
 After editing `sim/sched/myscheduler/myscheduler.py` on disk:
 ```
 restart_simulation()   # reload=True is the default
@@ -481,7 +498,7 @@ start_simulation       # runs the freshly-imported class
 No need to disconnect or re-add the MCP server. See *Hot-reloading
 user code* above for the spared `*.common.*` invariant.
 
-#### 4. Trace a single node through runtime
+### 4. Trace a single node through runtime
 When one specific node misbehaves (wrong device, never dispatched,
 retires too early/late), enable the runtime master switch and arm a
 per-Node flag at the compile-boundary breakpoint:
@@ -497,7 +514,7 @@ continue_simulation
 The next stop is `break_in_runtime_stage[JOB_DISPATCHED]` with `job`
 bound to that node's job.
 
-#### 5. Custom stop conditions
+### 5. Custom stop conditions
 For "wake me up when X holds" — pressure thresholds, queue overflow,
 suspicious mismatches — set `debug.break_lambda`:
 ```python
@@ -510,7 +527,7 @@ continue_simulation
 ```
 Strict-`True` only; auto-clears if it raises.
 
-#### 6. Leave breadcrumbs as you investigate
+### 6. Leave breadcrumbs as you investigate
 Two persistence levels:
 ```python
 # In-memory, per-run (cleared on restart):
@@ -520,7 +537,7 @@ execute("debug.args['hypothesis'] = 'tensor X always evicted on tick Y'")
 execute("debug.record({'decision': 'preferred device 0', 'tensor_id': tid})")
 ```
 
-#### 7. Reviewing your breadcrumbs
+### 7. Reviewing your breadcrumbs
 
 Two natural review paths:
 
@@ -553,7 +570,7 @@ execute("print(debug.log_path)")
 If you need cross-run persistence, copy the file aside between runs
 or change `result_path` in the YAML between runs.
 
-#### 8. A/B against a known-good scheduler
+### 8. A/B against a known-good scheduler
 The two reference implementations are `Vanilla` (no offload) and
 `FlexInfer` (memory-saving). Switch input YAMLs mid-session:
 ```
@@ -562,7 +579,7 @@ restart_simulation(input_path="examples/llama3-vanilla/input.yaml")
 Then re-run with the same breakpoints to compare. `debug.record(...)`
 breadcrumbs end up in each run's own log file.
 
-#### Common scheduler pitfalls
+### Common scheduler pitfalls
 Two safety nets are On by default *for MCP sessions* (Off for human-mode
 runs of `main.py`) — one for each failure mode:
 - `BREAK_ON_ABORT` catches every abort path through `Engine._log_abort`
@@ -635,5 +652,12 @@ Implement your own scheduler logic in `cg-sim/sched/<scheduler-name>/`.
 ## Others
 - `docs/`: More detailed documentation
 - `examples/`: Example input
-- `scripts/`: Scripts for running simulations, plotting graphs, etc
+- `scripts/`: Helper scripts, organized by purpose:
+  - `scripts/sim_run/`: Bash drivers that launch `main.py` under various
+    configs (e.g. `flexinfer.sh` sweeps memory sizes).
+  - `scripts/sim_test/`: MCP / debugger tests that drive `main_agent.py`
+    end-to-end (`test_mcp_*.py`).
+  - `scripts/analysis/`: Post-run log analysis (e.g. `parse_stall_time.py`).
+  - `scripts/visualization/`: Plotting recipes for the analysis output
+    (e.g. `plot_results.gp`).
 - `main.py`: Simulator entry point

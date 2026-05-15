@@ -13,7 +13,7 @@ Verifies:
   7. A predicate that raises auto-clears `debug.break_lambda` and the
      run continues without further interruption.
 
-Run from repo root:  python scripts/test_mcp_breaklambda.py
+Run from repo root:  python scripts/sim_test/test_mcp_breaklambda.py
 """
 
 from __future__ import annotations

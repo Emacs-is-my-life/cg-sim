@@ -18,7 +18,7 @@ Verifies:
  10. With BREAK_ON_EXCEPTION toggled off, same scenario fails-fast (no
      breakpoint, run ends with simulation_finished=True).
 
-Run from repo root:  python scripts/test_mcp_breakonexception.py
+Run from repo root:  python scripts/sim_test/test_mcp_breakonexception.py
 """
 
 from __future__ import annotations

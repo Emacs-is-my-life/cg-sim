@@ -13,7 +13,7 @@ Coverage matrix:
   9. Response echoes `overrides` field for verification.
  10. Combined with `reload=False` — overrides still apply.
 
-Run from repo root:  python scripts/test_mcp_overrides.py
+Run from repo root:  python scripts/sim_test/test_mcp_overrides.py
 """
 
 from __future__ import annotations

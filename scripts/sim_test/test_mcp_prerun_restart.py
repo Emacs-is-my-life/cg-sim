@@ -17,7 +17,7 @@ vanilla YAML. After fix:
 
 Before fix: the active simulator is still the initial FlexInfer one.
 
-Run from repo root:  python scripts/test_mcp_prerun_restart.py
+Run from repo root:  python scripts/sim_test/test_mcp_prerun_restart.py
 """
 
 from __future__ import annotations

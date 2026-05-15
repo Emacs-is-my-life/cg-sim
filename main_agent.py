@@ -31,7 +31,12 @@ from sim.core.debug.agent_runner import Phase
 
 def _parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser()
-    parser.add_argument("-i", "--input", required=True)
+    # `-i` is optional. When omitted, the server boots into
+    # WAITING_FOR_CONFIG and the agent must supply a config via
+    # `restart_simulation(input_path=..., overrides=...)` before any
+    # other tool will do real work. When provided, behavior is
+    # unchanged: the loop constructs the default Simulator immediately.
+    parser.add_argument("-i", "--input", default=None)
     args, remaining_args = parser.parse_known_args()
     sys.argv = [sys.argv[0]] + remaining_args
     return args, remaining_args
@@ -75,8 +80,6 @@ def _teardown(sim: Simulator | None) -> None:
 
 def main() -> int:
     args, remaining_args = _parse_args()
-    if args.input is None:
-        raise Exception("No simulation input file is supplied.")
 
     session = AgentSession(args.input, remaining_args)
 
@@ -86,6 +89,16 @@ def main() -> int:
     start_agent_server(session)
 
     while True:
+        # --- WAITING_FOR_CONFIG phase (no -i was supplied) ------------
+        # Initial state when the server was launched without `-i`. The
+        # agent must call `restart_simulation(input_path=...)` to
+        # supply a config and advance us to CONSTRUCTING.
+        if session.phase == Phase.WAITING_FOR_CONFIG:
+            session.wait_until(
+                lambda: session.phase != Phase.WAITING_FOR_CONFIG)
+            if session.phase == Phase.SHUTDOWN:
+                return 0
+
         # --- CONSTRUCTING phase ---------------------------------------
         # session.phase is already CONSTRUCTING here (initial state, or
         # set by a tool that requested restart).

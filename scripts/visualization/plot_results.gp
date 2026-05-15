@@ -1,5 +1,5 @@
 # Plot simulation time vs memory size from the sweep results.
-# Usage: gnuplot scripts/plot_results.gp
+# Usage: gnuplot scripts/visualization/plot_results.gp
 #
 # Column layout of tmp/results/result_total.dat:
 #   1: memory_MB   2: success (1/0)   3: simulation_time_us   4: peak_memory_KB

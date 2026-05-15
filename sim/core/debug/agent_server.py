@@ -23,6 +23,21 @@ if TYPE_CHECKING:
 _SERVER_INSTRUCTIONS = (
     "Interactive debugger for the cg-sim compute graph simulator.\n"
     "\n"
+    "== Boot mode ==\n"
+    "  The server may be started with or without a default config:\n"
+    "    - `python main_agent.py` (no `-i`) → no Simulator is built up\n"
+    "      front. Any tool other than `restart_simulation`/`shutdown`\n"
+    "      returns `{ok: false, error: 'No simulator config has been\n"
+    "      supplied…'}`. Call\n"
+    "      `restart_simulation(input_path='examples/.../input.yaml',\n"
+    "      overrides=[...])` to build the first Simulator. This is the\n"
+    "      recommended MCP registration — one server, many simulator\n"
+    "      configs, picked by the agent at runtime.\n"
+    "    - `python main_agent.py -i path/to/input.yaml` → the default\n"
+    "      Simulator is built immediately and the workflow below starts\n"
+    "      at step 1. The agent may still switch configs later via\n"
+    "      `restart_simulation(input_path=...)`.\n"
+    "\n"
     "== Workflow ==\n"
     "  1. `list_breakpoints` — see available BREAK_* flags and their\n"
     "     current On/Off status.\n"
@@ -221,6 +236,15 @@ _NO_BOUND_DEBUGGER = {
     "error": "No simulator is currently bound. Call `restart_simulation` first.",
 }
 
+_NO_CONFIG_SUPPLIED = {
+    "ok": False,
+    "error": (
+        "No simulator config has been supplied. The server was started "
+        "without `-i`; call `restart_simulation(input_path=..., "
+        "overrides=...)` to build the first Simulator."
+    ),
+}
+
 # Time we'll wait for the very-first Simulator to finish constructing
 # before giving up. Construction touches I/O (config + trace loading),
 # so the FastMCP server can start serving before the main loop's first
@@ -242,9 +266,15 @@ def _bound_or_error(session: "AgentSession") -> dict[str, Any] | None:
     (`CONSTRUCT_FAILED`) or the session shuts down before then, return
     the error dict — agents can interpret "no simulator bound" as
     "call restart_simulation with a valid input_path".
+
+    `WAITING_FOR_CONFIG` short-circuits: nothing is constructing and
+    nothing will until the agent calls `restart_simulation` with a
+    config, so we don't waste `_BIND_WAIT_SECS` polling.
     """
     if session.debugger is not None:
         return None
+    if session.phase == Phase.WAITING_FOR_CONFIG:
+        return dict(_NO_CONFIG_SUPPLIED)
     session.wait_until(
         lambda: session.phase in _BOUND_PHASES
                 or session.phase in (Phase.CONSTRUCT_FAILED, Phase.SHUTDOWN),
@@ -296,7 +326,7 @@ def _hot_reload_user_modules() -> list[str]:
 
 def build_mcp_server(session: "AgentSession") -> FastMCP:
     """Construct a FastMCP server backed by `session`."""
-    server = FastMCP(name="cg-sim-debugger", instructions=_SERVER_INSTRUCTIONS)
+    server = FastMCP(name="cg-sim-mcp", instructions=_SERVER_INSTRUCTIONS)
 
     @server.tool(
         description=(
@@ -404,10 +434,15 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
     @server.tool(
         description=(
             "Tear down the just-finished simulator and build a fresh one. "
-            "Only callable after `simulation_finished=True` (or before "
-            "the first run).\n\n"
+            "Also the *first* call when the server was started without "
+            "`-i` (no default Simulator) — pass `input_path=...` to build "
+            "the initial Simulator. Otherwise only callable after "
+            "`simulation_finished=True` (or before the first run when a "
+            "default `-i` was supplied at startup).\n\n"
             "Parameters:\n"
-            "  input_path — optional new YAML config for the next run.\n"
+            "  input_path — optional new YAML config for the next run. "
+            "Required on the first call when the server was launched "
+            "without `-i`; thereafter sticky if `None`.\n"
             "  overrides — optional list of Hydra-style override strings "
             "(same syntax as CLI overrides for `main.py`, e.g. "
             "`['scheduler.args.prefetch_window=8', "
@@ -439,11 +474,17 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
         overrides: list[str] | None = None,
         reload: bool = True,
     ) -> dict[str, Any]:
-        # Restart is legal from READY ("before the first run"), FINISHED
-        # (between runs), or CONSTRUCT_FAILED (recover from a bad path).
-        # If we're stuck in RUNNING, refuse — the agent must drive the
-        # current run to completion first.
-        ok_phases = (Phase.READY, Phase.FINISHED, Phase.CONSTRUCT_FAILED)
+        # Restart is legal from WAITING_FOR_CONFIG (first construction
+        # when no `-i` was supplied), READY ("before the first run"),
+        # FINISHED (between runs), or CONSTRUCT_FAILED (recover from a
+        # bad path). If we're stuck in RUNNING, refuse — the agent must
+        # drive the current run to completion first.
+        ok_phases = (
+            Phase.WAITING_FOR_CONFIG,
+            Phase.READY,
+            Phase.FINISHED,
+            Phase.CONSTRUCT_FAILED,
+        )
         if not session.wait_until(
                 lambda: session.phase in ok_phases
                         or session.phase == Phase.SHUTDOWN,
@@ -477,6 +518,19 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
                         "Current simulation is not finished. Drive it to "
                         "completion via `continue_simulation` first, or "
                         "call `shutdown` to abort."
+                    ),
+                }
+            # First construction (no `-i` at startup, no previous run)
+            # needs an explicit `input_path`. After any successful or
+            # failed construction, `next_input_path` is set and `None`
+            # falls back to its sticky value.
+            if session.next_input_path is None and not input_path:
+                return {
+                    "ok": False,
+                    "error": (
+                        "First construction needs an `input_path` "
+                        "argument — the server was started without `-i` "
+                        "so no default config is available."
                     ),
                 }
             if input_path:

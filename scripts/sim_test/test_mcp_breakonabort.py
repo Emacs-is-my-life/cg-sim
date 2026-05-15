@@ -13,7 +13,7 @@ Verifies:
   7. Toggling BREAK_ON_ABORT Off makes the same scenario fail-fast (no
      stop, run finishes directly).
 
-Run from repo root:  python scripts/test_mcp_breakonabort.py
+Run from repo root:  python scripts/sim_test/test_mcp_breakonabort.py
 """
 
 from __future__ import annotations

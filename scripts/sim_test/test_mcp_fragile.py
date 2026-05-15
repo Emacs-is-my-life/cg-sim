@@ -8,7 +8,7 @@ every one is responsible for driving the run to `simulation_finished`
 before returning. The harness then calls `restart_simulation` to set
 up the next experiment.
 
-Run from repo root:  python scripts/test_mcp_fragile.py
+Run from repo root:  python scripts/sim_test/test_mcp_fragile.py
 """
 
 from __future__ import annotations

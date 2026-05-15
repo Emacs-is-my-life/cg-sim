@@ -47,6 +47,10 @@ class Phase(enum.Enum):
 
     Transitions (all under `AgentSession.cv`):
 
+        WAITING_FOR_CONFIG ──restart(input_path=…)──> CONSTRUCTING
+             │
+             └─shutdown─> SHUTDOWN
+
         CONSTRUCTING ──ok──> READY ──start──> RUNNING ──finish──> FINISHED
              │                  │                                     │
              │                  └──restart──> CONSTRUCTING             │
@@ -56,7 +60,14 @@ class Phase(enum.Enum):
              │                          └──shutdown─> SHUTDOWN         │
              │                                                         │
              └─shutdown (daemon-disconnect race)─> SHUTDOWN  <──restart/shutdown
+
+    `WAITING_FOR_CONFIG` is the initial phase only when `main_agent.py`
+    was launched without `-i`: no Simulator can be built until the agent
+    calls `restart_simulation(input_path=...)`. With `-i`, the initial
+    phase is `CONSTRUCTING` and the loop builds the default Simulator
+    before serving tools, matching the historical behavior.
     """
+    WAITING_FOR_CONFIG = "waiting_for_config"
     CONSTRUCTING = "constructing"
     READY = "ready"
     RUNNING = "running"
@@ -73,7 +84,9 @@ class AgentSession:
       - `debugger is not None` iff `phase in {READY, RUNNING, FINISHED}`.
       - `next_input_path` is consulted by `_construct_and_bind` whenever
         the main loop is about to enter `CONSTRUCTING`; tools update it
-        under `cv` before requesting a transition.
+        under `cv` before requesting a transition. It is `None` only
+        when the server was started without `-i` and the agent has not
+        yet supplied a path via `restart_simulation(input_path=...)`.
       - `next_overrides` is consulted alongside `next_input_path` for the
         same purpose — it carries Hydra-style overrides (e.g.
         `["scheduler.args.prefetch_window=8"]`) for the next
@@ -88,15 +101,18 @@ class AgentSession:
 
     def __init__(
         self,
-        default_input_path: str,
+        default_input_path: str | None = None,
         default_overrides: list[str] | None = None,
     ):
         self.default_input_path = default_input_path
-        self.next_input_path: str = default_input_path
+        self.next_input_path: str | None = default_input_path
         self.next_overrides: list[str] = list(default_overrides or [])
         self.debugger: Optional["Debugger"] = None
         self.cv = threading.Condition()
-        self.phase: Phase = Phase.CONSTRUCTING
+        self.phase: Phase = (
+            Phase.CONSTRUCTING if default_input_path is not None
+            else Phase.WAITING_FOR_CONFIG
+        )
 
     # -- Synchronization helpers (caller MUST hold or acquire `cv`) -----
 

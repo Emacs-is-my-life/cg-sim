@@ -20,7 +20,7 @@ Also runs a control: `restart_simulation(reload=False)` between runs 1
 and 2 to confirm that the class identity is *preserved* when reload is
 disabled.
 
-Run from repo root:  python scripts/test_mcp_hotreload.py
+Run from repo root:  python scripts/sim_test/test_mcp_hotreload.py
 """
 
 from __future__ import annotations
