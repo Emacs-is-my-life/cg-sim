@@ -106,7 +106,7 @@ Register cg-sim as an MCP server with your agent. For Claude Code:
 #     python main_agent.py -i <path-to-input.yaml>
 
 $ claude mcp add cg-sim-debugger -- \
-      python main_agent.py -i examples/llama-3-flexinfer/input.yaml
+      python main_agent.py -i examples/llama3-flexinfer/input.yaml
 ```
 The `-i` path supplies the default input; the agent can switch to a different
 YAML on any subsequent run via `restart_simulation(input_path=...)`.
