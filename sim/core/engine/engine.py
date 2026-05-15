@@ -130,6 +130,7 @@ class Engine(SimObject):
             debug = self.debugger
             engine = self
             hw = self.sys.hw
+            trace = self.sys.trace
             self.debugger.break_after_layout_stage(self.sys.hw)
 
         print("[Engine] Runtime stage start")

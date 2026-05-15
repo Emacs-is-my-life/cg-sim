@@ -34,6 +34,35 @@ python main.py -i examples/llama3-flexinfer/input.yaml           # Normal run
 python main.py -i examples/llama3-flexinfer/input.yaml +debug=on # Debugging mode
 ```
 
+#### Overriding input.yaml config from the command line
+`main.py` parses extra positional args with [Hydra](https://hydra.cc/)'s override
+syntax, so any leaf in the input YAML can be overridden without editing the file.
+Dotted paths address nested keys; integer indices address list elements.
+
+```bash
+# Override a scalar
+python main.py -i examples/llama3-flexinfer/input.yaml \
+    scheduler.args.prefetch_window=8
+
+# Override a list element by index (hardware.memory is a list)
+python main.py -i examples/llama3-flexinfer/input.yaml \
+    hardware.memory.0.args.memory_size_KB=10485760
+```
+
+Useful for parameter sweeps from a shell loop — `scripts/flexinfer.sh` does
+exactly this, sweeping `hardware.memory.0.args.memory_size_KB` and redirecting
+each run's output via `logger.args.result_path`:
+```bash
+python main.py -i "$INPUT_CFG" \
+    logger.args.result_path="${result}" \
+    hardware.memory.0.args.memory_size_KB="${kb}"
+```
+
+The `+debug=on` form above is the same mechanism (the leading `+` adds a key
+that doesn't exist in the YAML); see Hydra's
+[override grammar](https://hydra.cc/docs/advanced/override_grammar/basic/) for
+the full syntax (append `+`, force-override `++`, delete `~`, etc.).
+
 ### Debugging
 #### For Human
 Append `+debug=on` flag at the end, when running `main.py`  
@@ -56,6 +85,13 @@ At every breakpoint, the banner table lists the available commands:
   `debug.record()` writes). Handy for post-mortem inspection after the run.
 - `exit()` — continue simulator execution.
 
+`BREAK_ON_ABORT` and `BREAK_ON_EXCEPTION` are Off by default in human
+mode. If you enable either, see the *Abort breakpoint* and *Exception
+breakpoint* sections under *For Agent* below — the variable names
+(`abort_stack`, `exception_stack`) and frame-inspection idioms
+(`abort_stack[i].frame.f_locals`, `exception_stack[i].tb_frame.f_locals`)
+apply identically inside the IPython REPL.
+
 #### For Agent (LLM)
 Run `main_agent.py` instead of `main.py`. It boots an MCP (Model Context
 Protocol) server on its stdio and drives a loop so an agent can run the
@@ -66,8 +102,11 @@ without restarting the process.
 ##### One-time setup (Human must do!)
 Register cg-sim as an MCP server with your agent. For Claude Code:
 ```bash
-claude mcp add cg-sim-debugger -- \
-    python main_agent.py -i <path-to-input.yaml>
+# claude mcp add cg-sim-debugger -- \
+#     python main_agent.py -i <path-to-input.yaml>
+
+$ claude mcp add cg-sim-debugger -- \
+      python main_agent.py -i examples/llama-3-flexinfer/input.yaml
 ```
 The `-i` path supplies the default input; the agent can switch to a different
 YAML on any subsequent run via `restart_simulation(input_path=...)`.
@@ -98,10 +137,13 @@ The server exposes eight tools:
 - `continue_simulation` — resume the simulator. **Blocking**: returns once
   the next breakpoint fires or the run finishes, with the resulting state
   in the response.
-- `restart_simulation(input_path=None, reload=True)` — tear down the
-  just-finished simulator and build a fresh one. Only callable after
+- `restart_simulation(input_path=None, overrides=None, reload=True)` — tear
+  down the just-finished simulator and build a fresh one. Only callable after
   `simulation_finished=true` (or before the first run). Pass `input_path` to
-  switch the YAML config. With `reload=True` (default), drops user-editable
+  switch the YAML config. Pass `overrides` (a list of Hydra-style strings
+  like `["scheduler.args.prefetch_window=8"]`) to apply CLI-equivalent
+  config overrides — see *Config overrides at restart* below for the
+  full semantics. With `reload=True` (default), drops user-editable
   modules from `sys.modules` so source edits are picked up — see
   *Hot-reloading user code* below. **Blocking**: returns once the new
   Simulator is constructed.
@@ -167,9 +209,9 @@ funnels through `Engine._log_abort(args)`:
 - any future caller of `sys.abort()` or `_log_abort()` you add — covered
   automatically
 
-With `BREAK_ON_ABORT` enabled (default), `_log_abort` fires the
-`break_on_abort` breakpoint *after* logging the reason but *before*
-`signal_abort=True` tears the run down.
+With `BREAK_ON_ABORT` enabled (the MCP default; Off for human-mode
+runs), `_log_abort` fires the `break_on_abort` breakpoint *after*
+logging the reason but *before* `signal_abort=True` tears the run down.
 
 The namespace adds:
 
@@ -306,6 +348,44 @@ Reachable from inside `execute` (since `debug` is in scope):
   execute("import json; [json.loads(l) for l in open(debug.log_path)][-3:]")
   ```
 
+##### Config overrides at restart
+`restart_simulation(overrides=[...])` accepts a list of Hydra-style override
+strings — the same syntax as the CLI overrides documented under
+*Overriding input.yaml config from the command line* above. This lets the
+agent sweep scheduler / hardware / trace knobs across runs in a single
+session without editing the YAML and without the caveats of mutating already-
+constructed objects (which only catches fields read live; values consumed
+inside `__init__` — derived tables, scheduler caches — won't be re-derived
+by a `hw['ram'].memory_size_KB = ...` poke).
+
+```python
+# Sweep prefetch_window in a single MCP session:
+restart_simulation(overrides=["scheduler.args.prefetch_window=8"])
+restart_simulation(overrides=["scheduler.args.prefetch_window=16"])
+
+# Override a list element by index:
+restart_simulation(overrides=["hardware.memory.0.args.memory_size_KB=10485760"])
+
+# Combine multiple overrides; combine with a new input YAML:
+restart_simulation(
+    input_path="examples/llama3-vanilla/input.yaml",
+    overrides=["+debug=on", "logger.args.log_level=3"],
+)
+```
+
+Semantics:
+- `overrides=None` (default) — keep the previous overrides. Sticky across
+  restarts and initialized from whatever extra CLI args were passed to
+  `main_agent.py` at startup.
+- `overrides=[]` — explicitly clear all overrides.
+- `overrides=[...]` — replace with the supplied list.
+
+The applied list is echoed back as `overrides` in the response so the
+agent can verify. Invalid override strings raise during construction
+(Hydra surfaces them as `OverrideParseException` or similar) and the
+session lands in `CONSTRUCT_FAILED`; recover by calling
+`restart_simulation` again with corrected `overrides`.
+
 ##### Hot-reloading user code
 `restart_simulation(reload=True)` (the default) drops user-editable modules
 from `sys.modules` before rebuilding the Simulator, so the agent can edit
@@ -347,9 +427,10 @@ restart_simulation(reload=True)
   before the server starts (alternative to calling `toggle_breakpoint`).
   Re-applied to each fresh Debugger built by `restart_simulation`, so it
   acts as a persistent default across runs in one agent session.
-- `CG_SIM_AGENT_MODE` — set automatically by `main_agent.py` to suppress
-  the interactive `welcome_prompt` (whose `input()` would otherwise race
-  the MCP server for stdin). Do not set this manually.
+- `CG_SIM_AGENT_MODE` — set automatically by `start_agent_server`
+  (called from `main_agent.py`) to suppress the interactive
+  `welcome_prompt` (whose `input()` would otherwise race the MCP server
+  for stdin). Do not set this manually.
 
 ### Writing a new Scheduler
 
@@ -482,7 +563,8 @@ Then re-run with the same breakpoints to compare. `debug.record(...)`
 breadcrumbs end up in each run's own log file.
 
 #### Common scheduler pitfalls
-Two safety nets are on by default — one for each failure mode:
+Two safety nets are On by default *for MCP sessions* (Off for human-mode
+runs of `main.py`) — one for each failure mode:
 - `BREAK_ON_ABORT` catches every abort path through `Engine._log_abort`
   — engine deadlocks, scheduler-issued `sys.abort(...)`, assertion
   failures. Agent lands at `break_on_abort` with `abort_args` and live

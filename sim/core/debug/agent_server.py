@@ -36,8 +36,11 @@ _SERVER_INSTRUCTIONS = (
     "  5. `continue_simulation` — resume (blocking). Returns at the next\n"
     "     breakpoint or `simulation_finished=true`.\n"
     "  6. Repeat 4-5. When `simulation_finished=true`, call\n"
-    "     `restart_simulation(input_path=None)` for a fresh run (optionally\n"
-    "     with a new YAML) or `shutdown` to end the process.\n"
+    "     `restart_simulation(input_path=None, overrides=None)` for a\n"
+    "     fresh run (optionally with a new YAML and/or Hydra-style\n"
+    "     config overrides like\n"
+    "     `['scheduler.args.prefetch_window=8']`) or `shutdown` to end\n"
+    "     the process.\n"
     "\n"
     "  If `start_simulation`/`continue_simulation` returns\n"
     "  `timed_out=true`, re-read with `current_state` (cheap; does not\n"
@@ -171,6 +174,24 @@ _SERVER_INSTRUCTIONS = (
     "    debug, engine    — standard.\n"
     "\n"
     "  Toggle off for fail-fast: `toggle_breakpoint(\"BREAK_ON_EXCEPTION\")`.\n"
+    "\n"
+    "== Config overrides at restart ==\n"
+    "  `restart_simulation(overrides=[...])` accepts a list of\n"
+    "  Hydra-style override strings — same syntax as appending extra\n"
+    "  args to `python main.py -i <yaml>` on the shell. Use it to sweep\n"
+    "  scheduler/hardware/trace knobs without editing the YAML or\n"
+    "  hand-mutating constructed objects (which only catches values\n"
+    "  read live; values consumed inside `__init__` won't re-derive).\n"
+    "    overrides=['scheduler.args.prefetch_window=8']\n"
+    "    overrides=['hardware.memory.0.args.memory_size_KB=10485760']\n"
+    "    overrides=['+debug=on', 'logger.args.log_level=3']  # +adds key\n"
+    "  Semantics: `None` (default) keeps the previous overrides (sticky\n"
+    "  across restarts; initialized from the CLI args given to\n"
+    "  `main_agent.py`). `[]` clears them. A list replaces. The applied\n"
+    "  list is echoed back as `overrides` in the response so the agent\n"
+    "  can verify. Invalid override strings raise during construction\n"
+    "  and the session lands in CONSTRUCT_FAILED — recover with another\n"
+    "  `restart_simulation` call.\n"
     "\n"
     "== Hot-reloading user code ==\n"
     "  `restart_simulation(reload=True)` (the default) drops user-editable\n"
@@ -387,6 +408,17 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
             "the first run).\n\n"
             "Parameters:\n"
             "  input_path — optional new YAML config for the next run.\n"
+            "  overrides — optional list of Hydra-style override strings "
+            "(same syntax as CLI overrides for `main.py`, e.g. "
+            "`['scheduler.args.prefetch_window=8', "
+            "'hardware.memory.0.args.memory_size_KB=10485760']`). "
+            "Semantics: `None` (default) keeps the previous overrides "
+            "(sticky across restarts; initialized from the CLI args "
+            "given to `main_agent.py`); `[]` clears them; a list "
+            "replaces. Invalid override strings cause construction to "
+            "fail — the response reports the failure and the session "
+            "lands in `CONSTRUCT_FAILED`; recover by calling "
+            "`restart_simulation` again with corrected `overrides`.\n"
             "  reload — when True (default), drop user-editable modules "
             "(`sim.sched.*`, `sim.hw.*`, `sim.load.*`, except `*.common.*` "
             "base classes) from `sys.modules` so source edits to "
@@ -396,13 +428,15 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
             "Blocks until the new Simulator is constructed and ready to "
             "accept breakpoint toggles. Response carries the same state "
             "shape as `current_state` (at_breakpoint=False, "
-            "simulation_finished=False) plus `input_path` and, when "
+            "simulation_finished=False) plus `input_path`, `overrides` "
+            "(the list applied to this construction), and, when "
             "reload was requested, `reloaded_modules` (count of evicted "
             "sys.modules entries)."
         )
     )
     def restart_simulation(
         input_path: str | None = None,
+        overrides: list[str] | None = None,
         reload: bool = True,
     ) -> dict[str, Any]:
         # Restart is legal from READY ("before the first run"), FINISHED
@@ -447,6 +481,10 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
                 }
             if input_path:
                 session.next_input_path = input_path
+            # None = sticky (keep previous). Pass `[]` to clear. Anything
+            # truthy (including `[]` after this branch — see below) replaces.
+            if overrides is not None:
+                session.next_overrides = list(overrides)
             if reload:
                 reloaded_count = len(_hot_reload_user_modules())
             session.debugger = None
@@ -468,6 +506,8 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
             return {
                 "ok": False,
                 "error": "Simulator construction failed; see process stderr.",
+                "input_path": session.next_input_path,
+                "overrides": list(session.next_overrides),
             }
         if session.phase == Phase.SHUTDOWN:
             return {
@@ -478,6 +518,7 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
         return {
             "ok": True,
             "input_path": session.next_input_path,
+            "overrides": list(session.next_overrides),
             "reloaded_modules": reloaded_count,
             **state,
         }

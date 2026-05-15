@@ -106,13 +106,15 @@ class Debugger(SimObject):
         self.BREAK_AFTER_LAYOUT_STAGE: bool = False
         self.BREAK_IN_RUNTIME_STAGE: bool = False
         self.BREAK_AFTER_RUNTIME_STAGE: bool = False
-        # Safety-net: defaults On. (Only for MCP) Fires at each engine abort site (deadlock,
-        # invalid Job submission) so the agent can inspect why & state before
-        # the run tears down. Toggle off for fail-fast batch/CI runs.
+        # Safety-net: Off by default here; `main_agent.py` flips it On for
+        # MCP sessions. Fires at each engine abort site (deadlock, invalid
+        # Job submission) so the agent can inspect why & state before the
+        # run tears down. Toggle off for fail-fast batch/CI runs.
         self.BREAK_ON_ABORT: bool = False
-        # Hard-failure counterpart: defaults On. (Only for MCP) Fires when an uncaught
-        # exception propagates out of `engine.run()` so the agent can inspect
-        # the failing frame instead of chasing a stderr traceback after the
+        # Hard-failure counterpart: Off by default here; `main_agent.py`
+        # flips it On for MCP sessions. Fires when an uncaught exception
+        # propagates out of `engine.run()` so the agent can inspect the
+        # failing frame instead of chasing a stderr traceback after the
         # fact. Toggle off if you want exceptions to propagate silently.
         self.BREAK_ON_EXCEPTION: bool = False
 
@@ -245,11 +247,11 @@ class Debugger(SimObject):
         On and re-renders the table. Returns when every breakpoint is On
         or when the user enters 'c'.
 
-        No-op under agent mode: `main_agent.py` sets `CG_SIM_AGENT_MODE`
-        before construction, and `input()` here would race the MCP server
-        for stdin bytes (both ends inherit fd 0 from the dup in
-        `start_agent_server`). Agents toggle flags via `toggle_breakpoint`
-        instead.
+        No-op under agent mode: `start_agent_server` (called from
+        `main_agent.py`) sets `CG_SIM_AGENT_MODE` before construction,
+        and `input()` here would race the MCP server for stdin bytes
+        (both ends inherit fd 0 from the dup in `start_agent_server`).
+        Agents toggle flags via `toggle_breakpoint` instead.
         """
         if os.environ.get("CG_SIM_AGENT_MODE"):
             return

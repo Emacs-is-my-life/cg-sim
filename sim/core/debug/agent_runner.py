@@ -74,15 +74,26 @@ class AgentSession:
       - `next_input_path` is consulted by `_construct_and_bind` whenever
         the main loop is about to enter `CONSTRUCTING`; tools update it
         under `cv` before requesting a transition.
+      - `next_overrides` is consulted alongside `next_input_path` for the
+        same purpose — it carries Hydra-style overrides (e.g.
+        `["scheduler.args.prefetch_window=8"]`) for the next
+        construction. Initialized from `main_agent.py`'s unparsed CLI
+        args so initial overrides flow through; thereafter mutated only
+        by `restart_simulation(overrides=...)`.
       - `phase == SHUTDOWN` is terminal — `transition_to(SHUTDOWN)` is
         legal from every other phase, including `CONSTRUCTING` (used by
         the daemon-disconnect path so a hung initial bind doesn't trap
         the main thread).
     """
 
-    def __init__(self, default_input_path: str):
+    def __init__(
+        self,
+        default_input_path: str,
+        default_overrides: list[str] | None = None,
+    ):
         self.default_input_path = default_input_path
         self.next_input_path: str = default_input_path
+        self.next_overrides: list[str] = list(default_overrides or [])
         self.debugger: Optional["Debugger"] = None
         self.cv = threading.Condition()
         self.phase: Phase = Phase.CONSTRUCTING

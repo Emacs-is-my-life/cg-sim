@@ -16,13 +16,19 @@ from .init.storage import LOAD_STORAGE_CLASS
 from .init.scheduler import LOAD_SCHEDULER_CLASS
 
 
-def parse_config(config_file_path: str):
+def parse_config(config_file_path: str, overrides: list[str] | None = None):
     config_file_path = Path(config_file_path).resolve()
     config_file_dir = str(config_file_path.parent)
     config_file_name = config_file_path.stem
 
-    # CLI options will override config file
-    overrides = sys.argv[1:]
+    # Explicit overrides win over the sys.argv fallback. `main.py` doesn't
+    # pass overrides and relies on the fallback to forward unparsed CLI
+    # args; `main_agent.py` passes the list explicitly (sourced from
+    # AgentSession.next_overrides) so the agent can rebuild with new
+    # overrides via `restart_simulation(overrides=...)` without touching
+    # process-global sys.argv from the MCP tool thread.
+    if overrides is None:
+        overrides = sys.argv[1:]
 
     # Initialize Hydra
     cfg = None
@@ -57,14 +63,14 @@ class Simulator:
     Compute Graph Simulator
     """
 
-    def __init__(self, config_file_path: str):
+    def __init__(self, config_file_path: str, overrides: list[str] | None = None):
         self.log = None
         self.engine = None
         self.debugger = None
 
         try:
             # Read input file(input.yaml), and parse fields
-            cfg = parse_config(config_file_path)
+            cfg = parse_config(config_file_path, overrides)
 
             sim_id = SimIdentityMgr()
 

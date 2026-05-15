@@ -29,24 +29,26 @@ from sim.core.debug import AgentSession, start_agent_server
 from sim.core.debug.agent_runner import Phase
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser()
     parser.add_argument("-i", "--input", required=True)
     args, remaining_args = parser.parse_known_args()
     sys.argv = [sys.argv[0]] + remaining_args
-    return args
+    return args, remaining_args
 
 
 def _construct(session: AgentSession) -> Simulator | None:
-    """Build a fresh Simulator using `session.next_input_path`.
+    """Build a fresh Simulator using `session.next_input_path` and
+    `session.next_overrides`.
 
     Returns the Simulator on success, or `None` if construction raised
-    (e.g. malformed input). On failure, prints the traceback to stderr;
-    the main loop transitions the session to `CONSTRUCT_FAILED` so any
-    waiting tool gets an actionable error.
+    (e.g. malformed input or invalid Hydra override syntax). On failure,
+    prints the traceback to stderr; the main loop transitions the
+    session to `CONSTRUCT_FAILED` so any waiting tool gets an actionable
+    error.
     """
     try:
-        sim = Simulator(session.next_input_path)
+        sim = Simulator(session.next_input_path, session.next_overrides)
     except BaseException:
         traceback.print_exc(file=sys.stderr)
         return None
@@ -72,11 +74,11 @@ def _teardown(sim: Simulator | None) -> None:
 
 
 def main() -> int:
-    args = _parse_args()
+    args, remaining_args = _parse_args()
     if args.input is None:
         raise Exception("No simulation input file is supplied.")
 
-    session = AgentSession(args.input)
+    session = AgentSession(args.input, remaining_args)
 
     # Start the MCP daemon once, before any Simulator is constructed.
     # This dups stdio so subsequent simulator `print()` calls land on
