@@ -54,6 +54,8 @@ def _construct(session: AgentSession) -> Simulator | None:
     # agent that wins a race can never see a Debugger with mode="human"
     # or unconfigured BREAK_* flags.
     sim.debugger.mode = "agent"
+    sim.debugger.BREAK_ON_ABORT = True
+    sim.debugger.BREAK_ON_EXCEPTION = True
     sim.debugger.apply_env_breakpoints()
     return sim
 

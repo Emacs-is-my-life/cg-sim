@@ -106,15 +106,15 @@ class Debugger(SimObject):
         self.BREAK_AFTER_LAYOUT_STAGE: bool = False
         self.BREAK_IN_RUNTIME_STAGE: bool = False
         self.BREAK_AFTER_RUNTIME_STAGE: bool = False
-        # Safety-net: defaults On. Fires at each engine abort site (deadlock,
+        # Safety-net: defaults On. (Only for MCP) Fires at each engine abort site (deadlock,
         # invalid Job submission) so the agent can inspect why & state before
         # the run tears down. Toggle off for fail-fast batch/CI runs.
-        self.BREAK_ON_ABORT: bool = True
-        # Hard-failure counterpart: defaults On. Fires when an uncaught
+        self.BREAK_ON_ABORT: bool = False
+        # Hard-failure counterpart: defaults On. (Only for MCP) Fires when an uncaught
         # exception propagates out of `engine.run()` so the agent can inspect
         # the failing frame instead of chasing a stderr traceback after the
         # fact. Toggle off if you want exceptions to propagate silently.
-        self.BREAK_ON_EXCEPTION: bool = True
+        self.BREAK_ON_EXCEPTION: bool = False
 
         # Free-form scratchpad dict, mirroring the `.args` convention on
         # hardware/scheduler classes. Use it to stash notes, intermediate

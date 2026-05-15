@@ -156,7 +156,7 @@ Flags persist across `continue_simulation` calls, so disarm them
 (`target.BREAK_AT_JOB_RETIRED = False`) once you're done if you want the run
 to finish without stopping again.
 
-##### Abort breakpoint (BREAK_ON_ABORT, default On)
+##### Abort breakpoint (BREAK_ON_ABORT, default On for MCP)
 Generic soft-failure safety net. **Every** abort path in the simulator
 funnels through `Engine._log_abort(args)`:
 
@@ -204,7 +204,7 @@ Continuing from the breakpoint lets the normal abort flow proceed
 fail-fast batch runs that should not pause on aborts,
 `toggle_breakpoint("BREAK_ON_ABORT")` to disable.
 
-##### Exception breakpoint (BREAK_ON_EXCEPTION, default On)
+##### Exception breakpoint (BREAK_ON_EXCEPTION, default On for MCP)
 Hard-failure counterpart of `BREAK_ON_ABORT`. When an uncaught
 exception propagates out of `engine.run()` — bug in your scheduler,
 HW model, trace loader, or any user code — `Simulator.run`'s
