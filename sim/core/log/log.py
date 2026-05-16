@@ -111,7 +111,7 @@ class Log:
             else:
                 parts.append(",\n")
 
-            parts.append(orjson.dumps(log_event, option=orjson.OPT_INDENT_2).decode().replace("  ", "\t"))
+            parts.append(orjson.dumps(log_event, option=orjson.OPT_INDENT_2).decode())
 
         self.file_ptr.write("".join(parts))
         self.file_ptr.flush()
@@ -145,7 +145,11 @@ class Log:
             return
 
         self._open_file()
-        self.worker = threading.Thread(target=self._run, name="LogWriterThread")
+        self.worker = threading.Thread(
+            target=self._run,
+            name="LogWriterThread",
+            daemon=True,
+        )
         self.worker.start()
         self._create_tracks()
         return

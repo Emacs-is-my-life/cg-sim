@@ -5,6 +5,7 @@ from pathlib import Path
 
 from sim.core.system import System
 from sim.core.log import Log
+from sim.core.debug import Debugger
 from sim.core.engine import Engine
 from sim.core.trace.custom_dep import TensorAtHWDep
 
@@ -15,13 +16,19 @@ from .init.storage import LOAD_STORAGE_CLASS
 from .init.scheduler import LOAD_SCHEDULER_CLASS
 
 
-def parse_config(config_file_path: str):
+def parse_config(config_file_path: str, overrides: list[str] | None = None):
     config_file_path = Path(config_file_path).resolve()
     config_file_dir = str(config_file_path.parent)
     config_file_name = config_file_path.stem
 
-    # CLI options will override config file
-    overrides = sys.argv[1:]
+    # Explicit overrides win over the sys.argv fallback. `main.py` doesn't
+    # pass overrides and relies on the fallback to forward unparsed CLI
+    # args; `main_agent.py` passes the list explicitly (sourced from
+    # AgentSession.next_overrides) so the agent can rebuild with new
+    # overrides via `restart_simulation(overrides=...)` without touching
+    # process-global sys.argv from the MCP tool thread.
+    if overrides is None:
+        overrides = sys.argv[1:]
 
     # Initialize Hydra
     cfg = None
@@ -56,105 +63,164 @@ class Simulator:
     Compute Graph Simulator
     """
 
-    def __init__(self, config_file_path: str):
-        # Read input file(input.yaml), and parse fields
-        cfg = parse_config(config_file_path)
+    def __init__(self, config_file_path: str, overrides: list[str] | None = None):
+        self.log = None
+        self.engine = None
+        self.debugger = None
 
-        sim_id = SimIdentityMgr()
+        try:
+            # Read input file(input.yaml), and parse fields
+            cfg = parse_config(config_file_path, overrides)
 
-        # Logger
-        l_cfg = cfg["logger"]
-        l_cfg["args"]["input_path"] = config_file_path  # Supply input_path
-        log = Log(l_cfg["args"])
-        log.start()
+            sim_id = SimIdentityMgr()
 
-        # Trace
-        t_cfg = cfg["trace"]
-        t_cfg["args"]["input_path"] = config_file_path  # Supply input_path
-        TraceLoaderClass = LOAD_TRACE_CLASS(t_cfg["type"])
-        name = "Trace"
-        sim_id.check_name(name)
-        trace_loader = TraceLoaderClass(sim_id.get_id(), name, log, t_cfg["args"])
-        trace = trace_loader.load()
+            # Logger
+            l_cfg = cfg["logger"]
+            l_cfg["args"]["input_path"] = config_file_path  # Supply input_path
+            log = Log(l_cfg["args"])
+            self.log = log
+            log.start()
 
-        # Hardware Dictionary
-        hw = {}
+            # Debugger
+            debugger = Debugger(sim_id.get_id(), "Debug", log)
+            self.debugger = debugger
+            if "debug" in cfg:
+                debugger.welcome_prompt()
 
-        # Storage
-        for s_cfg in cfg["hardware"]["storage"]:
-            StorageClass = LOAD_STORAGE_CLASS(s_cfg["type"])
-            name = s_cfg["name"]
+            # Trace
+            t_cfg = cfg["trace"]
+            t_cfg["args"]["input_path"] = config_file_path  # Supply input_path
+            TraceLoaderClass = LOAD_TRACE_CLASS(t_cfg["type"])
+            name = "Trace"
             sim_id.check_name(name)
-            storage_hw = StorageClass(sim_id.get_id(), name, log, s_cfg["args"])
-            hw[storage_hw.name] = storage_hw
+            trace_loader = TraceLoaderClass(sim_id.get_id(), name, log, t_cfg["args"])
+            trace = trace_loader.load()
 
-        # Place initial tensors into the Storage device
-        if not hw:
-            raise Exception("[Engine] There is no storage device available!")
-        else:
-            # Place tensors in the very first storage device
-            init_storage = hw[next(iter(hw))]
-            trace_loader.placement(trace, init_storage)
-            init_storage.initial_placement = True
+            # Hardware Dictionary
+            hw = {}
 
-        # Memory
-        for m_cfg in cfg["hardware"]["memory"]:
-            MemoryClass = LOAD_MEMORY_CLASS(m_cfg["type"])
-            name = m_cfg["name"]
+            # Storage
+            for s_cfg in cfg["hardware"]["storage"]:
+                StorageClass = LOAD_STORAGE_CLASS(s_cfg["type"])
+                name = s_cfg["name"]
+                sim_id.check_name(name)
+                storage_hw = StorageClass(sim_id.get_id(), name, log, s_cfg["args"])
+                hw[storage_hw.name] = storage_hw
+
+            # Place initial tensors into the Storage device
+            if not hw:
+                raise Exception("[Engine] There is no storage device available!")
+            else:
+                # Place tensors in the very first storage device
+                init_storage = hw[next(iter(hw))]
+                trace_loader.placement(trace, init_storage)
+                init_storage.initial_placement = True
+
+            # Memory
+            for m_cfg in cfg["hardware"]["memory"]:
+                MemoryClass = LOAD_MEMORY_CLASS(m_cfg["type"])
+                name = m_cfg["name"]
+                sim_id.check_name(name)
+                memory_hw = MemoryClass(sim_id.get_id(), name, log, m_cfg["args"])
+                hw[memory_hw.name] = memory_hw
+
+            # Compute - Compute units must be initialized after memory units
+            for c_cfg in cfg["hardware"]["compute"]:
+                ComputeClass = LOAD_COMPUTE_CLASS(c_cfg["type"])
+                local_memory = hw[c_cfg["args"]["memory"]]
+                name = c_cfg["name"]
+                sim_id.check_name(name)
+                compute_hw = ComputeClass(sim_id.get_id(), name, log, local_memory, c_cfg["args"])
+                hw[compute_hw.name] = compute_hw
+
+            # Validate custom_dep_tag values: must be unique across hw, and every
+            # TensorAtHWDep on a trace node must reference a declared tag.
+            tag_owners: dict[str, list[str]] = {}
+            for h in hw.values():
+                tag = h.args.get("custom_dep_tag")
+                if tag is not None:
+                    tag_owners.setdefault(tag, []).append(h.name)
+
+            for tag, owners in tag_owners.items():
+                if len(owners) > 1:
+                    raise Exception(
+                        f"[Simulator] custom_dep_tag {tag!r} shared by hw: {owners}. Tags must be unique."
+                    )
+
+            for node in trace.node_map.values():
+                for dep in node.custom_deps:
+                    if isinstance(dep, TensorAtHWDep):
+                        if dep.custom_dep_tag not in tag_owners:
+                            raise Exception(
+                                f"[Simulator] node {node.id} ({node.name}) references custom_dep_tag "
+                                f"{dep.custom_dep_tag!r} but no hw declares it."
+                            )
+
+            # System
+            sys = System(trace, hw)
+
+            # Engine
+            name = "Engine"
             sim_id.check_name(name)
-            memory_hw = MemoryClass(sim_id.get_id(), name, log, m_cfg["args"])
-            hw[memory_hw.name] = memory_hw
+            self.engine = Engine(sim_id.get_id(), name, log, sys, None, debugger)
+            debugger.engine = self.engine
 
-        # Compute - Compute units must be initialized after memory units
-        for c_cfg in cfg["hardware"]["compute"]:
-            ComputeClass = LOAD_COMPUTE_CLASS(c_cfg["type"])
-            local_memory = hw[c_cfg["args"]["memory"]]
-            name = c_cfg["name"]
+            # Scheduler
+            sched_cfg = cfg["scheduler"]
+            SchedulerClass = LOAD_SCHEDULER_CLASS(sched_cfg["type"])
+            name = "Scheduler"
             sim_id.check_name(name)
-            compute_hw = ComputeClass(sim_id.get_id(), name, log, local_memory, c_cfg["args"])
-            hw[compute_hw.name] = compute_hw
+            sched = SchedulerClass(sim_id.get_id(), name, log, sys, sched_cfg["args"])
+            self.engine.sched = sched
 
-        # Validate custom_dep_tag values: must be unique across hw, and every
-        # TensorAtHWDep on a trace node must reference a declared tag.
-        tag_owners: dict[str, list[str]] = {}
-        for h in hw.values():
-            tag = h.args.get("custom_dep_tag")
-            if tag is not None:
-                tag_owners.setdefault(tag, []).append(h.name)
 
-        for tag, owners in tag_owners.items():
-            if len(owners) > 1:
-                raise Exception(
-                    f"[Simulator] custom_dep_tag {tag!r} shared by hw: {owners}. Tags must be unique."
-                )
+        except BaseException:
+            if self.log is not None:
+                self.log.stop()
+            raise
 
-        for node in trace.node_map.values():
-            for dep in node.custom_deps:
-                if isinstance(dep, TensorAtHWDep):
-                    if dep.custom_dep_tag not in tag_owners:
-                        raise Exception(
-                            f"[Simulator] node {node.id} ({node.name}) references custom_dep_tag "
-                            f"{dep.custom_dep_tag!r} but no hw declares it."
-                        )
-
-        # System
-        sys = System(trace, hw)
-
-        # Scheduler
-        sched_cfg = cfg["scheduler"]
-        SchedulerClass = LOAD_SCHEDULER_CLASS(sched_cfg["type"])
-        name = "Scheduler"
-        sim_id.check_name(name)
-        sched = SchedulerClass(sim_id.get_id(), name, log, sys, sched_cfg["args"])
-
-        # Engine
-        name = "Engine"
-        sim_id.check_name(name)
-        self.engine = Engine(sim_id.get_id(), name, log, sys, sched)
         return
 
     def run(self):
         print("Simulation is starting ...")
-        self.engine.run()
-        print("Simulation is finished.")
+        try:
+            self.engine.run()
+            print("Simulation is finished.")
+            self.debugger.notify_simulation_finished()
+        except KeyboardInterrupt:
+            print("\nSimulation interrupted by user.")
+            raise SystemExit(130)
+        except BaseException as exc:
+            # Hard-failure path. Counterpart to the soft-abort flow
+            # centralized in Engine._log_abort: log a structured record so
+            # the post-run log has the same shape regardless of failure
+            # mode, fire the dedicated exception breakpoint (the agent
+            # gets exception_origin / exception_stack — same navigation
+            # idea as abort_stack, but sourced from __traceback__ since
+            # the live stack has unwound), then end the run gracefully
+            # so restart_simulation works. Zero-cost on the success path
+            # in Python 3.11+.
+            import traceback as _tb
+            exc_args = {
+                "from": "Simulator",
+                "msg": f"Uncaught {type(exc).__name__}: {exc}",
+                "exception_type": type(exc).__name__,
+                "exception_message": str(exc),
+                "traceback": _tb.format_exception(exc),
+            }
+            self.log.record(Log.engine(
+                self.engine.id, "SIMULATION_EXCEPTION",
+                self.engine.timestamp_now, exc_args))
+            if self.debugger.BREAK_ON_EXCEPTION:
+                debug = self.debugger
+                engine = self.engine
+                exception = exc
+                exception_origin = self.debugger._exception_origin(exc)
+                exception_stack = self.debugger._exception_stack(exc)
+                self.debugger.break_on_exception(type(exc).__name__)
+            print(f"Simulation ended with {type(exc).__name__}: {exc}")
+            self.debugger.notify_simulation_finished()
+        finally:
+            if self.log is not None:
+                self.log.stop()
         return

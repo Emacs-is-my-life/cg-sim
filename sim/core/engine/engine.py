@@ -4,12 +4,14 @@ from typing import Any, TYPE_CHECKING
 from enum import Enum, auto
 from collections import deque
 import heapq
+import inspect
 import orjson
 
 from sim.core.sim_object import SimObject
 from sim.core.log import Log, TrackID, Level
 from sim.core.trace import TerminalNode
 from sim.core.job import BaseJob, ComputeJob, TransferJob
+from sim.core.debug import Debugger
 from sim.hw.memory.common import BaseMemory
 from sim.hw.storage.common import BaseStorage
 from sim.sched.common import BaseScheduler
@@ -31,7 +33,7 @@ class Engine(SimObject):
     Engine is central point of simulation.
     """
 
-    def __init__(self, obj_id: int, name: str, log: Log, sys: System, sched: BaseScheduler):
+    def __init__(self, obj_id: int, name: str, log: Log, sys: System, sched: BaseScheduler, debugger: Debugger):
         super().__init__(obj_id, name, log)
 
         # Key Objects
@@ -39,6 +41,7 @@ class Engine(SimObject):
         self.sys = sys
         self.sys.engine = self
         self.sched = sched
+        self.debugger = debugger
 
         # Signals
         self.signal_abort: bool = False
@@ -63,6 +66,18 @@ class Engine(SimObject):
     def submit(self, job: BaseJob) -> None:
         job.timestamp_queued = self.timestamp_now
         self.job_waiting.append(job)
+
+        # DEBUG: BREAK_AT_JOB_SUBMITTED
+        if self.debugger.BREAK_IN_RUNTIME_STAGE and job.BREAK_AT_JOB_SUBMITTED:
+            debug = self.debugger
+            engine = self
+            timestamp_now = self.timestamp_now
+            job_waiting = self.job_waiting
+            job_running = self.job_running
+            hw = self.sys.hw
+            trace = self.sys.trace
+            self.debugger.break_in_runtime_stage("JOB_SUBMITTED")
+
         return
 
     def signal(self, signal: EngineSignal) -> None:
@@ -72,9 +87,31 @@ class Engine(SimObject):
         return
 
     def run(self) -> None:
+        # Abort handling
+        if self.signal_abort:
+            self._cleanup()
+            return
+
+        if self.debugger.BREAK_BEFORE_COMPILE_STAGE:
+            debug = self.debugger
+            engine = self
+            trace = self.sys.trace
+            hw = self.sys.hw
+            self.debugger.break_before_compile_stage()
+
         print("[Engine] Compile stage start")
         self.log.record(Log.engine(self.id, "COMPILE_STAGE_START", self.timestamp_now))
         self._compile()
+        # Abort handling
+        if self.signal_abort:
+            self._cleanup()
+            return
+
+        if self.debugger.BREAK_AFTER_COMPILE_STAGE:
+            debug = self.debugger
+            engine = self
+            trace = self.sys.trace
+            self.debugger.break_after_compile_stage()
 
         # node_map and tensor_map dump
         arg_nodes, arg_tensors = self.log.get_trace_log(self.sys.trace)
@@ -84,10 +121,27 @@ class Engine(SimObject):
         print("[Engine] Layout stage start")
         self.log.record(Log.engine(self.id, "LAYOUT_STAGE_START", self.timestamp_now))
         self._layout()
+        # Abort handling
+        if self.signal_abort:
+            self._cleanup()
+            return
+
+        if self.debugger.BREAK_AFTER_LAYOUT_STAGE:
+            debug = self.debugger
+            engine = self
+            hw = self.sys.hw
+            trace = self.sys.trace
+            self.debugger.break_after_layout_stage(self.sys.hw)
 
         print("[Engine] Runtime stage start")
         self.log.record(Log.engine(self.id, "RUNTIME_STAGE_START", self.timestamp_now))
         self._runtime()
+        if self.debugger.BREAK_AFTER_RUNTIME_STAGE:
+            debug = self.debugger
+            engine = self
+            hw = self.sys.hw
+            trace = self.sys.trace
+            self.debugger.break_after_runtime_stage()
 
         self._cleanup()
         return
@@ -132,11 +186,15 @@ class Engine(SimObject):
         # Multi-step layout
         finished = False
         while not finished:
+            # Abort handling
+            if self.signal_abort:
+                break
+
             # Scheduler Placement
             finished = self.sched.layout(init_storage)
 
             # Run all jobs
-            while self.job_waiting:
+            while self.job_waiting and not self.signal_abort:
                 job_w = self.job_waiting[0]
                 if job_w.is_runnable(self.sys):
                     self.job_waiting.popleft()
@@ -155,8 +213,16 @@ class Engine(SimObject):
                     self.signal_abort = True
                     break
 
+            # Abort handling
+            if self.signal_abort:
+                break
+
             # Retire all jobs
             self._layout_forward()
+
+            # Abort handling
+            if self.signal_abort:
+                break
 
         # Turn logging back on
         self.log.on = True
@@ -216,9 +282,27 @@ class Engine(SimObject):
             # Inspect retired jobs
             retired_jobs = self._runtime_forward()
             for job in retired_jobs:
+                # DEBUG: BREAK_AT_JOB_RETIRED
+                if self.debugger.BREAK_IN_RUNTIME_STAGE and job.BREAK_AT_JOB_RETIRED:
+                    debug = self.debugger
+                    engine = self
+                    timestamp_now = self.timestamp_now
+                    job_waiting = self.job_waiting
+                    job_running = self.job_running
+                    hw = self.sys.hw
+                    trace = self.sys.trace
+                    self.debugger.break_in_runtime_stage("JOB_RETIRED")
+
                 # Check if simulation is finished
                 if isinstance(job, ComputeJob) and isinstance(job.node, TerminalNode):
                     return
+
+            # DEBUG: break_lambda — generic custom-predicate breakpoint
+            # checked once per loop, after retiring jobs and before
+            # advancing progress. The wrapper handles its own namespace
+            # for the breakpoint REPL.
+            if self.debugger.break_lambda is not None:
+                self.debugger._break_lambda(self, self.sys)
 
             # Update progress
             for job in self.job_running:
@@ -226,10 +310,24 @@ class Engine(SimObject):
 
             # Scheduler Decisions
             self.sched.runtime(retired_jobs)
+            if self.signal_abort:
+                break
 
             # Drain all runnable jobs from job_waiting to job_running, in FIFO manner
             while self.job_waiting:
                 job_w = self.job_waiting[0]
+
+                # DEBUG: BREAK_AT_JOB_HEAD
+                if self.debugger.BREAK_IN_RUNTIME_STAGE and job_w.BREAK_AT_JOB_HEAD:
+                    debug = self.debugger
+                    engine = self
+                    timestamp_now = self.timestamp_now
+                    job = job_w
+                    job_waiting = self.job_waiting
+                    job_running = self.job_running
+                    hw = self.sys.hw
+                    trace = self.sys.trace
+                    self.debugger.break_in_runtime_stage("JOB_HEAD")
 
                 # Mark its head arrivale time if not set
                 if job_w.timestamp_at_head is None:
@@ -240,6 +338,19 @@ class Engine(SimObject):
                     self.job_waiting.popleft()
                     job_w.begin(self.log, self.sys, self.timestamp_now)
                     self.job_running.append(job_w)  # Use append here, as ETA are None for new jobs
+
+                    # DEBUG: BREAK_AT_JOB_DISPATCHED
+                    if self.debugger.BREAK_IN_RUNTIME_STAGE and job_w.BREAK_AT_JOB_DISPATCHED:
+                        debug = self.debugger
+                        engine = self
+                        timestamp_now = self.timestamp_now
+                        job = job_w
+                        job_waiting = self.job_waiting
+                        job_running = self.job_running
+                        hw = self.sys.hw
+                        trace = self.sys.trace
+                        self.debugger.break_in_runtime_stage("JOB_DISPATCHED")
+
                 else:
                     # Head-of-the-line blocking w/ no running job now
                     if len(self.job_running) == 0:
@@ -310,8 +421,31 @@ class Engine(SimObject):
         return
 
     def _log_abort(self, args: dict[str, Any] | None = None) -> None:
+        # Central choke point for *all* aborts — engine-internal sites,
+        # scheduler-driven `sys.abort(...)`, job assertion failures,
+        # mutation invariant breaks. After logging the reason and before
+        # `signal_abort=True` tears the run down, fire `break_on_abort`
+        # so the agent can inspect `abort_args` and the surrounding
+        # runtime state (job queues, hardware, trace) while it's still
+        # intact. Any future caller of `_log_abort` is covered
+        # automatically — no per-site wiring needed.
         args = args if args is not None else {}
         self.log.record(Log.engine(self.id, "SIMULATION_ABORT", self.timestamp_now, args))
+        if self.debugger.BREAK_ON_ABORT:
+            debug = self.debugger
+            engine = self
+            abort_args = args
+            timestamp_now = self.timestamp_now
+            job_waiting = self.job_waiting
+            job_running = self.job_running
+            hw = self.sys.hw
+            trace = self.sys.trace
+            # Snapshot the full call chain so the agent can inspect the
+            # actual decision-making frame (Scheduler, assertion, etc.),
+            # not just this `_log_abort` frame. abort_stack[0] is this
+            # function; abort_stack[1] is its direct caller, and so on.
+            abort_stack = inspect.stack()
+            self.debugger.break_on_abort()
         return
 
     def log_counters(self) -> dict[str, Any] | None:

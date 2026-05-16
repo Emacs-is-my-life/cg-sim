@@ -32,6 +32,13 @@ class BaseJob(ABC):
 
         self.timestamp_ETA: float = float("inf")         # Simulation time, when job is expected to end
 
+        # Debugging
+        self.BREAK_AT_JOB_SUBMITTED: bool = False
+        self.BREAK_AT_JOB_HEAD: bool = False
+        self.BREAK_AT_JOB_DISPATCHED: bool = False
+        self.BREAK_AT_JOB_RETIRED: bool = False
+        return
+
 
     def __lt__(self, other: "BaseJob") -> bool:
         my_ETA = self.timestamp_ETA if self.timestamp_ETA is not None else float("inf")

@@ -1,1 +1,12 @@
+anyio
+fastuuid
+hydra-core
+ipython
+mcp
+networkx
+numpy
+pygraphviz
+omegaconf
+orjson
 polars
+sortedcontainers

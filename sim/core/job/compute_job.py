@@ -29,6 +29,12 @@ class ComputeJob(BaseJob):
 
         self.input_regions: list[MemoryRegion] = []
         self.output_regions: list[MemoryRegion] = []
+
+        # Debugging flags
+        self.BREAK_AT_JOB_SUBMITTED = node.BREAK_AT_JOB_SUBMITTED
+        self.BREAK_AT_JOB_HEAD = node.BREAK_AT_JOB_HEAD
+        self.BREAK_AT_JOB_DISPATCHED = node.BREAK_AT_JOB_DISPATCHED
+        self.BREAK_AT_JOB_RETIRED = node.BREAK_AT_JOB_RETIRED
         return
 
     def is_runnable(self, sys: System) -> bool:
