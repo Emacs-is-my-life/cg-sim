@@ -544,27 +544,31 @@ def _solve_milp(
                 const_addons += size
             elif pt.gap_feasibility[k_in]:
                 # Dead zone of a feasible gap, alive iff NOT evicted:
-                # contribution = size · (1 − e_{t,k}). Under the
-                # conditional coupling (c_feasibility=True tids only),
-                # this equals size · c because e = 1 − c. We encode
-                # it as size · c uniformly — same row shape for every
-                # tid keeps HiGHS's matrix well-conditioned.
+                # contribution = size · (1 − e_{t,k}).
+                #
+                # For c_feasibility=True tids (under c+e=1 coupling),
+                # (1 − e) = c, so the contribution reduces to size · c.
+                # Encode as a positive coefficient on c_var — preserves
+                # the legacy row shape for solver well-conditioning.
                 #
                 # For c_feasibility=False tids (c pinned to 1, no
-                # coupling), this still says "always alive in dead
-                # zone" (size · 1). Those tids retain their initial
-                # legacy residency pattern even when their e_var is
-                # free — picking e=1 would emit an evict at emit
-                # time, but the peak constraint doesn't yet model
-                # the corresponding VRAM savings. Lifting this
-                # encoding for forced-cold tids (the "hybrid c=1,
-                # e=1" pattern) is a future LP refinement; the
-                # straightforward `size · (1 − e)` rewrite triggers
-                # numerical issues in HiGHS at tight caps (sd3med 8g
-                # and llama8b 12g both regress badly).
-                var_coefs[c_var_idx[tid]] = (
-                    var_coefs.get(c_var_idx[tid], 0.0) + size
-                )
+                # coupling), encode as `const += size` plus `−size`
+                # on the e_var. This is the encoding that lets the
+                # LP actually observe the VRAM savings from picking
+                # e=1 mid-run (the hybrid pattern).
+                if pt.c_feasibility:
+                    var_coefs[c_var_idx[tid]] = (
+                        var_coefs.get(c_var_idx[tid], 0.0) + size
+                    )
+                else:
+                    e_col = e_var_idx.get((tid, k_in))
+                    if e_col is not None:
+                        const_addons += size
+                        var_coefs[e_col] = (
+                            var_coefs.get(e_col, 0.0) - size
+                        )
+                    else:
+                        const_addons += size
             else:
                 # Infeasible gap — no evict can fit, tensor stays.
                 const_addons += size
@@ -1025,7 +1029,7 @@ def solve_neutral(
     peak_target_bytes: int | None = None,
     safety_margin_frac: float = 0.07,
     max_peak_samples: int = 256,
-    time_limit_s: float | None = 120.0,
+    time_limit_s: float | None = 240.0,
     lp_relaxation: bool = False,
     audit: bool = False,
     sidecars: Any = None,                 # accepted but ignored
