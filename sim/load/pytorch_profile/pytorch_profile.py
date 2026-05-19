@@ -134,6 +134,20 @@ class PytorchProfile(TraceLoader):
             else duration_ns / 1_000
         )
 
+        module_path = row.get("module_path") or None
+        module_class = row.get("module_class") or None
+        module_info = (
+            {
+                "module_path": module_path,
+                "module_class": module_class,
+                "module_size_bytes": parse_int(row.get("module_size_bytes")),
+                "module_has_parameters": parse_int(row.get("module_has_parameters")),
+                "module_has_buffers": parse_int(row.get("module_has_buffers")),
+            }
+            if (module_path or module_class)
+            else None
+        )
+
         args = {
             "step": int(row.get("step") or 0),
             "profile_node_id": profile_node_id,
@@ -155,6 +169,7 @@ class PytorchProfile(TraceLoader):
             "kernel_file": row.get("kernel_file") or None,
             "compiled_graph_id": parse_int(row.get("compiled_graph_id")),
             "compiled_launch_id": parse_int(row.get("compiled_launch_id")),
+            "module": module_info,
         }
         name = row.get("node_name") or profile_node_id
         return Node(node_id, name, compute_time_micros, args)

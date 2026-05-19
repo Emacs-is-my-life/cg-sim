@@ -9,3 +9,4 @@ omegaconf
 orjson
 polars
 sortedcontainers
+pygraphviz
