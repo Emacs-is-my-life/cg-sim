@@ -5,7 +5,6 @@ ipython
 mcp
 networkx
 numpy
-pygraphviz
 omegaconf
 orjson
 polars

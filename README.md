@@ -212,6 +212,86 @@ Flags persist across `continue_simulation` calls, so disarm them
 (`target.BREAK_AT_JOB_RETIRED = False`) once you're done if you want the run
 to finish without stopping again.
 
+### Per-Node execution hooks (hook_pre_run / hook_post_run)
+Two optional callables on every `Node` let user code run *around* that
+node's runtime execution, without editing the engine or the scheduler:
+
+- `node.hook_pre_run: Callable[[System], None] | None` — invoked just
+  *before* the node's ComputeJob calls `begin(...)`. Mutations made
+  here (tensor sizes, hardware state, trace bookkeeping) are visible
+  to `begin()` itself, so they can affect the *current* node's
+  compute/transfer ETA estimate.
+- `node.hook_post_run: Callable[[System], None] | None` — invoked just
+  *after* the node's ComputeJob retires, *before* `BREAK_AT_JOB_RETIRED`
+  parks the run and before the terminal-node check. At that breakpoint
+  the observer therefore sees post-hook mutations already applied —
+  symmetric with `BREAK_AT_JOB_DISPATCHED`, which sees the pre-hook
+  mutations. Mutations here propagate to downstream nodes, but the
+  just-retired job's recorded duration is already final.
+
+Both receive a single argument — the `System` object (same as
+`engine.sys`) — which exposes `sys.trace` (`node_map`, `tensor_map`)
+and `sys.hw` (`dict[str, BaseHardware]`). The engine, debugger, and
+triggering job are intentionally **not** passed: hooks are meant to
+manipulate workload/hardware state, not framework internals.
+
+Only `ComputeJob`s trigger hooks; `TransferJob`s do not. When unset
+(`None`), the cost is one null-check per ComputeJob dispatch/retire.
+
+**Intended uses.** Trace/workload manipulation at simulation time —
+e.g., dynamic weight sparsity (shrink an FFN tensor a few layers
+ahead), runtime quantization changes (mutate transfer cost
+mid-execution), KV-cache eviction simulation, fault injection.
+
+**Attaching from an MCP session.** Hooks are just attributes; set them
+via `execute(...)` at any breakpoint where the target Node is
+reachable. Closure-capture anything else you need (e.g. `debug` for
+breadcrumb logging) — only `sys` is passed at fire time:
+```python
+# At break_after_compile_stage:
+execute("""
+ffn_tid   = <tensor_id of layer-9 FFN weight>
+trigger   = trace.node_map[<layer-5 node_id>]
+
+def shrink_layer9_ffn(sys, _dbg=debug):
+    t = sys.trace.tensor_map[ffn_tid]
+    _dbg.record({"hook": "shrink", "tid": ffn_tid,
+                 "old_pages": t.num_pages, "new_pages": t.num_pages // 2})
+    t.num_pages //= 2
+
+trigger.hook_post_run = shrink_layer9_ffn
+""")
+continue_simulation
+```
+Hooks persist across `continue_simulation` until you clear them
+(`trigger.hook_post_run = None`) or `restart_simulation` rebuilds the
+Trace.
+
+**Scheduler-owned hooks for state-coupled mutations.** Schedulers
+commit layout decisions at compile/layout stage (slot sizes, page
+indices, prefetch plans). An *externally-attached* hook that mutates
+`tensor.num_pages` mid-run does **not** re-derive any of that —
+FlexInfer still reserves the original slot, and the resulting stall
+numbers will be subtly wrong rather than visibly broken. For
+state-coupled experiments, attach hooks from inside a custom
+scheduler's `__init__` or `compile()` so the *same* scheduler that
+mutates state also reads it back in its `runtime()` callback. The
+engine-level mechanism is identical; only the attach site changes.
+
+**Pitfalls.**
+- **Exceptions propagate.** A buggy hook is not caught; with
+  `BREAK_ON_EXCEPTION` on (default for MCP), the run lands at
+  `break_on_exception[<Type>]` with `exception_origin` pointing to the
+  hook line. Fail-loud, not silent.
+- **No `TransferJob` variant** — intentional. The two natural
+  surrogates: producer's `hook_post_run` fires the instant the output
+  tensor exists on its source device (*before* any transfer); the
+  consumer's `hook_pre_run` fires after every required input transfer
+  has completed (a ComputeJob isn't runnable until they have).
+- **No auto-logging.** Capture `debug` by closure at attach time and
+  call `debug.record(...)` from inside the hook if you want a
+  breadcrumb in the log file.
+
 ### Abort breakpoint (BREAK_ON_ABORT, default On for MCP)
 Generic soft-failure safety net. **Every** abort path in the simulator
 funnels through `Engine._log_abort(args)`:

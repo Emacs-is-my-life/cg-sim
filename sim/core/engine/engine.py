@@ -282,6 +282,10 @@ class Engine(SimObject):
             # Inspect retired jobs
             retired_jobs = self._runtime_forward()
             for job in retired_jobs:
+                # Node: post-run hook
+                if isinstance(job, ComputeJob) and job.node.hook_post_run:
+                    job.node.hook_post_run(self.sys)
+
                 # DEBUG: BREAK_AT_JOB_RETIRED
                 if self.debugger.BREAK_IN_RUNTIME_STAGE and job.BREAK_AT_JOB_RETIRED:
                     debug = self.debugger
@@ -335,6 +339,11 @@ class Engine(SimObject):
 
                 # Start runnable jobs
                 if job_w.is_runnable(self.sys):
+                    # Node: pre-run hook
+                    if isinstance(job_w, ComputeJob) and job_w.node.hook_pre_run:
+                        job_w.node.hook_pre_run(self.sys)
+
+                    # Job begins execution
                     self.job_waiting.popleft()
                     job_w.begin(self.log, self.sys, self.timestamp_now)
                     self.job_running.append(job_w)  # Use append here, as ETA are None for new jobs
@@ -350,7 +359,6 @@ class Engine(SimObject):
                         hw = self.sys.hw
                         trace = self.sys.trace
                         self.debugger.break_in_runtime_stage("JOB_DISPATCHED")
-
                 else:
                     # Head-of-the-line blocking w/ no running job now
                     if len(self.job_running) == 0:
