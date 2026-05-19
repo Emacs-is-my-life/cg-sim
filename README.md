@@ -31,11 +31,25 @@ $ claude mcp add cg-sim-mcp -- python main_agent.py
 ```
 
 ## Run cg-sim (For Human)
+Simulator configs live in `examples/run/`; the heavy trace files they
+consume live in `examples/trace/`. Each config references its trace
+bundle by a relative path (`../trace/<trace_dir>/...`), so the two
+directories travel together but can be swapped independently.
+
 ```bash
 # python main.py -i <path-to-input.yaml>
-$ python main.py -i examples/llama3-flexinfer/input.yaml           # Normal run
-$ python main.py -i examples/llama3-flexinfer/input.yaml +debug=on # Debugging mode
+$ python main.py -i examples/run/llamacpp_llama-3-8B_flexinfer.yaml           # Normal run
+$ python main.py -i examples/run/llamacpp_llama-3-8B_flexinfer.yaml +debug=on # Debugging mode
 ```
+
+Currently shipped configs under `examples/run/`:
+- `llamacpp_llama-3-8B_example-cpu.yaml` — llama.cpp CPU trace, `ExampleCPU` scheduler
+- `llamacpp_llama-3-8B_vanilla.yaml` — llama.cpp CPU trace, `Vanilla` scheduler
+- `llamacpp_llama-3-8B_flexinfer.yaml` — llama.cpp CPU trace, `FlexInfer` scheduler
+- `pytorch_eager_llama-3-8B_vanilla.yaml` — PyTorch eager GPU trace (Llama-3 8B), `DeviceAwareVanillaAsync`
+- `pytorch_eager_sdxl-turbo_vanilla.yaml` — PyTorch eager GPU trace (SDXL-turbo), `DeviceAwareVanillaAsync`
+- `pytorch_lazy_llama-3-8B_vanilla.yaml` — PyTorch lazy (Inductor) GPU trace (Llama-3 8B), `DeviceAwareVanillaAsync`
+- `pytorch_lazy_sdxl-turbo_vanilla.yaml` — PyTorch lazy (Inductor) GPU trace (SDXL-turbo), `DeviceAwareVanillaAsync`
 
 ### Overriding input.yaml config from the command line
 `main.py` parses extra positional args with [Hydra](https://hydra.cc/)'s override
@@ -44,11 +58,11 @@ Dotted paths address nested keys; integer indices address list elements.
 
 ```bash
 # Override a scalar
-$ python main.py -i examples/llama3-flexinfer/input.yaml \
+$ python main.py -i examples/run/llamacpp_llama-3-8B_flexinfer.yaml \
       scheduler.args.prefetch_window=8
 
 # Override a list element by index (hardware.memory is a list)
-$ python main.py -i examples/llama3-flexinfer/input.yaml \
+$ python main.py -i examples/run/llamacpp_llama-3-8B_flexinfer.yaml \
       hardware.memory.0.args.memory_size_KB=10485760
 ```
 
@@ -109,7 +123,7 @@ $ claude mcp add cg-sim-mcp -- python main_agent.py
 
 # Alternative — pin a default config; the agent can still switch later.
 $ claude mcp add cg-sim-mcp -- \
-      python main_agent.py -i examples/llama3-flexinfer/input.yaml
+      python main_agent.py -i examples/run/llamacpp_llama-3-8B_flexinfer.yaml
 ```
 `-i` is optional. The recommended form omits it, so the same MCP registration
 serves every simulator config the agent might want — the first
@@ -163,7 +177,7 @@ The server exposes eight tools:
 
 ### Typical session
 0. (Only if the server was registered without `-i`) `restart_simulation(
-   input_path="examples/.../input.yaml", overrides=[...])` to build the
+   input_path="examples/run/<config>.yaml", overrides=[...])` to build the
    first Simulator. With `-i`, this is unnecessary on the first run.
 1. `list_breakpoints` → see available flags.
 2. `toggle_breakpoint("BREAK_BEFORE_COMPILE_STAGE")` → enable the ones you want.
@@ -462,7 +476,7 @@ restart_simulation(overrides=["hardware.memory.0.args.memory_size_KB=10485760"])
 
 # Combine multiple overrides; combine with a new input YAML:
 restart_simulation(
-    input_path="examples/llama3-vanilla/input.yaml",
+    input_path="examples/run/llamacpp_llama-3-8B_vanilla.yaml",
     overrides=["+debug=on", "logger.args.log_level=3"],
 )
 ```
@@ -654,7 +668,7 @@ or change `result_path` in the YAML between runs.
 The two reference implementations are `Vanilla` (no offload) and
 `FlexInfer` (memory-saving). Switch input YAMLs mid-session:
 ```
-restart_simulation(input_path="examples/llama3-vanilla/input.yaml")
+restart_simulation(input_path="examples/run/llamacpp_llama-3-8B_vanilla.yaml")
 ```
 Then re-run with the same breakpoints to compare. `debug.record(...)`
 breadcrumbs end up in each run's own log file.
@@ -785,7 +799,22 @@ Implement your own scheduler logic in `cg-sim/sched/<scheduler-name>/`.
 
 ## Others
 - `docs/`: More detailed documentation
-- `examples/`: Example input
+- `examples/`: Example inputs, split into two sibling subdirectories
+  so configs stay light while bulky traces can be swapped or omitted
+  independently:
+  - `examples/run/`: Simulator config YAMLs (one per
+    framework × workload × scheduler combo). Each YAML's trace
+    fields use `../trace/<trace_dir>/...` relative paths, so the
+    pair is portable as long as `run/` and `trace/` remain siblings.
+    Invoke with `python main.py -i examples/run/<config>.yaml`.
+  - `examples/trace/`: Heavy trace bundles consumed by configs in
+    `examples/run/`. One subdirectory per workload trace (e.g.
+    `llamacpp_CPU_llama-3-8B-Q8/`,
+    `pytorch_eager_GPU-llama-3-8B/llama_bundle/`,
+    `pytorch_lazy_GPU-sdxl-turbo/llama_bundle/`). PyTorch bundles'
+    `manifest.json` references its own siblings (`runtime_*.csv`,
+    `step_*_compute_graph.dot`) by bare filenames — they resolve
+    relative to the manifest, so the bundle directory is self-contained.
 - `scripts/`: Helper scripts, organized by purpose:
   - `scripts/sim_run/`: Bash drivers that launch `main.py` under various
     configs (e.g. `flexinfer.sh` sweeps memory sizes).

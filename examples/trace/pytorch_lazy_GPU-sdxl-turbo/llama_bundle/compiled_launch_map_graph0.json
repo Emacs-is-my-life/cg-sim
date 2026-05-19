@@ -1,0 +1,3161 @@
+{
+  "graph_id": 0,
+  "launches": [
+    {
+      "compiled_launch_id": 0,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_embedding_native_layer_norm_0",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 1,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.0",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.0.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.0.self_attn.q_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 2,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.0",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.0.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.0.self_attn.k_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 3,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.0",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.0.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.0.self_attn.v_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 4,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused__scaled_dot_product_efficient_attention__to_copy_add_arange_constant_pad_nd_expand_full_lt_masked_fill_slice_transpose_unsqueeze_view_1",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 5,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelAllocLine",
+      "kernel_name": "torch.ops.aten._scaled_dot_product_efficient_attention.default",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 6,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.0",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.0.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.0.self_attn.out_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 7,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_2",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.0",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 8,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.0",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.0.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.0.mlp.fc1",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 9,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused_mul_sigmoid_view_3",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.0",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.0.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.0.mlp.activation_fn",
+          "transformers.activations.QuickGELUActivation"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 10,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.0",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.0.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.0.mlp.fc2",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 11,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_4",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 12,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.1",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.1.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.1.self_attn.q_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 13,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.1",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.1.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.1.self_attn.k_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 14,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.1",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.1.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.1.self_attn.v_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 15,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused__scaled_dot_product_efficient_attention__to_copy_add_arange_constant_pad_nd_expand_full_lt_masked_fill_slice_transpose_unsqueeze_view_1",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 16,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelAllocLine",
+      "kernel_name": "torch.ops.aten._scaled_dot_product_efficient_attention.default",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 17,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.1",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.1.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.1.self_attn.out_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 18,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_2",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.1",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 19,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.1",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.1.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.1.mlp.fc1",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 20,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused_mul_sigmoid_view_3",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.1",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.1.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.1.mlp.activation_fn",
+          "transformers.activations.QuickGELUActivation"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 21,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.1",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.1.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.1.mlp.fc2",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 22,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_4",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 23,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.2",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.2.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.2.self_attn.q_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 24,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.2",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.2.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.2.self_attn.k_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 25,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.2",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.2.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.2.self_attn.v_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 26,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused__scaled_dot_product_efficient_attention__to_copy_add_arange_constant_pad_nd_expand_full_lt_masked_fill_slice_transpose_unsqueeze_view_1",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 27,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelAllocLine",
+      "kernel_name": "torch.ops.aten._scaled_dot_product_efficient_attention.default",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 28,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.2",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.2.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.2.self_attn.out_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 29,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_2",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.2",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 30,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.2",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.2.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.2.mlp.fc1",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 31,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused_mul_sigmoid_view_3",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.2",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.2.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.2.mlp.activation_fn",
+          "transformers.activations.QuickGELUActivation"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 32,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.2",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.2.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.2.mlp.fc2",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 33,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_4",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 34,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.3",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.3.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.3.self_attn.q_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 35,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.3",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.3.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.3.self_attn.k_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 36,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.3",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.3.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.3.self_attn.v_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 37,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused__scaled_dot_product_efficient_attention__to_copy_add_arange_constant_pad_nd_expand_full_lt_masked_fill_slice_transpose_unsqueeze_view_1",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 38,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelAllocLine",
+      "kernel_name": "torch.ops.aten._scaled_dot_product_efficient_attention.default",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 39,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.3",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.3.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.3.self_attn.out_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 40,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_2",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.3",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 41,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.3",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.3.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.3.mlp.fc1",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 42,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused_mul_sigmoid_view_3",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.3",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.3.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.3.mlp.activation_fn",
+          "transformers.activations.QuickGELUActivation"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 43,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.3",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.3.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.3.mlp.fc2",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 44,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_4",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 45,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.4",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.4.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.4.self_attn.q_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 46,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.4",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.4.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.4.self_attn.k_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 47,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.4",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.4.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.4.self_attn.v_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 48,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused__scaled_dot_product_efficient_attention__to_copy_add_arange_constant_pad_nd_expand_full_lt_masked_fill_slice_transpose_unsqueeze_view_1",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 49,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelAllocLine",
+      "kernel_name": "torch.ops.aten._scaled_dot_product_efficient_attention.default",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 50,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.4",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.4.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.4.self_attn.out_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 51,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_2",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.4",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 52,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.4",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.4.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.4.mlp.fc1",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 53,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused_mul_sigmoid_view_3",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.4",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.4.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.4.mlp.activation_fn",
+          "transformers.activations.QuickGELUActivation"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 54,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.4",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.4.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.4.mlp.fc2",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 55,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_4",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 56,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.5",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.5.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.5.self_attn.q_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 57,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.5",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.5.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.5.self_attn.k_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 58,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.5",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.5.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.5.self_attn.v_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 59,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused__scaled_dot_product_efficient_attention__to_copy_add_arange_constant_pad_nd_expand_full_lt_masked_fill_slice_transpose_unsqueeze_view_1",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 60,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelAllocLine",
+      "kernel_name": "torch.ops.aten._scaled_dot_product_efficient_attention.default",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 61,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.5",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.5.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.5.self_attn.out_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 62,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_2",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.5",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 63,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.5",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.5.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.5.mlp.fc1",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 64,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused_mul_sigmoid_view_3",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.5",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.5.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.5.mlp.activation_fn",
+          "transformers.activations.QuickGELUActivation"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 65,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.5",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.5.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.5.mlp.fc2",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 66,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_4",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 67,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.6",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.6.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.6.self_attn.q_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 68,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.6",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.6.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.6.self_attn.k_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 69,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.6",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.6.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.6.self_attn.v_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 70,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused__scaled_dot_product_efficient_attention__to_copy_add_arange_constant_pad_nd_expand_full_lt_masked_fill_slice_transpose_unsqueeze_view_1",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 71,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelAllocLine",
+      "kernel_name": "torch.ops.aten._scaled_dot_product_efficient_attention.default",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 72,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.6",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.6.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.6.self_attn.out_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 73,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_2",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.6",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 74,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.6",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.6.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.6.mlp.fc1",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 75,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused_mul_sigmoid_view_3",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.6",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.6.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.6.mlp.activation_fn",
+          "transformers.activations.QuickGELUActivation"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 76,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.6",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.6.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.6.mlp.fc2",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 77,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_4",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 78,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.7",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.7.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.7.self_attn.q_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 79,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.7",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.7.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.7.self_attn.k_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 80,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.7",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.7.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.7.self_attn.v_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 81,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused__scaled_dot_product_efficient_attention__to_copy_add_arange_constant_pad_nd_expand_full_lt_masked_fill_slice_transpose_unsqueeze_view_1",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 82,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelAllocLine",
+      "kernel_name": "torch.ops.aten._scaled_dot_product_efficient_attention.default",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 83,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.7",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.7.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.7.self_attn.out_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 84,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_2",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.7",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 85,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.7",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.7.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.7.mlp.fc1",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 86,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused_mul_sigmoid_view_3",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.7",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.7.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.7.mlp.activation_fn",
+          "transformers.activations.QuickGELUActivation"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 87,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.7",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.7.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.7.mlp.fc2",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 88,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_4",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 89,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.8",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.8.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.8.self_attn.q_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 90,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.8",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.8.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.8.self_attn.k_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 91,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.8",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.8.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.8.self_attn.v_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 92,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused__scaled_dot_product_efficient_attention__to_copy_add_arange_constant_pad_nd_expand_full_lt_masked_fill_slice_transpose_unsqueeze_view_1",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 93,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelAllocLine",
+      "kernel_name": "torch.ops.aten._scaled_dot_product_efficient_attention.default",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 94,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.8",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.8.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.8.self_attn.out_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 95,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_2",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.8",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 96,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.8",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.8.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.8.mlp.fc1",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 97,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused_mul_sigmoid_view_3",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.8",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.8.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.8.mlp.activation_fn",
+          "transformers.activations.QuickGELUActivation"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 98,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.8",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.8.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.8.mlp.fc2",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 99,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_4",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 100,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.9",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.9.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.9.self_attn.q_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 101,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.9",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.9.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.9.self_attn.k_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 102,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.9",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.9.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.9.self_attn.v_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 103,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused__scaled_dot_product_efficient_attention__to_copy_add_arange_constant_pad_nd_expand_full_lt_masked_fill_slice_transpose_unsqueeze_view_1",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 104,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelAllocLine",
+      "kernel_name": "torch.ops.aten._scaled_dot_product_efficient_attention.default",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 105,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.9",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.9.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.9.self_attn.out_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 106,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_2",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.9",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 107,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.9",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.9.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.9.mlp.fc1",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 108,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused_mul_sigmoid_view_3",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.9",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.9.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.9.mlp.activation_fn",
+          "transformers.activations.QuickGELUActivation"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 109,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.9",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.9.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.9.mlp.fc2",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 110,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_4",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 111,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.10",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.10.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.10.self_attn.q_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 112,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.10",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.10.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.10.self_attn.k_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 113,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.10",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.10.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.10.self_attn.v_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 114,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused__scaled_dot_product_efficient_attention__to_copy_add_arange_constant_pad_nd_expand_full_lt_masked_fill_slice_transpose_unsqueeze_view_1",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 115,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelAllocLine",
+      "kernel_name": "torch.ops.aten._scaled_dot_product_efficient_attention.default",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 116,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.10",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.10.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.10.self_attn.out_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 117,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_2",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.10",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 118,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.10",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.10.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.10.mlp.fc1",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 119,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused_mul_sigmoid_view_3",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.10",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.10.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.10.mlp.activation_fn",
+          "transformers.activations.QuickGELUActivation"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 120,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.10",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.10.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.10.mlp.fc2",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 121,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_4",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 122,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.11",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.11.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.11.self_attn.q_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 123,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.11",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.11.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.11.self_attn.k_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 124,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.11",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.11.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.11.self_attn.v_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 125,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused__scaled_dot_product_efficient_attention__to_copy_add_arange_constant_pad_nd_expand_full_lt_masked_fill_slice_transpose_unsqueeze_view_1",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 126,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelAllocLine",
+      "kernel_name": "torch.ops.aten._scaled_dot_product_efficient_attention.default",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 127,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.11",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.11.self_attn",
+          "transformers.models.clip.modeling_clip.CLIPSdpaAttention"
+        ],
+        [
+          "text_model.encoder.layers.11.self_attn.out_proj",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 128,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_2",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.11",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 129,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.11",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.11.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.11.mlp.fc1",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 130,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused_mul_sigmoid_view_3",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.11",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.11.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.11.mlp.activation_fn",
+          "transformers.activations.QuickGELUActivation"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 131,
+      "graph_id": 0,
+      "launch_kind": "ExternKernelOutLine",
+      "kernel_name": "extern_kernels.addmm",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ],
+        [
+          "text_model.encoder",
+          "transformers.models.clip.modeling_clip.CLIPEncoder"
+        ],
+        [
+          "text_model.encoder.layers.11",
+          "transformers.models.clip.modeling_clip.CLIPEncoderLayer"
+        ],
+        [
+          "text_model.encoder.layers.11.mlp",
+          "transformers.models.clip.modeling_clip.CLIPMLP"
+        ],
+        [
+          "text_model.encoder.layers.11.mlp.fc2",
+          "torch.nn.modules.linear.Linear"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 132,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused_add_native_layer_norm_view_4",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 133,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_per_fused__to_copy_argmax_5",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    },
+    {
+      "compiled_launch_id": 134,
+      "graph_id": 0,
+      "launch_kind": "KernelCallLine",
+      "kernel_name": "triton_poi_fused_arange_index_6",
+      "original_fxnode_name": "",
+      "nn_module_stack": [
+        [
+          "text_model",
+          "transformers.models.clip.modeling_clip.CLIPTextTransformer"
+        ]
+      ]
+    }
+  ],
+  "compilation_hash": "acaa9627d629eec8"
+}
