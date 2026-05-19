@@ -1,0 +1,2 @@
+examples/pytorch-lazy-sdxl-turbo/sdxl_turbo_gpu_inductor_trace.json filter=lfs diff=lfs merge=lfs -text
+examples/pytorch-lazy-llama-8B/llama_31_8b_gpu_inductor_trace.json filter=lfs diff=lfs merge=lfs -text
