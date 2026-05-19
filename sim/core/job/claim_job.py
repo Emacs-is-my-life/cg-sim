@@ -29,7 +29,11 @@ class ClaimJob(BaseJob):
 
         self.running_on.append(hw)
         self.tensor_id = tensor.id
-        self.num_pages = tensor.num_pages
+        if tensor.flag_sparse:
+            self.num_pages = tensor.num_pages_sparse
+        else:
+            self.num_pages = tensor.num_pages
+
         self.page_idx_start = page_idx_start
 
         self.region: DataRegion | None = None

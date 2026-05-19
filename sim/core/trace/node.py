@@ -3,6 +3,8 @@ from enum import Enum, IntFlag, auto
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from sim.core.system import System
     from .custom_dep import CustomDep
 
 
@@ -57,6 +59,11 @@ class Node:
         self.BREAK_AT_JOB_HEAD: bool = False
         self.BREAK_AT_JOB_DISPATCHED: bool = False
         self.BREAK_AT_JOB_RETIRED: bool = False
+
+        # Hooks for pre/post run arbitrary code execution.
+        # These hook function will be invokded from engine, at runtime stage
+        self.hook_pre_run: Callable[[System], None] | None = None
+        self.hook_post_run: Callable[[System], None] | None = None
         return
 
     def add_parent_node(self, node_id: int):
