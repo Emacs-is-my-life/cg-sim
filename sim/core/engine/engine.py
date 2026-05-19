@@ -9,7 +9,7 @@ import orjson
 
 from sim.core.sim_object import SimObject
 from sim.core.log import Log, TrackID, Level
-from sim.core.trace import TerminalNode
+from sim.core.trace import TerminalNode, NodeStatus
 from sim.core.job import BaseJob, ComputeJob, TransferJob
 from sim.core.debug import Debugger
 from sim.hw.memory.common import BaseMemory
@@ -398,8 +398,15 @@ class Engine(SimObject):
 
     def _cleanup(self) -> None:
         """Write a report"""
+        node_all_done = True
+        for node in self.sys.trace.node_map.values():
+            if node.status != NodeStatus.DONE:
+                node_all_done = False
+                break
+
+        sim_succ = not self.signal_abort and node_all_done
         args = {
-            "simulation_success": str(not self.signal_abort),
+            "simulation_success": str(sim_succ),
             "simulation_time": self.timestamp_now,
             "hardware": {
                 "book": [],
@@ -439,6 +446,18 @@ class Engine(SimObject):
         # automatically — no per-site wiring needed.
         args = args if args is not None else {}
         self.log.record(Log.engine(self.id, "SIMULATION_ABORT", self.timestamp_now, args))
+        # Reentrancy guard: if we're already parked at a breakpoint, the
+        # caller must be the MCP server thread running `agent_execute(...)`
+        # — e.g. an `sys.claim(...)` from `execute(...)` whose assertion
+        # failed and routed through `sys.abort -> _log_abort`. Firing
+        # `break_on_abort` here would call `_continue_event.wait()` on the
+        # MCP thread while the engine thread is already parked on the same
+        # event, deadlocking both. The abort is still logged above, and
+        # the immediate caller (typically `sys.abort`) sets
+        # `signal_abort=True` next, so the run still tears down cleanly on
+        # the next `continue_simulation`.
+        if self.debugger._at_breakpoint:
+            return
         if self.debugger.BREAK_ON_ABORT:
             debug = self.debugger
             engine = self

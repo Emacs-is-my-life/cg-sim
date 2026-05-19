@@ -22,14 +22,18 @@ class ClaimJob(BaseJob):
     """
     Data Region claim job
     """
-    def __init__(self, hw: BaseMemory | BaseStorage, tensor: Tensor, page_idx_start: int = -1):
+    def __init__(self, hw: BaseMemory | BaseStorage, tensor: Tensor, page_idx_start: int = -1, num_pages_sparsity: int | None = None):
         work_total = 0                # Instant event
         super().__init__(work_total)
         self.work_rate = 1
 
         self.running_on.append(hw)
         self.tensor_id = tensor.id
-        self.num_pages = tensor.num_pages
+        self.num_pages_sparsity = num_pages_sparsity
+        if self.num_pages_sparsity:
+            self.num_pages = num_pages_sparsity
+        else:
+            self.num_pages = tensor.num_pages
         self.page_idx_start = page_idx_start
 
         self.region: DataRegion | None = None

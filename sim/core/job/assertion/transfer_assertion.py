@@ -21,11 +21,10 @@ def assertion(job: TransferJob, sys: System) -> bool:
     src0, dest0 = batch[0]
     src_hw = src0.hw
     dest_hw = dest0.hw
+
     for src_region, dest_region in batch:
         # 1. Check Src Regions
         if src_region.hw != src_hw:
-            print("Error 1")
-
             args = {
                 "from": sys.engine.name,
                 "error": "Job Pre-Execution Assertion Failure",
@@ -36,7 +35,6 @@ def assertion(job: TransferJob, sys: System) -> bool:
             return False
 
         if (not src_region.is_ready) or src_region.access_status == DataRegionAccess.BEING_WRITTEN:
-            print("Error 2")
             return False
 
         # 2. Check Dest Regions
@@ -48,11 +46,9 @@ def assertion(job: TransferJob, sys: System) -> bool:
                 "msg": "Batch in a TransferJob must be of 'One Hardware' -> 'Another Hardware'"
             }
             sys.abort(args)
-            print("Error 3")
             return False
 
         if dest_region.access_status != DataRegionAccess.IDLE:
-            print("Error 4")
             return False
 
         # 3. Check if both are intended for the same tensor
@@ -64,11 +60,19 @@ def assertion(job: TransferJob, sys: System) -> bool:
                 "msg": f"Src Tensor: {src_region.tensor_id}, Dest Tensor: {dest_region.tensor_id}"
             }
             sys.abort(args)
-            print("Error 5")
             return False
 
         # 4. Check src_size <= dest_size
-        if src_region.num_pages > dest_region.num_pages:
+        if dest_region.is_sparse_data:    # Skip check for sparse loading case
+            if min(src_region.num_pages, dest_region.num_pages) <= 0:
+                args = {
+                    "from": sys.engine.name,
+                    "error": "Job Pre-Execution Assertion Failure",
+                    "job_type": "TransferJob",
+                    "msg": f"0 pages data region is not allowed."
+                }
+            continue
+        elif src_region.num_pages > dest_region.num_pages:
             args = {
                 "from": sys.engine.name,
                 "error": "Job Pre-Execution Assertion Failure",
@@ -76,7 +80,6 @@ def assertion(job: TransferJob, sys: System) -> bool:
                 "msg": f"Src size: {src_region.num_pages} pages, Dest Tensor: {dest_region.num_pages} pages."
             }
             sys.abort(args)
-            print("Error 6")
             return False
 
     return True

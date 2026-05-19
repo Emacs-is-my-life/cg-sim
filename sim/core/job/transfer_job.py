@@ -25,8 +25,8 @@ class TransferJob(BaseJob):
             raise Exception("[Engine] batch size of TransferJob cannot be 0.")
 
         work_total = 0
-        for src_region, _ in batch:
-            work_total += 4 * src_region.num_pages    # KB
+        for src_region, dest_region in batch:
+            work_total += 4 * min(src_region.num_pages, dest_region.num_pages)    # KB
 
         super().__init__(work_total)
         self.work_rate = 1
