@@ -51,8 +51,8 @@ class System:
         self.engine.submit(job)
         return job.id
 
-    def claim(self, hw: BaseMemory | BaseStorage, tensor: Tensor, page_idx_start: int = -1, num_pages_sparsity: int | None = None) -> DataRegion | None:
-        job = ClaimJob(hw, tensor, page_idx_start, num_pages_sparsity)
+    def claim(self, hw: BaseMemory | BaseStorage, tensor: Tensor, page_idx_start: int = -1) -> DataRegion | None:
+        job = ClaimJob(hw, tensor, page_idx_start)
         if not claim_assertion(job, self):
             args = {
                 "from": self.engine.name,

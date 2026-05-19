@@ -9,9 +9,15 @@ if TYPE_CHECKING:
 
 def begin_mutation(job: ReleaseJob, sys: System) -> None:
     region = job.region
+
+    # Clear sparse flag
+    tensor = sys.trace.tensor_map[region.tensor_id]
+    if tensor.flag_sparse:
+        tensor.flag_sparse = False
+        tensor.num_pages_sparse = None
+
     hw = region.hw
     hw.space.release(region)
-
     return
 
 

@@ -23,10 +23,6 @@ def begin_mutation(job: ClaimJob, sys: System) -> None:
         sys.abort(args)
         return
 
-    # Sparsity mark
-    if job.num_pages_sparsity:
-        region.is_sparse_data = True
-
     job.region = region
     return
 

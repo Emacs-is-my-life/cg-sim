@@ -63,7 +63,8 @@ def assertion(job: TransferJob, sys: System) -> bool:
             return False
 
         # 4. Check src_size <= dest_size
-        if dest_region.is_sparse_data:    # Skip check for sparse loading case
+        tensor = sys.trace.tensor_map[src_region.tensor_id]
+        if tensor.flag_sparse:  # Ignore region size comparison for sparse loading case
             if min(src_region.num_pages, dest_region.num_pages) <= 0:
                 args = {
                     "from": sys.engine.name,
