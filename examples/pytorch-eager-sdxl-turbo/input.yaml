@@ -5,7 +5,6 @@ logger:
 trace:
   type: "PytorchProfile"
   args:
-    profile_dir: "examples/pytorch-eager-sdxl-turbo"
     bundle_manifest: "llama_bundle/manifest.json"
     skip_zero_byte_tensors: true
     zero_wait_nodes: true

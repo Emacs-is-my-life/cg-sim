@@ -35,7 +35,8 @@ class PytorchProfile(TraceLoader):
 
     def _bundle_paths(self) -> tuple[Path, dict[str, Any]]:
         input_dir = Path(self.args["input_path"]).parent
-        profile_dir = resolve_path(self.args.get("profile_dir", input_dir), input_dir)
+        profile_dir_arg = self.args.get("profile_dir")
+        profile_dir = resolve_path(profile_dir_arg, input_dir) if profile_dir_arg else input_dir
         manifest_path = resolve_path(
             self.args.get("bundle_manifest", "llama_bundle/manifest.json"),
             profile_dir,
