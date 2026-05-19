@@ -39,7 +39,7 @@ from typing import Any, TYPE_CHECKING
 
 from sim.core.job import BaseJob, ComputeJob, TransferJob
 from sim.core.log import Log
-from sim.core.trace import Node, NodeStatus, Tensor, TerminalNode, Trace
+from sim.core.trace import Node, NodeHW, NodeStatus, Tensor, TerminalNode, Trace
 from sim.hw.common import DataRegion, DataRegionAccess
 from sim.hw.compute.common import BaseCompute
 from sim.hw.memory.common import BaseMemory
@@ -190,11 +190,17 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         return self.memory_by_device["cpu"]
 
     def _compute_for_node(self, node: Node) -> BaseCompute:
+        # TerminalNode is synthetic (no profile row) and keeps the
+        # wildcard CPU|GPU|NPU default — pin it to CPU explicitly
+        # rather than letting the GPU bit win the test below.
         if isinstance(node, TerminalNode):
             return self.cpu_compute
 
-        device_type = str(node.args.get("device_type", "CPU")).upper()
-        if device_type in ("CUDA", "GPU"):
+        # NodeHW is the single source of truth for device kind, set by
+        # the loader from the profile row. A node with only the GPU bit
+        # set goes to CUDA compute; everything else (CPU-only, or NPU,
+        # or any wildcard combination) goes to CPU.
+        if node.hw == NodeHW.GPU:
             return self.cuda_compute
         return self.cpu_compute
 

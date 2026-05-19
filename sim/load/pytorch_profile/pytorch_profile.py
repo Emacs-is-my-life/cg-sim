@@ -7,7 +7,7 @@ from bisect import bisect_left
 from pathlib import Path
 from typing import Any
 
-from sim.core.trace import Node, Tensor, TerminalNode, Trace, TraceLoader
+from sim.core.trace import Node, NodeHW, Tensor, TerminalNode, Trace, TraceLoader
 from sim.core.trace.custom_dep import NodeDoneDep
 from sim.hw.storage.common import BaseStorage
 
@@ -172,7 +172,24 @@ class PytorchProfile(TraceLoader):
             "module": module_info,
         }
         name = row.get("node_name") or profile_node_id
-        return Node(node_id, name, compute_time_micros, args)
+        node = Node(node_id, name, compute_time_micros, args)
+        node.hw = self._node_hw_from_row(row)
+        return node
+
+    @staticmethod
+    def _node_hw_from_row(row: dict[str, str]) -> NodeHW:
+        # device_type is the authoritative per-row signal: "CUDA" for
+        # gpu_runtime events, "CPU" for cpu_leaf / submit / wait. Falls
+        # back to runtime_role for older bundles that omit device_type.
+        device_type = (row.get("device_type") or "").upper()
+        if device_type == "CUDA":
+            return NodeHW.GPU
+        if device_type == "CPU":
+            return NodeHW.CPU
+        runtime_role = row.get("runtime_role") or ""
+        if runtime_role == "gpu_runtime":
+            return NodeHW.GPU
+        return NodeHW.CPU
 
     @staticmethod
     def _add_control_edge(node_map: dict[int, Node], parent_id: int, child_id: int) -> None:
