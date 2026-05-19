@@ -154,6 +154,13 @@ class PytorchProfile(TraceLoader):
             "kernel_file": row.get("kernel_file") or None,
             "compiled_graph_id": parse_int(row.get("compiled_graph_id")),
             "compiled_launch_id": parse_int(row.get("compiled_launch_id")),
+            "module_path": (row.get("module_path") or None),
+            "module_class": (row.get("module_class") or None),
+            "module_size_bytes": parse_int(row.get("module_size_bytes")),
+            "module_has_parameters": parse_int(row.get("module_has_parameters")),
+            "module_parameters_have_data": parse_int(row.get("module_parameters_have_data")),
+            "module_has_buffers": parse_int(row.get("module_has_buffers")),
+            "module_buffers_have_data": parse_int(row.get("module_buffers_have_data")),
         }
         name = row.get("node_name") or profile_node_id
         return Node(node_id, name, compute_time_micros, args)
@@ -975,6 +982,31 @@ class PytorchProfile(TraceLoader):
             inject_schedule_into_trace(
                 trace, str(inject_path_resolved),
                 bundle_dir=bundle_dir,
+                disable_evict=bool(self.args.get("inject_disable_evict", False)),
+            )
+
+        # Optional eager-mode injection: schedule keyed by raw cgsim
+        # node_id / tid (no compile sidecars). Used by hf_accelerate
+        # and any future eager-bundle scheduler.
+        eager_inject_path = self.args.get("inject_eager_schedule_path")
+        if eager_inject_path:
+            eager_path_resolved = resolve_path(eager_inject_path, bundle_dir)
+            try:
+                from graph_modifiers.inject_schedule import (
+                    inject_eager_schedule_into_trace,
+                )
+            except ImportError as e:
+                raise Exception(
+                    "[PytorchProfile] inject_eager_schedule_path requires "
+                    "graph_modifiers.inject_schedule to be importable. "
+                    f"Underlying: {e}"
+                )
+            print(
+                f"[PytorchProfile] injecting eager schedule from "
+                f"{eager_path_resolved}", flush=True,
+            )
+            inject_eager_schedule_into_trace(
+                trace, str(eager_path_resolved),
                 disable_evict=bool(self.args.get("inject_disable_evict", False)),
             )
 
