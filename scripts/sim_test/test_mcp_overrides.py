@@ -28,9 +28,9 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-FLEXINFER_YAML = REPO_ROOT / "examples" / "llama3-flexinfer" / "input.yaml"
-VANILLA_YAML = REPO_ROOT / "examples" / "llama3-vanilla" / "input.yaml"
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+FLEXINFER_YAML = REPO_ROOT / "examples" / "run" / "llamacpp_llama-3-8B_flexinfer.yaml"
+VANILLA_YAML = REPO_ROOT / "examples" / "run" / "llamacpp_llama-3-8B_vanilla.yaml"
 
 
 def _unwrap(result) -> dict:
@@ -138,7 +138,7 @@ async def main() -> int:
                    f"overrides cleared in response (got {r.get('overrides')!r})")
             await _expect_at_breakpoint(session, "Test 4")
             pw = await _exec_int(session, "engine.sched.prefetch_window")
-            # YAML default is 5 (examples/llama3-flexinfer/input.yaml).
+            # YAML default is 5 (examples/run/llamacpp_llama-3-8B_flexinfer.yaml).
             _check(pw == 5, f"prefetch_window falls back to YAML default 5 (got {pw})")
             await _drive_to_finish(session)
 

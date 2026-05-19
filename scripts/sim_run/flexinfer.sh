@@ -1,6 +1,6 @@
 #!/bin/bash
 
-INPUT_CFG="examples/llama3-flexinfer/input.yaml"
+INPUT_CFG="examples/run/llamacpp_llama-3-8B_flexinfer.yaml"
 mkdir -p tmp/results
 
 START_MB=2048

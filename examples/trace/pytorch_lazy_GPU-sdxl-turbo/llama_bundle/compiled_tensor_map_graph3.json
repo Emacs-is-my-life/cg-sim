@@ -1,0 +1,1977 @@
+{
+  "graph_id": 3,
+  "tensors": [
+    {
+      "compiled_tensor_id": 0,
+      "graph_input_name": "arg0_1",
+      "graph_input_idx": 0,
+      "dtype": "torch.float32",
+      "shape": [
+        "4",
+        "4",
+        "1",
+        "1"
+      ],
+      "storage_group_id": 125439331569792,
+      "used_by_launch_ids": [
+        1
+      ]
+    },
+    {
+      "compiled_tensor_id": 1,
+      "graph_input_name": "arg1_1",
+      "graph_input_idx": 1,
+      "dtype": "torch.float32",
+      "shape": [
+        "4"
+      ],
+      "storage_group_id": 125439339381632,
+      "used_by_launch_ids": [
+        2
+      ]
+    },
+    {
+      "compiled_tensor_id": 2,
+      "graph_input_name": "arg3_1",
+      "graph_input_idx": 3,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "4",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439339394048,
+      "used_by_launch_ids": [
+        3
+      ]
+    },
+    {
+      "compiled_tensor_id": 3,
+      "graph_input_name": "arg4_1",
+      "graph_input_idx": 4,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439473916864,
+      "used_by_launch_ids": [
+        5,
+        8,
+        17,
+        20,
+        29
+      ]
+    },
+    {
+      "compiled_tensor_id": 4,
+      "graph_input_name": "arg5_1",
+      "graph_input_idx": 5,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439339383808,
+      "used_by_launch_ids": [
+        8
+      ]
+    },
+    {
+      "compiled_tensor_id": 5,
+      "graph_input_name": "arg6_1",
+      "graph_input_idx": 6,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439339393536,
+      "used_by_launch_ids": [
+        8
+      ]
+    },
+    {
+      "compiled_tensor_id": 6,
+      "graph_input_name": "arg7_1",
+      "graph_input_idx": 7,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439339381696,
+      "used_by_launch_ids": [
+        9
+      ]
+    },
+    {
+      "compiled_tensor_id": 7,
+      "graph_input_name": "arg8_1",
+      "graph_input_idx": 8,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439319247808,
+      "used_by_launch_ids": [
+        11,
+        14
+      ]
+    },
+    {
+      "compiled_tensor_id": 8,
+      "graph_input_name": "arg9_1",
+      "graph_input_idx": 9,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439319244992,
+      "used_by_launch_ids": [
+        14
+      ]
+    },
+    {
+      "compiled_tensor_id": 9,
+      "graph_input_name": "arg10_1",
+      "graph_input_idx": 10,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439319248832,
+      "used_by_launch_ids": [
+        14
+      ]
+    },
+    {
+      "compiled_tensor_id": 10,
+      "graph_input_name": "arg11_1",
+      "graph_input_idx": 11,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439319249984,
+      "used_by_launch_ids": [
+        15
+      ]
+    },
+    {
+      "compiled_tensor_id": 11,
+      "graph_input_name": "arg12_1",
+      "graph_input_idx": 12,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439319248128,
+      "used_by_launch_ids": [
+        17,
+        20,
+        29
+      ]
+    },
+    {
+      "compiled_tensor_id": 12,
+      "graph_input_name": "arg13_1",
+      "graph_input_idx": 13,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439319252224,
+      "used_by_launch_ids": [
+        20
+      ]
+    },
+    {
+      "compiled_tensor_id": 13,
+      "graph_input_name": "arg14_1",
+      "graph_input_idx": 14,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439339331648,
+      "used_by_launch_ids": [
+        20
+      ]
+    },
+    {
+      "compiled_tensor_id": 14,
+      "graph_input_name": "arg15_1",
+      "graph_input_idx": 15,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512"
+      ],
+      "storage_group_id": 125439339342912,
+      "used_by_launch_ids": [
+        21
+      ]
+    },
+    {
+      "compiled_tensor_id": 15,
+      "graph_input_name": "arg16_1",
+      "graph_input_idx": 16,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439331438592,
+      "used_by_launch_ids": [
+        24
+      ]
+    },
+    {
+      "compiled_tensor_id": 16,
+      "graph_input_name": "arg17_1",
+      "graph_input_idx": 17,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512"
+      ],
+      "storage_group_id": 125439339338176,
+      "used_by_launch_ids": [
+        22
+      ]
+    },
+    {
+      "compiled_tensor_id": 17,
+      "graph_input_name": "arg18_1",
+      "graph_input_idx": 18,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439339345024,
+      "used_by_launch_ids": [
+        25
+      ]
+    },
+    {
+      "compiled_tensor_id": 18,
+      "graph_input_name": "arg19_1",
+      "graph_input_idx": 19,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512"
+      ],
+      "storage_group_id": 125439331446400,
+      "used_by_launch_ids": [
+        23
+      ]
+    },
+    {
+      "compiled_tensor_id": 19,
+      "graph_input_name": "arg20_1",
+      "graph_input_idx": 20,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439339333120,
+      "used_by_launch_ids": [
+        26
+      ]
+    },
+    {
+      "compiled_tensor_id": 20,
+      "graph_input_name": "arg21_1",
+      "graph_input_idx": 21,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512"
+      ],
+      "storage_group_id": 125439339347072,
+      "used_by_launch_ids": [
+        28
+      ]
+    },
+    {
+      "compiled_tensor_id": 21,
+      "graph_input_name": "arg22_1",
+      "graph_input_idx": 22,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439339347712,
+      "used_by_launch_ids": [
+        29
+      ]
+    },
+    {
+      "compiled_tensor_id": 22,
+      "graph_input_name": "arg23_1",
+      "graph_input_idx": 23,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439339346944,
+      "used_by_launch_ids": [
+        33
+      ]
+    },
+    {
+      "compiled_tensor_id": 23,
+      "graph_input_name": "arg24_1",
+      "graph_input_idx": 24,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334953728,
+      "used_by_launch_ids": [
+        33
+      ]
+    },
+    {
+      "compiled_tensor_id": 24,
+      "graph_input_name": "arg25_1",
+      "graph_input_idx": 25,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439339341504,
+      "used_by_launch_ids": [
+        34
+      ]
+    },
+    {
+      "compiled_tensor_id": 25,
+      "graph_input_name": "arg26_1",
+      "graph_input_idx": 26,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334945152,
+      "used_by_launch_ids": [
+        36,
+        39
+      ]
+    },
+    {
+      "compiled_tensor_id": 26,
+      "graph_input_name": "arg27_1",
+      "graph_input_idx": 27,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334944896,
+      "used_by_launch_ids": [
+        39
+      ]
+    },
+    {
+      "compiled_tensor_id": 27,
+      "graph_input_name": "arg28_1",
+      "graph_input_idx": 28,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334942080,
+      "used_by_launch_ids": [
+        39
+      ]
+    },
+    {
+      "compiled_tensor_id": 28,
+      "graph_input_name": "arg29_1",
+      "graph_input_idx": 29,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439336079872,
+      "used_by_launch_ids": [
+        40
+      ]
+    },
+    {
+      "compiled_tensor_id": 29,
+      "graph_input_name": "arg30_1",
+      "graph_input_idx": 30,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334943872,
+      "used_by_launch_ids": [
+        42,
+        45,
+        54
+      ]
+    },
+    {
+      "compiled_tensor_id": 30,
+      "graph_input_name": "arg31_1",
+      "graph_input_idx": 31,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334946496,
+      "used_by_launch_ids": [
+        45
+      ]
+    },
+    {
+      "compiled_tensor_id": 31,
+      "graph_input_name": "arg32_1",
+      "graph_input_idx": 32,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439339343488,
+      "used_by_launch_ids": [
+        45
+      ]
+    },
+    {
+      "compiled_tensor_id": 32,
+      "graph_input_name": "arg33_1",
+      "graph_input_idx": 33,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439339342272,
+      "used_by_launch_ids": [
+        46
+      ]
+    },
+    {
+      "compiled_tensor_id": 33,
+      "graph_input_name": "arg34_1",
+      "graph_input_idx": 34,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334954304,
+      "used_by_launch_ids": [
+        48,
+        51
+      ]
+    },
+    {
+      "compiled_tensor_id": 34,
+      "graph_input_name": "arg35_1",
+      "graph_input_idx": 35,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334944128,
+      "used_by_launch_ids": [
+        51
+      ]
+    },
+    {
+      "compiled_tensor_id": 35,
+      "graph_input_name": "arg36_1",
+      "graph_input_idx": 36,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439331450624,
+      "used_by_launch_ids": [
+        51
+      ]
+    },
+    {
+      "compiled_tensor_id": 36,
+      "graph_input_name": "arg37_1",
+      "graph_input_idx": 37,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439339347200,
+      "used_by_launch_ids": [
+        52
+      ]
+    },
+    {
+      "compiled_tensor_id": 37,
+      "graph_input_name": "arg38_1",
+      "graph_input_idx": 38,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334952768,
+      "used_by_launch_ids": [
+        54
+      ]
+    },
+    {
+      "compiled_tensor_id": 38,
+      "graph_input_name": "arg39_1",
+      "graph_input_idx": 39,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439331244864,
+      "used_by_launch_ids": [
+        58
+      ]
+    },
+    {
+      "compiled_tensor_id": 39,
+      "graph_input_name": "arg40_1",
+      "graph_input_idx": 40,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334941184,
+      "used_by_launch_ids": [
+        58
+      ]
+    },
+    {
+      "compiled_tensor_id": 40,
+      "graph_input_name": "arg41_1",
+      "graph_input_idx": 41,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439334947008,
+      "used_by_launch_ids": [
+        59
+      ]
+    },
+    {
+      "compiled_tensor_id": 41,
+      "graph_input_name": "arg42_1",
+      "graph_input_idx": 42,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334940864,
+      "used_by_launch_ids": [
+        61,
+        64
+      ]
+    },
+    {
+      "compiled_tensor_id": 42,
+      "graph_input_name": "arg43_1",
+      "graph_input_idx": 43,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334943488,
+      "used_by_launch_ids": [
+        64
+      ]
+    },
+    {
+      "compiled_tensor_id": 43,
+      "graph_input_name": "arg44_1",
+      "graph_input_idx": 44,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334950336,
+      "used_by_launch_ids": [
+        64
+      ]
+    },
+    {
+      "compiled_tensor_id": 44,
+      "graph_input_name": "arg45_1",
+      "graph_input_idx": 45,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439334941952,
+      "used_by_launch_ids": [
+        65
+      ]
+    },
+    {
+      "compiled_tensor_id": 45,
+      "graph_input_name": "arg46_1",
+      "graph_input_idx": 46,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334942912,
+      "used_by_launch_ids": [
+        67,
+        70,
+        79
+      ]
+    },
+    {
+      "compiled_tensor_id": 46,
+      "graph_input_name": "arg47_1",
+      "graph_input_idx": 47,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334942976,
+      "used_by_launch_ids": [
+        70
+      ]
+    },
+    {
+      "compiled_tensor_id": 47,
+      "graph_input_name": "arg48_1",
+      "graph_input_idx": 48,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334944576,
+      "used_by_launch_ids": [
+        70
+      ]
+    },
+    {
+      "compiled_tensor_id": 48,
+      "graph_input_name": "arg49_1",
+      "graph_input_idx": 49,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439334945280,
+      "used_by_launch_ids": [
+        71
+      ]
+    },
+    {
+      "compiled_tensor_id": 49,
+      "graph_input_name": "arg50_1",
+      "graph_input_idx": 50,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334946176,
+      "used_by_launch_ids": [
+        73,
+        76
+      ]
+    },
+    {
+      "compiled_tensor_id": 50,
+      "graph_input_name": "arg51_1",
+      "graph_input_idx": 51,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439319251968,
+      "used_by_launch_ids": [
+        76
+      ]
+    },
+    {
+      "compiled_tensor_id": 51,
+      "graph_input_name": "arg52_1",
+      "graph_input_idx": 52,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334956608,
+      "used_by_launch_ids": [
+        76
+      ]
+    },
+    {
+      "compiled_tensor_id": 52,
+      "graph_input_name": "arg53_1",
+      "graph_input_idx": 53,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439334942784,
+      "used_by_launch_ids": [
+        77
+      ]
+    },
+    {
+      "compiled_tensor_id": 53,
+      "graph_input_name": "arg54_1",
+      "graph_input_idx": 54,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334940928,
+      "used_by_launch_ids": [
+        79
+      ]
+    },
+    {
+      "compiled_tensor_id": 54,
+      "graph_input_name": "arg55_1",
+      "graph_input_idx": 55,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439334941376,
+      "used_by_launch_ids": [
+        80
+      ]
+    },
+    {
+      "compiled_tensor_id": 55,
+      "graph_input_name": "arg56_1",
+      "graph_input_idx": 56,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334950592,
+      "used_by_launch_ids": [
+        82,
+        85,
+        94,
+        97,
+        106
+      ]
+    },
+    {
+      "compiled_tensor_id": 56,
+      "graph_input_name": "arg57_1",
+      "graph_input_idx": 57,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439338088704,
+      "used_by_launch_ids": [
+        85
+      ]
+    },
+    {
+      "compiled_tensor_id": 57,
+      "graph_input_name": "arg58_1",
+      "graph_input_idx": 58,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334955712,
+      "used_by_launch_ids": [
+        85
+      ]
+    },
+    {
+      "compiled_tensor_id": 58,
+      "graph_input_name": "arg59_1",
+      "graph_input_idx": 59,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439333581568,
+      "used_by_launch_ids": [
+        86
+      ]
+    },
+    {
+      "compiled_tensor_id": 59,
+      "graph_input_name": "arg60_1",
+      "graph_input_idx": 60,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439481990144,
+      "used_by_launch_ids": [
+        88,
+        91
+      ]
+    },
+    {
+      "compiled_tensor_id": 60,
+      "graph_input_name": "arg61_1",
+      "graph_input_idx": 61,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334880000,
+      "used_by_launch_ids": [
+        91
+      ]
+    },
+    {
+      "compiled_tensor_id": 61,
+      "graph_input_name": "arg62_1",
+      "graph_input_idx": 62,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439336131136,
+      "used_by_launch_ids": [
+        91
+      ]
+    },
+    {
+      "compiled_tensor_id": 62,
+      "graph_input_name": "arg63_1",
+      "graph_input_idx": 63,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439481992768,
+      "used_by_launch_ids": [
+        92
+      ]
+    },
+    {
+      "compiled_tensor_id": 63,
+      "graph_input_name": "arg64_1",
+      "graph_input_idx": 64,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439334942400,
+      "used_by_launch_ids": [
+        94,
+        97,
+        106
+      ]
+    },
+    {
+      "compiled_tensor_id": 64,
+      "graph_input_name": "arg65_1",
+      "graph_input_idx": 65,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439339387968,
+      "used_by_launch_ids": [
+        97
+      ]
+    },
+    {
+      "compiled_tensor_id": 65,
+      "graph_input_name": "arg66_1",
+      "graph_input_idx": 66,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439484946880,
+      "used_by_launch_ids": [
+        97
+      ]
+    },
+    {
+      "compiled_tensor_id": 66,
+      "graph_input_name": "arg67_1",
+      "graph_input_idx": 67,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439334952896,
+      "used_by_launch_ids": [
+        98
+      ]
+    },
+    {
+      "compiled_tensor_id": 67,
+      "graph_input_name": "arg68_1",
+      "graph_input_idx": 68,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439333149312,
+      "used_by_launch_ids": [
+        100,
+        103
+      ]
+    },
+    {
+      "compiled_tensor_id": 68,
+      "graph_input_name": "arg69_1",
+      "graph_input_idx": 69,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439339013440,
+      "used_by_launch_ids": [
+        103
+      ]
+    },
+    {
+      "compiled_tensor_id": 69,
+      "graph_input_name": "arg70_1",
+      "graph_input_idx": 70,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439483466048,
+      "used_by_launch_ids": [
+        103
+      ]
+    },
+    {
+      "compiled_tensor_id": 70,
+      "graph_input_name": "arg71_1",
+      "graph_input_idx": 71,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439474791232,
+      "used_by_launch_ids": [
+        104
+      ]
+    },
+    {
+      "compiled_tensor_id": 71,
+      "graph_input_name": "arg72_1",
+      "graph_input_idx": 72,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439302619584,
+      "used_by_launch_ids": [
+        106
+      ]
+    },
+    {
+      "compiled_tensor_id": 72,
+      "graph_input_name": "arg73_1",
+      "graph_input_idx": 73,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439339257600,
+      "used_by_launch_ids": [
+        110
+      ]
+    },
+    {
+      "compiled_tensor_id": 73,
+      "graph_input_name": "arg74_1",
+      "graph_input_idx": 74,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439339256192,
+      "used_by_launch_ids": [
+        110
+      ]
+    },
+    {
+      "compiled_tensor_id": 74,
+      "graph_input_name": "arg75_1",
+      "graph_input_idx": 75,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439333054272,
+      "used_by_launch_ids": [
+        111
+      ]
+    },
+    {
+      "compiled_tensor_id": 75,
+      "graph_input_name": "arg76_1",
+      "graph_input_idx": 76,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439335122880,
+      "used_by_launch_ids": [
+        113,
+        116
+      ]
+    },
+    {
+      "compiled_tensor_id": 76,
+      "graph_input_name": "arg77_1",
+      "graph_input_idx": 77,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439339257536,
+      "used_by_launch_ids": [
+        116
+      ]
+    },
+    {
+      "compiled_tensor_id": 77,
+      "graph_input_name": "arg78_1",
+      "graph_input_idx": 78,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439339251520,
+      "used_by_launch_ids": [
+        116
+      ]
+    },
+    {
+      "compiled_tensor_id": 78,
+      "graph_input_name": "arg79_1",
+      "graph_input_idx": 79,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439339254464,
+      "used_by_launch_ids": [
+        117
+      ]
+    },
+    {
+      "compiled_tensor_id": 79,
+      "graph_input_name": "arg80_1",
+      "graph_input_idx": 80,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439339256832,
+      "used_by_launch_ids": [
+        119
+      ]
+    },
+    {
+      "compiled_tensor_id": 80,
+      "graph_input_name": "arg81_1",
+      "graph_input_idx": 81,
+      "dtype": "torch.float32",
+      "shape": [
+        "512",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439339258688,
+      "used_by_launch_ids": [
+        120
+      ]
+    },
+    {
+      "compiled_tensor_id": 81,
+      "graph_input_name": "arg82_1",
+      "graph_input_idx": 82,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439339255872,
+      "used_by_launch_ids": [
+        122
+      ]
+    },
+    {
+      "compiled_tensor_id": 82,
+      "graph_input_name": "arg83_1",
+      "graph_input_idx": 83,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439339261760,
+      "used_by_launch_ids": [
+        125
+      ]
+    },
+    {
+      "compiled_tensor_id": 83,
+      "graph_input_name": "arg84_1",
+      "graph_input_idx": 84,
+      "dtype": "torch.float32",
+      "shape": [
+        "512"
+      ],
+      "storage_group_id": 125439339252160,
+      "used_by_launch_ids": [
+        125
+      ]
+    },
+    {
+      "compiled_tensor_id": 84,
+      "graph_input_name": "arg85_1",
+      "graph_input_idx": 85,
+      "dtype": "torch.float32",
+      "shape": [
+        "256",
+        "512",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439339254592,
+      "used_by_launch_ids": [
+        126
+      ]
+    },
+    {
+      "compiled_tensor_id": 85,
+      "graph_input_name": "arg86_1",
+      "graph_input_idx": 86,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439339262080,
+      "used_by_launch_ids": [
+        128,
+        132
+      ]
+    },
+    {
+      "compiled_tensor_id": 86,
+      "graph_input_name": "arg87_1",
+      "graph_input_idx": 87,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439339253504,
+      "used_by_launch_ids": [
+        132
+      ]
+    },
+    {
+      "compiled_tensor_id": 87,
+      "graph_input_name": "arg88_1",
+      "graph_input_idx": 88,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439335122496,
+      "used_by_launch_ids": [
+        132
+      ]
+    },
+    {
+      "compiled_tensor_id": 88,
+      "graph_input_name": "arg89_1",
+      "graph_input_idx": 89,
+      "dtype": "torch.float32",
+      "shape": [
+        "256",
+        "256",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439339254528,
+      "used_by_launch_ids": [
+        133
+      ]
+    },
+    {
+      "compiled_tensor_id": 89,
+      "graph_input_name": "arg90_1",
+      "graph_input_idx": 90,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439339260800,
+      "used_by_launch_ids": [
+        135,
+        138,
+        147
+      ]
+    },
+    {
+      "compiled_tensor_id": 90,
+      "graph_input_name": "arg91_1",
+      "graph_input_idx": 91,
+      "dtype": "torch.float32",
+      "shape": [
+        "256",
+        "512",
+        "1",
+        "1"
+      ],
+      "storage_group_id": 125439339263616,
+      "used_by_launch_ids": [
+        131
+      ]
+    },
+    {
+      "compiled_tensor_id": 91,
+      "graph_input_name": "arg92_1",
+      "graph_input_idx": 92,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439339253760,
+      "used_by_launch_ids": [
+        135,
+        138,
+        147
+      ]
+    },
+    {
+      "compiled_tensor_id": 92,
+      "graph_input_name": "arg93_1",
+      "graph_input_idx": 93,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439320214912,
+      "used_by_launch_ids": [
+        138
+      ]
+    },
+    {
+      "compiled_tensor_id": 93,
+      "graph_input_name": "arg94_1",
+      "graph_input_idx": 94,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439339260352,
+      "used_by_launch_ids": [
+        138
+      ]
+    },
+    {
+      "compiled_tensor_id": 94,
+      "graph_input_name": "arg95_1",
+      "graph_input_idx": 95,
+      "dtype": "torch.float32",
+      "shape": [
+        "256",
+        "256",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439483010560,
+      "used_by_launch_ids": [
+        139
+      ]
+    },
+    {
+      "compiled_tensor_id": 95,
+      "graph_input_name": "arg96_1",
+      "graph_input_idx": 96,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439339249728,
+      "used_by_launch_ids": [
+        141,
+        144
+      ]
+    },
+    {
+      "compiled_tensor_id": 96,
+      "graph_input_name": "arg97_1",
+      "graph_input_idx": 97,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439339256000,
+      "used_by_launch_ids": [
+        144
+      ]
+    },
+    {
+      "compiled_tensor_id": 97,
+      "graph_input_name": "arg98_1",
+      "graph_input_idx": 98,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439339252672,
+      "used_by_launch_ids": [
+        144
+      ]
+    },
+    {
+      "compiled_tensor_id": 98,
+      "graph_input_name": "arg99_1",
+      "graph_input_idx": 99,
+      "dtype": "torch.float32",
+      "shape": [
+        "256",
+        "256",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439339252096,
+      "used_by_launch_ids": [
+        145
+      ]
+    },
+    {
+      "compiled_tensor_id": 99,
+      "graph_input_name": "arg100_1",
+      "graph_input_idx": 100,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439339254656,
+      "used_by_launch_ids": [
+        147
+      ]
+    },
+    {
+      "compiled_tensor_id": 100,
+      "graph_input_name": "arg101_1",
+      "graph_input_idx": 101,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439339264640,
+      "used_by_launch_ids": [
+        152
+      ]
+    },
+    {
+      "compiled_tensor_id": 101,
+      "graph_input_name": "arg102_1",
+      "graph_input_idx": 102,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439338963392,
+      "used_by_launch_ids": [
+        152
+      ]
+    },
+    {
+      "compiled_tensor_id": 102,
+      "graph_input_name": "arg103_1",
+      "graph_input_idx": 103,
+      "dtype": "torch.float32",
+      "shape": [
+        "256",
+        "256",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439339250240,
+      "used_by_launch_ids": [
+        153
+      ]
+    },
+    {
+      "compiled_tensor_id": 103,
+      "graph_input_name": "arg104_1",
+      "graph_input_idx": 104,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439339213824,
+      "used_by_launch_ids": [
+        155,
+        158
+      ]
+    },
+    {
+      "compiled_tensor_id": 104,
+      "graph_input_name": "arg105_1",
+      "graph_input_idx": 105,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439339210368,
+      "used_by_launch_ids": [
+        158
+      ]
+    },
+    {
+      "compiled_tensor_id": 105,
+      "graph_input_name": "arg106_1",
+      "graph_input_idx": 106,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439339213952,
+      "used_by_launch_ids": [
+        158
+      ]
+    },
+    {
+      "compiled_tensor_id": 106,
+      "graph_input_name": "arg107_1",
+      "graph_input_idx": 107,
+      "dtype": "torch.float32",
+      "shape": [
+        "256",
+        "256",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439338263616,
+      "used_by_launch_ids": [
+        159
+      ]
+    },
+    {
+      "compiled_tensor_id": 107,
+      "graph_input_name": "arg108_1",
+      "graph_input_idx": 108,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439331442496,
+      "used_by_launch_ids": [
+        161
+      ]
+    },
+    {
+      "compiled_tensor_id": 108,
+      "graph_input_name": "arg109_1",
+      "graph_input_idx": 109,
+      "dtype": "torch.float32",
+      "shape": [
+        "256",
+        "256",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439339343680,
+      "used_by_launch_ids": [
+        162
+      ]
+    },
+    {
+      "compiled_tensor_id": 109,
+      "graph_input_name": "arg110_1",
+      "graph_input_idx": 110,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439338093824,
+      "used_by_launch_ids": [
+        164
+      ]
+    },
+    {
+      "compiled_tensor_id": 110,
+      "graph_input_name": "arg111_1",
+      "graph_input_idx": 111,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439339207424,
+      "used_by_launch_ids": [
+        167
+      ]
+    },
+    {
+      "compiled_tensor_id": 111,
+      "graph_input_name": "arg112_1",
+      "graph_input_idx": 112,
+      "dtype": "torch.float32",
+      "shape": [
+        "256"
+      ],
+      "storage_group_id": 125439339207744,
+      "used_by_launch_ids": [
+        167
+      ]
+    },
+    {
+      "compiled_tensor_id": 112,
+      "graph_input_name": "arg113_1",
+      "graph_input_idx": 113,
+      "dtype": "torch.float32",
+      "shape": [
+        "128",
+        "256",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439334944512,
+      "used_by_launch_ids": [
+        168
+      ]
+    },
+    {
+      "compiled_tensor_id": 113,
+      "graph_input_name": "arg114_1",
+      "graph_input_idx": 114,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439339203840,
+      "used_by_launch_ids": [
+        170,
+        174
+      ]
+    },
+    {
+      "compiled_tensor_id": 114,
+      "graph_input_name": "arg115_1",
+      "graph_input_idx": 115,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439339203584,
+      "used_by_launch_ids": [
+        174
+      ]
+    },
+    {
+      "compiled_tensor_id": 115,
+      "graph_input_name": "arg116_1",
+      "graph_input_idx": 116,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439339216704,
+      "used_by_launch_ids": [
+        174
+      ]
+    },
+    {
+      "compiled_tensor_id": 116,
+      "graph_input_name": "arg117_1",
+      "graph_input_idx": 117,
+      "dtype": "torch.float32",
+      "shape": [
+        "128",
+        "128",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439334940800,
+      "used_by_launch_ids": [
+        175
+      ]
+    },
+    {
+      "compiled_tensor_id": 117,
+      "graph_input_name": "arg118_1",
+      "graph_input_idx": 118,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439339215488,
+      "used_by_launch_ids": [
+        177,
+        180,
+        189
+      ]
+    },
+    {
+      "compiled_tensor_id": 118,
+      "graph_input_name": "arg119_1",
+      "graph_input_idx": 119,
+      "dtype": "torch.float32",
+      "shape": [
+        "128",
+        "256",
+        "1",
+        "1"
+      ],
+      "storage_group_id": 125439330393536,
+      "used_by_launch_ids": [
+        173
+      ]
+    },
+    {
+      "compiled_tensor_id": 119,
+      "graph_input_name": "arg120_1",
+      "graph_input_idx": 120,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439339206208,
+      "used_by_launch_ids": [
+        177,
+        180,
+        189
+      ]
+    },
+    {
+      "compiled_tensor_id": 120,
+      "graph_input_name": "arg121_1",
+      "graph_input_idx": 121,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439339207616,
+      "used_by_launch_ids": [
+        180
+      ]
+    },
+    {
+      "compiled_tensor_id": 121,
+      "graph_input_name": "arg122_1",
+      "graph_input_idx": 122,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439339205440,
+      "used_by_launch_ids": [
+        180
+      ]
+    },
+    {
+      "compiled_tensor_id": 122,
+      "graph_input_name": "arg123_1",
+      "graph_input_idx": 123,
+      "dtype": "torch.float32",
+      "shape": [
+        "128",
+        "128",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439339209024,
+      "used_by_launch_ids": [
+        181
+      ]
+    },
+    {
+      "compiled_tensor_id": 123,
+      "graph_input_name": "arg124_1",
+      "graph_input_idx": 124,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439328881984,
+      "used_by_launch_ids": [
+        183,
+        186
+      ]
+    },
+    {
+      "compiled_tensor_id": 124,
+      "graph_input_name": "arg125_1",
+      "graph_input_idx": 125,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439332098112,
+      "used_by_launch_ids": [
+        186
+      ]
+    },
+    {
+      "compiled_tensor_id": 125,
+      "graph_input_name": "arg126_1",
+      "graph_input_idx": 126,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439339201216,
+      "used_by_launch_ids": [
+        186
+      ]
+    },
+    {
+      "compiled_tensor_id": 126,
+      "graph_input_name": "arg127_1",
+      "graph_input_idx": 127,
+      "dtype": "torch.float32",
+      "shape": [
+        "128",
+        "128",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439477426752,
+      "used_by_launch_ids": [
+        187
+      ]
+    },
+    {
+      "compiled_tensor_id": 127,
+      "graph_input_name": "arg128_1",
+      "graph_input_idx": 128,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439339215104,
+      "used_by_launch_ids": [
+        189
+      ]
+    },
+    {
+      "compiled_tensor_id": 128,
+      "graph_input_name": "arg129_1",
+      "graph_input_idx": 129,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439339211136,
+      "used_by_launch_ids": [
+        194
+      ]
+    },
+    {
+      "compiled_tensor_id": 129,
+      "graph_input_name": "arg130_1",
+      "graph_input_idx": 130,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439339210112,
+      "used_by_launch_ids": [
+        194
+      ]
+    },
+    {
+      "compiled_tensor_id": 130,
+      "graph_input_name": "arg131_1",
+      "graph_input_idx": 131,
+      "dtype": "torch.float32",
+      "shape": [
+        "128",
+        "128",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439339206080,
+      "used_by_launch_ids": [
+        195
+      ]
+    },
+    {
+      "compiled_tensor_id": 131,
+      "graph_input_name": "arg132_1",
+      "graph_input_idx": 132,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439339209152,
+      "used_by_launch_ids": [
+        197,
+        200
+      ]
+    },
+    {
+      "compiled_tensor_id": 132,
+      "graph_input_name": "arg133_1",
+      "graph_input_idx": 133,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439334294272,
+      "used_by_launch_ids": [
+        200
+      ]
+    },
+    {
+      "compiled_tensor_id": 133,
+      "graph_input_name": "arg134_1",
+      "graph_input_idx": 134,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439339212800,
+      "used_by_launch_ids": [
+        200
+      ]
+    },
+    {
+      "compiled_tensor_id": 134,
+      "graph_input_name": "arg135_1",
+      "graph_input_idx": 135,
+      "dtype": "torch.float32",
+      "shape": [
+        "128",
+        "128",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439339209280,
+      "used_by_launch_ids": [
+        201
+      ]
+    },
+    {
+      "compiled_tensor_id": 135,
+      "graph_input_name": "arg136_1",
+      "graph_input_idx": 136,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439339208704,
+      "used_by_launch_ids": [
+        203,
+        206
+      ]
+    },
+    {
+      "compiled_tensor_id": 136,
+      "graph_input_name": "arg137_1",
+      "graph_input_idx": 137,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439339209216,
+      "used_by_launch_ids": [
+        206
+      ]
+    },
+    {
+      "compiled_tensor_id": 137,
+      "graph_input_name": "arg138_1",
+      "graph_input_idx": 138,
+      "dtype": "torch.float32",
+      "shape": [
+        "128"
+      ],
+      "storage_group_id": 125439339208256,
+      "used_by_launch_ids": [
+        206
+      ]
+    },
+    {
+      "compiled_tensor_id": 138,
+      "graph_input_name": "arg139_1",
+      "graph_input_idx": 139,
+      "dtype": "torch.float32",
+      "shape": [
+        "3",
+        "128",
+        "3",
+        "3"
+      ],
+      "storage_group_id": 125439339209664,
+      "used_by_launch_ids": [
+        207
+      ]
+    },
+    {
+      "compiled_tensor_id": 139,
+      "graph_input_name": "arg140_1",
+      "graph_input_idx": 140,
+      "dtype": "torch.float32",
+      "shape": [
+        "3"
+      ],
+      "storage_group_id": 125439339201088,
+      "used_by_launch_ids": [
+        209
+      ]
+    }
+  ],
+  "compilation_hash": "25f0549ee7fabb5e"
+}

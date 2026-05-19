@@ -28,8 +28,8 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-INPUT_YAML = REPO_ROOT / "examples" / "llama3-flexinfer" / "input.yaml"
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+INPUT_YAML = REPO_ROOT / "examples" / "run" / "llamacpp_llama-3-8B_flexinfer.yaml"
 
 
 def _unwrap(result) -> dict:
