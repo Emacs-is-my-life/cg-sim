@@ -30,6 +30,7 @@ from .neutral import (
     build_neutral_schedule_from_timeline,
     load_neutral_schedule,
     neutral_to_pytorch,
+    resolve_neutral_cgsim_tids,
     write_neutral_schedule,
 )
 from .stall_metric import StallMetrics, compute_stall_metrics

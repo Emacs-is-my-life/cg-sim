@@ -78,6 +78,23 @@ class NeutralTensor:
     size_bytes: int
     dtype: str
     used_by_launch_ids: list[int] = field(default_factory=list)
+    # Carried for the injector's per-node tid resolver. Empty list/None
+    # for legacy schedules; modern schedulers populate them so the
+    # position-based shape-twin tiebreaker (``_resolve_tid_for_node``)
+    # works for synthetic entries that share a shape with the real
+    # compile-side tensor.
+    shape: list[Any] = field(default_factory=list)
+    graph_input_idx: int | None = None
+    storage_group_id: Any = None
+    # Trace-runtime tids that this tensor backs (one or more cgsim_tids
+    # that share the same storage_group_id at runtime). Populated by
+    # ``build_neutral_schedule_from_timeline`` from
+    # ``GlobalTensor.trace_tids`` so ``resolve_neutral_cgsim_tids`` can
+    # pre-populate cgsim_tids without invoking the per-node
+    # shape-disambiguation resolver. Empty list means the tensor's
+    # trace tid was not known at timeline-build time and the resolver
+    # has to fall back to per-node heuristics (the legacy path).
+    trace_tids: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -93,6 +110,13 @@ class NeutralPrefetch:
     # every repeated ``(graph_id, launch_id)`` to the first occurrence.
     issue_node_id: int = -1
     wait_node_id: int = -1
+    # Resolved cg-sim tensor id (the integer key into ``trace.tensor_map``)
+    # for the *specific* runtime tensor instance this prefetch targets.
+    # Populated at emit time by ``resolve_neutral_cgsim_tids`` so the
+    # injector can skip its (gid, ctid) → cgsim_tid disambiguation
+    # entirely. ``-1`` means "not resolved at emit time"; the injector
+    # falls back to per-node resolution for legacy schedules.
+    cgsim_tid: int = -1
     # Scheduler attests: the FIFO ordering of this async reload vs prior
     # evicts is proven safe (no race). The PyTorch wrapper's safety-net
     # will treat this as providing residency at ``wait_launch_id`` instead
@@ -133,6 +157,8 @@ class NeutralEvict:
     # Per-iter mask for partial schedules. Same semantics as
     # NeutralPrefetch.iter_mask: empty = every iter; non-empty = subset.
     iter_mask: list[int] = field(default_factory=list)
+    # Resolved cg-sim tensor id. See ``NeutralPrefetch.cgsim_tid``.
+    cgsim_tid: int = -1
 
 
 @dataclass
@@ -140,6 +166,10 @@ class NeutralColdStart:
     tensor_uid: int
     anchor_launch_id: int
     reason: str = ""
+    # Resolved cg-sim tensor ids — coldstart applies to ALL runtime
+    # instances of the (gid, ctid), so this is a list rather than a
+    # single id. Empty list ⇒ not resolved at emit time.
+    cgsim_tids: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -179,6 +209,9 @@ def build_neutral_schedule_from_timeline(
     """
     tensors: list[NeutralTensor] = []
     for t in tl.tensors:
+        sgid = getattr(t, "storage_group_id", None)
+        tt_tids = list(getattr(t, "trace_tids", []) or [])
+        entry = t.entry if isinstance(t.entry, dict) else {}
         tensors.append(NeutralTensor(
             uid=t.uid,
             graph_id=t.graph_id,
@@ -187,6 +220,10 @@ def build_neutral_schedule_from_timeline(
             size_bytes=t.size_bytes,
             dtype=t.dtype,
             used_by_launch_ids=[int(tl.tasks[pos].launch_id) for pos in t.uses],
+            shape=list(entry.get("shape", []) or []),
+            graph_input_idx=entry.get("graph_input_idx"),
+            storage_group_id=int(sgid) if sgid is not None else None,
+            trace_tids=tt_tids,
         ))
     return NeutralSchedule(
         graph_order=list(tl.graph_order),
@@ -204,7 +241,190 @@ def build_neutral_schedule_from_timeline(
 # ---------------------------------------------------------------------------
 
 
-def write_neutral_schedule(path: str | Path, schedule: NeutralSchedule) -> None:
+def resolve_neutral_cgsim_tids(schedule: NeutralSchedule, trace) -> None:
+    """Mutate ``schedule`` in place: populate ``cgsim_tid`` on every
+    prefetch / evict / cold_start by resolving its (gid, ctid) against
+    the runtime tensors actually read by the referenced trace nodes.
+
+    Once a schedule has resolved tids, the injector can skip its own
+    (gid, ctid) → cgsim_tid disambiguation entirely — the schedule
+    speaks runtime-space identifiers directly. Eliminates the
+    ``ambiguous_skipped`` failure mode for models with repeated
+    same-shape blocks.
+
+    Per-entry tids are derived from the entry's anchor node:
+      - Prefetch:   ``wait_node_id`` (the consumer that reads this tid)
+      - Evict:      ``issue_node_id`` (the node after which the tid frees)
+      - ColdStart:  every GPU node in any of the tensor's
+        ``used_by_launch_ids`` (cold-start applies to every runtime
+        instance the schedule isn't covering with explicit prefetches)
+
+    Entries we cannot resolve (no anchor node, no matching candidate)
+    are left with ``cgsim_tid = -1`` / empty list. The injector treats
+    those as legacy and falls back to its in-process resolver.
+    """
+    from .tid_resolve import (
+        build_lid_ctid_order,
+        build_lid_to_gpu_node_ids,
+        build_lid_to_node_id,
+        resolve_tid_for_node,
+    )
+
+    tensors_by_uid = schedule.tensor_by_uid()
+    tensor_metas: dict[tuple[int, int], dict[Any, Any]] = {}
+    for t in tensors_by_uid.values():
+        gid = int(t.graph_id)
+        ctid = int(t.compiled_tensor_id)
+        if gid < 0 or ctid < 0:
+            continue
+        tensor_metas[(gid, ctid)] = {
+            "used_by_launch_ids": list(t.used_by_launch_ids),
+            "shape": list(t.shape) if t.shape else None,
+            "size_bytes": int(t.size_bytes) if t.size_bytes else None,
+            "dtype": t.dtype or None,
+            "graph_input_idx": t.graph_input_idx,
+        }
+
+    lid_ctid_order = build_lid_ctid_order(tensor_metas)
+    lid_to_node = build_lid_to_node_id(trace)
+    lid_to_gpu_nodes = build_lid_to_gpu_node_ids(trace)
+
+    # --- prefetches ---
+    for pf in schedule.prefetches:
+        if pf.cgsim_tid >= 0:
+            continue  # already resolved
+        meta = tensors_by_uid.get(pf.tensor_uid)
+        if meta is None:
+            continue
+        # Fast path (RC1/RC4): if the timeline recorded the trace tid
+        # for this storage and the consumer's node reads exactly one
+        # such tid (the typical case for non-aliased storages), pick
+        # it directly without shape disambiguation.
+        if meta.trace_tids:
+            tt_set = set(int(t) for t in meta.trace_tids)
+            if pf.wait_node_id >= 0:
+                node = trace.node_map.get(int(pf.wait_node_id))
+                if node is not None:
+                    cand = [
+                        int(t) for t in (node.input_tensors or [])
+                        if int(t) in tt_set
+                    ]
+                    if len(cand) == 1:
+                        pf.cgsim_tid = cand[0]
+                        continue
+                    if len(cand) >= 1:
+                        # Multiple matches (storage aliasing) — pick the
+                        # first as a deterministic tie-break.
+                        pf.cgsim_tid = cand[0]
+                        continue
+            # No wait_node_id or no match in its inputs: if only one
+            # trace tid is associated with this storage, use it.
+            if len(tt_set) == 1:
+                pf.cgsim_tid = next(iter(tt_set))
+                continue
+        gid = int(meta.graph_id)
+        ctid = int(meta.compiled_tensor_id)
+        # Prefer the schedule's exact wait_node_id; fall back to first
+        # GPU node of (gid, wait_launch_id).
+        node_id = pf.wait_node_id if pf.wait_node_id >= 0 else lid_to_node.get(
+            (gid, pf.wait_launch_id), -1,
+        )
+        if node_id < 0:
+            continue
+        cg = resolve_tid_for_node(
+            trace, node_id, gid, pf.wait_launch_id, ctid,
+            tensor_metas, lid_ctid_order,
+        )
+        if cg is not None:
+            pf.cgsim_tid = int(cg)
+
+    # --- evicts ---
+    for ev in schedule.evicts:
+        if ev.cgsim_tid >= 0:
+            continue
+        meta = tensors_by_uid.get(ev.tensor_uid)
+        if meta is None:
+            continue
+        if meta.trace_tids:
+            tt_set = set(int(t) for t in meta.trace_tids)
+            if ev.issue_node_id >= 0:
+                node = trace.node_map.get(int(ev.issue_node_id))
+                if node is not None:
+                    cand = [
+                        int(t) for t in (node.input_tensors or [])
+                        if int(t) in tt_set
+                    ]
+                    if cand:
+                        ev.cgsim_tid = cand[0]
+                        continue
+            if len(tt_set) == 1:
+                ev.cgsim_tid = next(iter(tt_set))
+                continue
+        gid = int(meta.graph_id)
+        ctid = int(meta.compiled_tensor_id)
+        node_id = ev.issue_node_id if ev.issue_node_id >= 0 else lid_to_node.get(
+            (gid, ev.issue_launch_id), -1,
+        )
+        if node_id < 0:
+            continue
+        cg = resolve_tid_for_node(
+            trace, node_id, gid, ev.issue_launch_id, ctid,
+            tensor_metas, lid_ctid_order,
+        )
+        if cg is not None:
+            ev.cgsim_tid = int(cg)
+
+    # --- cold_starts: applies to EVERY runtime instance of (gid, ctid) ---
+    for cs in schedule.cold_starts:
+        if cs.cgsim_tids:
+            continue
+        meta = tensors_by_uid.get(cs.tensor_uid)
+        if meta is None:
+            continue
+        # Fast path (RC1): timeline already knows the trace tids that
+        # back this NeutralTensor — use them directly. Cold-start
+        # applies to every runtime instance of the storage, so the
+        # full list is the answer.
+        if meta.trace_tids:
+            cs.cgsim_tids = [int(t) for t in meta.trace_tids]
+            continue
+        gid = int(meta.graph_id)
+        ctid = int(meta.compiled_tensor_id)
+        resolved: list[int] = []
+        for lid in meta.used_by_launch_ids:
+            try:
+                lid_int = int(lid)
+            except (TypeError, ValueError):
+                continue
+            for nid in lid_to_gpu_nodes.get((gid, lid_int), []):
+                cg = resolve_tid_for_node(
+                    trace, nid, gid, lid_int, ctid,
+                    tensor_metas, lid_ctid_order,
+                )
+                if cg is not None and cg not in resolved:
+                    resolved.append(int(cg))
+        if resolved:
+            cs.cgsim_tids = resolved
+
+
+def write_neutral_schedule(
+    path: str | Path,
+    schedule: NeutralSchedule,
+    *,
+    trace=None,
+) -> None:
+    if trace is not None:
+        resolve_neutral_cgsim_tids(schedule, trace)
+        n_pf = sum(1 for p in schedule.prefetches if p.cgsim_tid >= 0)
+        n_ev = sum(1 for e in schedule.evicts if e.cgsim_tid >= 0)
+        n_cs = sum(1 for c in schedule.cold_starts if c.cgsim_tids)
+        print(
+            f"[neutral] resolved cgsim_tids: "
+            f"prefetch={n_pf}/{len(schedule.prefetches)} "
+            f"evict={n_ev}/{len(schedule.evicts)} "
+            f"cold_start={n_cs}/{len(schedule.cold_starts)}",
+            flush=True,
+        )
     doc: dict[str, Any] = {
         "format_version": schedule.format_version,
         "graph_order": list(schedule.graph_order),
@@ -220,6 +440,8 @@ def write_neutral_schedule(path: str | Path, schedule: NeutralSchedule) -> None:
                 "size_bytes": t.size_bytes,
                 "dtype": t.dtype,
                 "used_by_launch_ids": list(t.used_by_launch_ids),
+                "shape": list(t.shape) if t.shape else [],
+                "graph_input_idx": t.graph_input_idx,
             }
             for t in schedule.tensors
         ],
@@ -237,6 +459,7 @@ def write_neutral_schedule(path: str | Path, schedule: NeutralSchedule) -> None:
                 "issue_graph_id": p.issue_graph_id,
                 "cross_iter": p.cross_iter,
                 "iter_mask": list(p.iter_mask),
+                "cgsim_tid": int(p.cgsim_tid),
             }
             for p in schedule.prefetches
         ],
@@ -249,6 +472,7 @@ def write_neutral_schedule(path: str | Path, schedule: NeutralSchedule) -> None:
                 "reason": e.reason,
                 "issue_node_id": e.issue_node_id,
                 "iter_mask": list(e.iter_mask),
+                "cgsim_tid": int(e.cgsim_tid),
             }
             for e in schedule.evicts
         ],
@@ -257,6 +481,7 @@ def write_neutral_schedule(path: str | Path, schedule: NeutralSchedule) -> None:
                 "tensor_uid": c.tensor_uid,
                 "anchor_launch_id": c.anchor_launch_id,
                 "reason": c.reason,
+                "cgsim_tids": [int(t) for t in c.cgsim_tids],
             }
             for c in schedule.cold_starts
         ],
@@ -293,6 +518,11 @@ def load_neutral_schedule(path: str | Path) -> NeutralSchedule:
                 size_bytes=int(t.get("size_bytes", 0)),
                 dtype=str(t.get("dtype", "")),
                 used_by_launch_ids=[int(x) for x in t.get("used_by_launch_ids", [])],
+                shape=list(t.get("shape") or []),
+                graph_input_idx=(
+                    int(t["graph_input_idx"])
+                    if t.get("graph_input_idx") is not None else None
+                ),
             )
             for t in doc.get("tensors", [])
         ],
@@ -310,6 +540,7 @@ def load_neutral_schedule(path: str | Path) -> NeutralSchedule:
                 issue_graph_id=int(p.get("issue_graph_id", -1)),
                 cross_iter=bool(p.get("cross_iter", False)),
                 iter_mask=[int(x) for x in p.get("iter_mask", [])],
+                cgsim_tid=int(p.get("cgsim_tid", -1)),
             )
             for p in doc.get("prefetches", [])
         ],
@@ -322,6 +553,7 @@ def load_neutral_schedule(path: str | Path) -> NeutralSchedule:
                 reason=str(e.get("reason", "")),
                 issue_node_id=int(e.get("issue_node_id", -1)),
                 iter_mask=[int(x) for x in e.get("iter_mask", [])],
+                cgsim_tid=int(e.get("cgsim_tid", -1)),
             )
             for e in doc.get("evicts", [])
         ],
@@ -330,6 +562,7 @@ def load_neutral_schedule(path: str | Path) -> NeutralSchedule:
                 tensor_uid=int(c["tensor_uid"]),
                 anchor_launch_id=int(c.get("anchor_launch_id", 0)),
                 reason=str(c.get("reason", "")),
+                cgsim_tids=[int(t) for t in c.get("cgsim_tids", [])],
             )
             for c in doc.get("cold_starts", [])
         ],

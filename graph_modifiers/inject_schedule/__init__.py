@@ -8,6 +8,10 @@ kernel nodes — DAV's existing transfer logic then triggers RAM↔VRAM
 moves at the right launch IDs without any scheduler changes.
 """
 
+from .eager_injector import inject_eager_schedule_into_trace
 from .injector import inject_schedule_into_trace
 
-__all__ = ["inject_schedule_into_trace"]
+__all__ = [
+    "inject_schedule_into_trace",
+    "inject_eager_schedule_into_trace",
+]

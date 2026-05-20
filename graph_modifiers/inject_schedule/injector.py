@@ -443,11 +443,24 @@ def _resolve_tid_for_node(
         return None
 
     # Tiebreaker: match same-shape ctids of this lid against same-shape
-    # candidates by canonical sort (graph_input_idx ↔ tid id).
+    # candidates by canonical sort (graph_input_idx ↔ tid id). We accept
+    # either a numel match (shape present) or a size_bytes match (shape
+    # absent in serialized schedules) so synthetic entries that share a
+    # shape with real ctids still get consistent positions.
     lid_ctids = lid_ctid_order.get((gid, lid), [])
+
+    def _meta_same_shape(other_meta: dict[str, Any]) -> bool:
+        other_numel = _shape_product(other_meta.get("shape"))
+        if target_numel is not None and other_numel is not None:
+            return other_numel == target_numel
+        other_bytes = other_meta.get("size_bytes")
+        if target_bytes is not None and other_bytes is not None:
+            return int(other_bytes) == int(target_bytes)
+        return False
+
     same_shape_ctids = [
         c for c in lid_ctids
-        if _shape_product(tensor_metas.get((gid, c), {}).get("shape")) == target_numel
+        if _meta_same_shape(tensor_metas.get((gid, c), {}))
     ]
     if ctid not in same_shape_ctids:
         return sorted(candidates)[0]
@@ -495,7 +508,63 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
     lid_ctid_order = _build_lid_ctid_order(tensor_metas)
     lid_to_node_id = _build_lid_to_node_id(trace)
 
+    # Pre-compute (gid, lid) -> [gpu_node_id] once. The cold-start
+    # fallback resolver below used to walk trace.node_map per cold-
+    # start tensor (O(n_unresolved_cs · n_uses · n_trace_nodes)),
+    # which for sdxl-turbo's UNet with ~50k trace nodes and ~200
+    # unresolved synth tensors stalled the inject step for >15
+    # minutes. One-time precompute makes the inner lookup O(1).
+    _lid_to_gpu_nodes: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for nid, node in trace.node_map.items():
+        if (str(node.args.get("resource_kind") or "")
+                not in ("gpu_stream", "gpu", "gpu_runtime")):
+            continue
+        ng = int(node.args.get("compiled_graph_id") or -1)
+        nl = int(node.args.get("compiled_launch_id") or -1)
+        if ng < 0 or nl < 0:
+            continue
+        _lid_to_gpu_nodes[(ng, nl)].append(nid)
+
     coldstart_cgsim: set[int] = set()
+    # Diagnostics on cold-start resolution paths. Each schedule entry
+    # falls into exactly one of:
+    #   - "pre_resolved": the schedule embedded cgsim_tids that exist
+    #     in trace.tensor_map (zero injector heuristic). Healthy.
+    #   - "per_node_resolved": no embedded ids, but per-node resolver
+    #     found at least one matching trace tid. Some scheduler-side
+    #     pre-resolution gap, but the injector recovered cleanly.
+    #   - "bundled_fallback": neither path worked, fell back to the
+    #     bundled ``tid_to_cgsim[(gid, ctid)]`` resolver — this is the
+    #     OVER-COLDSTART path that bundles multiple iters/aliases and
+    #     inflates VRAM. Track bytes so the scheduler can prioritise
+    #     fixing pre-resolution.
+    #   - "unresolved": no path produced any cgsim_tid. The tensor
+    #     stays cuda-resident by default but it's silently invisible
+    #     to coldstart_cgsim — the injector cannot evict it later.
+    cs_diag = {
+        "pre_resolved_entries": 0,
+        "pre_resolved_bytes": 0,
+        "per_node_entries": 0,
+        "per_node_bytes": 0,
+        "bundled_fallback_entries": 0,
+        "bundled_fallback_bytes": 0,
+        "bundled_fallback_extra_tids": 0,
+        "unresolved_entries": 0,
+        "unresolved_bytes": 0,
+        "samples_bundled_fallback": [],
+        "samples_unresolved": [],
+    }
+
+    def _tensor_size_for_ctid(gid_q: int, ctid_q: int) -> int:
+        meta_q = tensor_metas.get((int(gid_q), int(ctid_q)))
+        if meta_q is None:
+            return 0
+        sb = meta_q.get("size_bytes")
+        try:
+            return int(sb) if sb else 0
+        except (TypeError, ValueError):
+            return 0
+
     for cs in doc.get("cold_starts", []):
         uid = int(cs.get("tensor_uid", -1))
         meta = tensors_by_uid.get(uid)
@@ -504,6 +573,25 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
         gid = int(meta.get("graph_id", -1))
         ctid = int(meta.get("compiled_tensor_id", -1))
         anchor_lid = int(cs.get("anchor_launch_id", -1))
+        size_b = _tensor_size_for_ctid(gid, ctid)
+
+        # Fast path: the scheduler already resolved cgsim_tids at emit
+        # time (see ``resolve_neutral_cgsim_tids``). Use them directly
+        # without any disambiguation heuristic.
+        pre_resolved_cs = [int(t) for t in cs.get("cgsim_tids", [])]
+        if pre_resolved_cs:
+            any_pre = False
+            for cg in pre_resolved_cs:
+                if cg in trace.tensor_map:
+                    coldstart_cgsim.add(cg)
+                    any_pre = True
+            if any_pre:
+                cs_diag["pre_resolved_entries"] += 1
+                cs_diag["pre_resolved_bytes"] += size_b
+                continue
+            # If none of the pre-resolved ids exist (trace mismatch),
+            # fall through to legacy resolution to recover.
+
         # Resolve per-node: pick the ANCHOR lid's first GPU instance and
         # ask which cgsim_tid IT reads for this ctid. Across iterations
         # the same ctid maps to different per-iter cgsim_tids; each
@@ -516,14 +604,7 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
                 lid_int = int(lid_raw)
             except (TypeError, ValueError):
                 continue
-            for nid, node in trace.node_map.items():
-                if (str(node.args.get("resource_kind") or "")
-                        not in ("gpu_stream", "gpu", "gpu_runtime")):
-                    continue
-                if int(node.args.get("compiled_graph_id") or -1) != gid:
-                    continue
-                if int(node.args.get("compiled_launch_id") or -1) != lid_int:
-                    continue
+            for nid in _lid_to_gpu_nodes.get((gid, lid_int), ()):
                 per_lid_nodes[lid_int].append(nid)
         any_resolved = False
         for lid_int, nids in per_lid_nodes.items():
@@ -535,21 +616,55 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
                 if cg is not None:
                     coldstart_cgsim.add(int(cg))
                     any_resolved = True
-        if not any_resolved:
-            # Fallback to the legacy bundled resolver — better to
-            # over-coldstart (extra layout VRAM) than to silently
-            # retarget a tensor the schedule meant to keep cuda.
-            for cg in tid_to_cgsim.get((gid, ctid), []):
+        if any_resolved:
+            cs_diag["per_node_entries"] += 1
+            cs_diag["per_node_bytes"] += size_b
+            continue
+        # Fallback to the legacy bundled resolver — better to
+        # over-coldstart (extra layout VRAM) than to silently
+        # retarget a tensor the schedule meant to keep cuda.
+        bundled = tid_to_cgsim.get((gid, ctid), [])
+        if bundled:
+            for cg in bundled:
                 coldstart_cgsim.add(int(cg))
+            cs_diag["bundled_fallback_entries"] += 1
+            cs_diag["bundled_fallback_bytes"] += size_b
+            cs_diag["bundled_fallback_extra_tids"] += max(0, len(bundled) - 1)
+            if len(cs_diag["samples_bundled_fallback"]) < 5:
+                cs_diag["samples_bundled_fallback"].append(
+                    (gid, ctid, size_b, len(bundled))
+                )
+        else:
+            cs_diag["unresolved_entries"] += 1
+            cs_diag["unresolved_bytes"] += size_b
+            if len(cs_diag["samples_unresolved"]) < 5:
+                cs_diag["samples_unresolved"].append(
+                    (gid, ctid, size_b, uid)
+                )
 
     arrivals: list[dict[str, Any]] = []
     prefetch_covered_cgsim: set[int] = set()
+    # Sync prefetches (issuer == consumer) are kept in a separate set
+    # so they trigger the cuda → cpu retarget (peak control via
+    # residency-miss + stall) but bypass the async coverage_repair
+    # logic — they have no arrivals to be checked for un-gated
+    # consumers, by design. The retarget pass unions the two sets.
+    sync_prefetch_cgsim: set[int] = set()
     n_pf_exact = 0
     n_pf_launch_fallback = 0
     n_pf_async = 0
     n_pf_sync = 0   # sync prefetches: not added; DAV residency-miss path handles them
     n_pf_skipped = 0
     n_pf_unresolved_tid = 0
+    n_pf_pre_resolved = 0   # used cgsim_tid embedded in schedule (no disambiguation)
+    # Prefetches whose schedule-emitted ``issue_node_id`` lands AFTER
+    # the consumer in trace time (ts inversion). Registering the gate
+    # would cause a deadlock — the issuer's retire-event firing the
+    # arrival happens past the consumer's dispatch deadline. Treat as
+    # sync prefetches: skip the arrival, leave the tid uncovered, let
+    # the coverage-repair walk decide whether the tid stays cuda or
+    # needs to be demoted.
+    n_pf_infeasible = 0
     for pf in doc.get("prefetches", []):
         uid = int(pf.get("tensor_uid", -1))
         meta = tensors_by_uid.get(uid)
@@ -586,17 +701,23 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
         if issuer_id is None or consumer_id is None:
             n_pf_skipped += 1
             continue
-        # Per-consumer cgsim_tid resolution: each prefetch refers to
-        # ONE specific iter-instance of the ctid — the one that
-        # consumer_id reads. The legacy `tid_to_cgsim` lookup returned
-        # ALL same-(gid, ctid) cgsim_tids (across iters AND across
-        # shape-twin ctids) and bundled them into every prefetch,
-        # which inflated transfer sizes and left consumers of the
-        # bundled-in tids un-gated. Resolve per-node instead.
-        cgsim_tid = _resolve_tid_for_node(
-            trace, consumer_id, gid, wait_lid, ctid,
-            tensor_metas, lid_ctid_order,
-        )
+        # Fast path: scheduler already resolved at emit time.
+        pre_resolved_pf = int(pf.get("cgsim_tid", -1))
+        if pre_resolved_pf >= 0 and pre_resolved_pf in trace.tensor_map:
+            cgsim_tid = pre_resolved_pf
+            n_pf_pre_resolved += 1
+        else:
+            # Per-consumer cgsim_tid resolution: each prefetch refers to
+            # ONE specific iter-instance of the ctid — the one that
+            # consumer_id reads. The legacy `tid_to_cgsim` lookup returned
+            # ALL same-(gid, ctid) cgsim_tids (across iters AND across
+            # shape-twin ctids) and bundled them into every prefetch,
+            # which inflated transfer sizes and left consumers of the
+            # bundled-in tids un-gated. Resolve per-node instead.
+            cgsim_tid = _resolve_tid_for_node(
+                trace, consumer_id, gid, wait_lid, ctid,
+                tensor_metas, lid_ctid_order,
+            )
         if cgsim_tid is None:
             n_pf_unresolved_tid += 1
             n_pf_skipped += 1
@@ -612,7 +733,31 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
         # multi-graph / belady / mincost-flow prefetch through the
         # sync path even when the schedule placed them earlier.
         if issuer_id == consumer_id:
+            # Sync prefetch: no async arrival/gate registered — DAV's
+            # residency-miss path fetches the tensor when the consumer
+            # dispatches. We track it in a separate set that the
+            # retarget pass unions in (so the tensor's home flips
+            # cuda → cpu and the residency-miss path actually does
+            # work) but the async coverage_repair loop skips, since
+            # there's no arrival to validate against un-gated consumers.
+            sync_prefetch_cgsim.add(int(cgsim_tid))
             n_pf_sync += 1
+            continue
+        # Time-order check: a gate registered on this consumer is only
+        # useful if its issuer fires BEFORE the consumer dispatches.
+        # Schedulers (esp. jit_sim_prune's ALAP backward pass) sometimes
+        # pick a same-launch_id node from a later iter as the issuer,
+        # which lands past the consumer in trace ts. Without this guard,
+        # the runtime stalls forever waiting for the issuer's retire.
+        # Demote to sync (skip the arrival) — coverage-repair below will
+        # then keep the tid cuda-resident if no other arrival covers
+        # this consumer.
+        issuer_node = trace.node_map.get(issuer_id)
+        consumer_node = trace.node_map.get(consumer_id)
+        issuer_ts = int(issuer_node.args.get("start_ns") or 0) if issuer_node else 0
+        consumer_ts = int(consumer_node.args.get("start_ns") or 0) if consumer_node else 0
+        if issuer_ts >= consumer_ts:
+            n_pf_infeasible += 1
             continue
         start_ns = int(pf.get("transfer_start_ns", 0))
         end_ns = int(pf.get("transfer_end_ns", 0))
@@ -716,6 +861,39 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
     synthesized_gates: list[dict[str, Any]] = []
     repaired_tids = 0
     repaired_consumers = 0
+    # Diagnostics on coverage-repair paths. The injector silently
+    # patches the schedule when its prefetch coverage doesn't include
+    # every gpu trace consumer of a tid:
+    #   - "demoted_no_arrivals_for_tid": tid was in prefetch_covered_cgsim
+    #     but somehow has no scheduled arrival. Schedule emit bug.
+    #   - "demoted_consumer_before_first_arrival": some gpu trace
+    #     consumer of the tid (often an aten/aux op the schedule
+    #     didn't account for) runs BEFORE the schedule's first arrival
+    #     fires. The injector can't synthesize a gate (nothing prior
+    #     to anchor it to), so it gives up on retargeting this tid →
+    #     stays cuda-resident at layout. The schedule's prefetch
+    #     becomes a no-op since the tid was already kept resident.
+    #   - "repaired_with_synth_gates": some un-gated consumer existed
+    #     but a prior arrival was available, so the injector
+    #     synthesized a fake gate. Schedule should have emitted that
+    #     gate itself.
+    cov_diag = {
+        "demoted_no_arrivals_tids": 0,
+        "demoted_no_arrivals_bytes": 0,
+        "demoted_consumer_before_arrival_tids": 0,
+        "demoted_consumer_before_arrival_bytes": 0,
+        "repaired_tids": 0,
+        "repaired_bytes": 0,
+        "synth_gates_count": 0,
+        "samples_demoted": [],
+        "samples_repaired": [],
+    }
+
+    def _tid_size(tid: int) -> int:
+        tt = trace.tensor_map.get(int(tid))
+        if tt is None:
+            return 0
+        return int(getattr(tt, "size_bytes", 0) or 0)
 
     for tid in list(prefetch_covered_cgsim):
         all_cons = consumers_by_tid.get(tid, set())
@@ -728,6 +906,8 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
             # No arrival fires for this tid in this run (shouldn't be in
             # prefetch_covered_cgsim). Demote defensively.
             coverage_demoted.add(tid)
+            cov_diag["demoted_no_arrivals_tids"] += 1
+            cov_diag["demoted_no_arrivals_bytes"] += _tid_size(tid)
             continue
         # Order events on the tid's residency timeline by trace ts.
         # `key=` keeps the tuple comparison from falling through to dict
@@ -783,11 +963,28 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
 
         if not ok:
             coverage_demoted.add(tid)
+            cov_diag["demoted_consumer_before_arrival_tids"] += 1
+            cov_diag["demoted_consumer_before_arrival_bytes"] += _tid_size(tid)
+            if len(cov_diag["samples_demoted"]) < 5:
+                tt = trace.tensor_map.get(int(tid))
+                tname = (tt.args.get("name", "?") if tt else "?")[:40]
+                cov_diag["samples_demoted"].append(
+                    (int(tid), _tid_size(tid), tname, len(un_gated), len(arrivals_t))
+                )
             continue
         evicts_to_drop.update(per_tid_drops)
         synthesized_gates.extend(per_tid_synth)
         repaired_tids += 1
         repaired_consumers += len(per_tid_synth)
+        cov_diag["repaired_tids"] += 1
+        cov_diag["repaired_bytes"] += _tid_size(tid)
+        cov_diag["synth_gates_count"] += len(per_tid_synth)
+        if len(cov_diag["samples_repaired"]) < 5:
+            tt = trace.tensor_map.get(int(tid))
+            tname = (tt.args.get("name", "?") if tt else "?")[:40]
+            cov_diag["samples_repaired"].append(
+                (int(tid), _tid_size(tid), tname, len(per_tid_synth), len(un_gated))
+            )
 
     if coverage_demoted:
         prefetch_covered_cgsim -= coverage_demoted
@@ -804,9 +1001,25 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
     # exposed by storage aliasing — stay cuda-resident (= implicit
     # cold-start in DAV's layout) instead of being silently retargeted
     # to RAM and sync-loaded by DAV's residency-miss path.
+    # Scheduler-opt-in: ``retarget_all_non_coldstart`` flag in schedule
+    # meta tells the injector to retarget EVERY non-coldstart WEIGHT/
+    # LEAF, not just those in ``prefetch_covered_cgsim``. Used by the
+    # peak_runtime_planner — it emits sync prefetches against
+    # tl.tensors, but the trace contains cgsim_tids outside the
+    # sidecar (Pass-A storage merge artifacts, alias rows) that would
+    # otherwise stay cuda-homed. With this flag set, the scheduler is
+    # asserting "anything not explicitly cold-started should be
+    # RAM-resident; DAV's residency-miss path will sync-fetch on
+    # demand". Falls back to the default coverage-gated mode when
+    # the flag is absent/false.
+    retarget_all = bool(doc.get("meta", {}).get("retarget_all_non_coldstart"))
+    covered_for_retarget = (
+        None if retarget_all
+        else (prefetch_covered_cgsim | sync_prefetch_cgsim)
+    )
     n_retarget = _retarget_non_coldstart_weights_to_ram(
         trace, coldstart_cgsim,
-        prefetch_covered_cgsim_tids=prefetch_covered_cgsim,
+        prefetch_covered_cgsim_tids=covered_for_retarget,
     )
     print(
         f"[inject_schedule] retargeted {n_retarget} WEIGHT tensors → RAM "
@@ -815,6 +1028,92 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
         f"coverage_repaired_tids={repaired_tids} "
         f"deferred_evicts={len(evicts_to_drop)} "
         f"synth_gates={len(synthesized_gates)})",
+        flush=True,
+    )
+    # ---- Diagnostic breakdown of silent injector patches ----
+    # Each section below is a place where the injector PATCHED the
+    # schedule's intent without the scheduler's knowledge. Every
+    # non-zero count here is a scheduler-side bug we should fix at
+    # the root, not let the injector silently absorb.
+    print(
+        "[inject_schedule:diag] cold_start_resolution: "
+        f"pre_resolved={cs_diag['pre_resolved_entries']} "
+        f"({cs_diag['pre_resolved_bytes']/1e6:.1f}MB) | "
+        f"per_node_recovered={cs_diag['per_node_entries']} "
+        f"({cs_diag['per_node_bytes']/1e6:.1f}MB) | "
+        f"bundled_fallback={cs_diag['bundled_fallback_entries']} "
+        f"({cs_diag['bundled_fallback_bytes']/1e6:.1f}MB, "
+        f"extra_tids_added={cs_diag['bundled_fallback_extra_tids']}) | "
+        f"unresolved={cs_diag['unresolved_entries']} "
+        f"({cs_diag['unresolved_bytes']/1e6:.1f}MB)",
+        flush=True,
+    )
+    if cs_diag["samples_bundled_fallback"]:
+        print(
+            "[inject_schedule:diag]   bundled_fallback samples (gid, ctid, "
+            "size_mb, bundle_size): "
+            + ", ".join(
+                f"({g},{c},{sz/1e6:.1f}MB,n={n})"
+                for g, c, sz, n in cs_diag["samples_bundled_fallback"]
+            ),
+            flush=True,
+        )
+    if cs_diag["samples_unresolved"]:
+        print(
+            "[inject_schedule:diag]   unresolved samples (gid, ctid, "
+            "size_mb, uid): "
+            + ", ".join(
+                f"({g},{c},{sz/1e6:.1f}MB,uid={u})"
+                for g, c, sz, u in cs_diag["samples_unresolved"]
+            ),
+            flush=True,
+        )
+    print(
+        "[inject_schedule:diag] coverage_repair: "
+        f"demoted_no_arrivals={cov_diag['demoted_no_arrivals_tids']} "
+        f"({cov_diag['demoted_no_arrivals_bytes']/1e6:.1f}MB) | "
+        f"demoted_consumer_before_arrival="
+        f"{cov_diag['demoted_consumer_before_arrival_tids']} "
+        f"({cov_diag['demoted_consumer_before_arrival_bytes']/1e6:.1f}MB) | "
+        f"repaired={cov_diag['repaired_tids']} "
+        f"({cov_diag['repaired_bytes']/1e6:.1f}MB, "
+        f"synth_gates={cov_diag['synth_gates_count']})",
+        flush=True,
+    )
+    if cov_diag["samples_demoted"]:
+        print(
+            "[inject_schedule:diag]   demoted samples (cgsim_tid, "
+            "size_mb, name, n_un_gated, n_arrivals): "
+            + ", ".join(
+                f"({t},{sz/1e6:.1f}MB,{nm!r},ng={ng},ar={ar})"
+                for t, sz, nm, ng, ar in cov_diag["samples_demoted"]
+            ),
+            flush=True,
+        )
+    if cov_diag["samples_repaired"]:
+        print(
+            "[inject_schedule:diag]   repaired samples (cgsim_tid, "
+            "size_mb, name, n_synth, n_un_gated): "
+            + ", ".join(
+                f"({t},{sz/1e6:.1f}MB,{nm!r},sg={ns},ng={ng})"
+                for t, sz, nm, ns, ng in cov_diag["samples_repaired"]
+            ),
+            flush=True,
+        )
+    # Total VRAM impact: every demoted tid stays cuda from layout
+    # despite the schedule saying "stream it." The bundled_fallback
+    # extra tids are additional cgsim_tids the injector cold-starts
+    # beyond what the schedule named.
+    silent_overhead_bytes = (
+        cs_diag["bundled_fallback_bytes"]
+        + cs_diag["unresolved_bytes"]
+        + cov_diag["demoted_no_arrivals_bytes"]
+        + cov_diag["demoted_consumer_before_arrival_bytes"]
+    )
+    print(
+        f"[inject_schedule:diag] TOTAL silent-patch VRAM overhead "
+        f"(over what the schedule planned): "
+        f"{silent_overhead_bytes/1e6:.1f}MB",
         flush=True,
     )
 
@@ -845,15 +1144,27 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
         if evict_node_id is None:
             n_ev_skipped += 1
             continue
-        # Per-node evict tid resolution: jit_sim_prune anchors each
-        # evict to the kernel that just read this tensor as its last
-        # use. That kernel's input_tensors carry the exact iter-
-        # instance cgsim_tid we want to free here — same per-node
-        # logic as the prefetch path, no bundling.
-        cgsim_tid = _resolve_tid_for_node(
-            trace, evict_node_id, gid, evict_lid, ctid,
-            tensor_metas, lid_ctid_order,
-        )
+        # Fast path: scheduler pre-resolved cgsim_tid at emit time
+        # (resolve_neutral_cgsim_tids uses tl.tensors[uid].trace_tids
+        # for an exact storage lookup). The prefetch path above uses
+        # this fast path; mirror it here so per-use emits whose
+        # consumer-k node has many same-shape inputs don't fall back
+        # to shape-tiebreaker and silently mis-resolve. Without this
+        # the per-node resolver returns None on small-shape tensors
+        # with many same-shape candidates and the evict gets dropped.
+        pre_resolved_ev = int(ev.get("cgsim_tid", -1))
+        if pre_resolved_ev >= 0 and pre_resolved_ev in trace.tensor_map:
+            cgsim_tid = pre_resolved_ev
+        else:
+            # Per-node evict tid resolution: jit_sim_prune anchors each
+            # evict to the kernel that just read this tensor as its last
+            # use. That kernel's input_tensors carry the exact iter-
+            # instance cgsim_tid we want to free here — same per-node
+            # logic as the prefetch path, no bundling.
+            cgsim_tid = _resolve_tid_for_node(
+                trace, evict_node_id, gid, evict_lid, ctid,
+                tensor_metas, lid_ctid_order,
+            )
         if cgsim_tid is None:
             n_ev_unresolved_tid += 1
             n_ev_skipped += 1
@@ -957,7 +1268,9 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
     print(
         f"[inject_schedule:neutral] "
         f"prefetch async={n_pf_async} sync_fallback={n_pf_sync} "
+        f"infeasible_ts={n_pf_infeasible} "
         f"exact={n_pf_exact} launch_fallback={n_pf_launch_fallback} "
+        f"pre_resolved={n_pf_pre_resolved} "
         f"(skipped {n_pf_skipped}, unresolved_tid={n_pf_unresolved_tid}); "
         f"evict={n_ev_applied} exact={n_ev_exact} "
         f"launch_fallback={n_ev_launch_fallback} "
