@@ -38,7 +38,6 @@ class DataRegion(ABC):
         self.hw: "BaseMemory | BaseStorage" = hw
         self.num_pages: int = num_pages
         self.tensor_id: int = tensor_id    # Data(tensor) stored in this region
-
         self.is_latest: bool = False       # Is this copy of tensor, up-to-date value?
         self.is_ready: bool = False        # Is value ready to be used? (not unitialized, or in the middle of data transfer)
 
