@@ -46,108 +46,140 @@ because both graphs' consumers reference the same `cgsim_tid`.
 
 For each pool tid `t` with `n_t` consumers:
 
-| Variable | Domain | Count |
-|----------|--------|-------|
-| `c_t`           | {0, 1}         | one per tid (binary) |
-| `e_{t,k}`       | {0, 1}         | one per *feasible* cross-iter gap (binary) |
-| `P`             | ℝ ≥ 0          | one global (modeled peak VRAM, bytes) |
-| `L_max`         | ℝ ≥ 0          | one global (max consumer lateness, ns) |
-| `s_P`           | ℝ ≥ 0          | one global (peak overrun slack, bytes) |
+| Variable      | Domain | Count |
+|---------------|--------|-------|
+| `c_t`         | {0, 1} | one per feasible pool tid (binary) |
+| `e_{t,k}`     | {0, 1} | one per *feasible* cross-iter gap (binary) |
+| `P`           | ℝ ≥ 0  | one global (modeled peak VRAM, bytes) |
+| `L_window_i`  | ℝ ≥ 0  | one per timeline window (default 20 windows; ns of stall) |
+| `s_P`         | ℝ ≥ 0  | one global (peak overrun slack, bytes) |
 
-**Conditional coupling.** For tids where the initial JIT prefetch
-fits (`c_feasibility = True`), the LP imposes `e_{t,k} = 1 − c_t`
-on every feasible gap. This locks the tid into one of two natural
-patterns:
+**Symmetric coupling: `c_t + e_{t,k} = 1`** on every feasible gap.
+Locks each tid into one of two patterns:
 
-- `c=1, e=0 ∀k` — pinned cold, resident the whole run (no PCIe).
-- `c=0, e=1 ∀k` — JIT prefetched, per-iter evict+refetch cycle.
+| `c` | `e` | meaning |
+|---|---|---|
+| 1 | 0 | cold, locked in VRAM the whole run |
+| 0 | 1 | per-iter JIT prefetch+evict cycle |
 
-The cycle pattern matches `jit_sim_prune` and empirically gives the
-right peak/PCIe tradeoff. Without coupling, the LP gravitates toward
-`c=0, e=0` (streamed but never evicted, alive the whole run), which
-collapses peak to near-cold-floor and fails cap on every workload.
+The two patterns the symmetric coupling rules out:
 
-For **forced-cold tids** (`c_feasibility = False`, meaning the
-initial prefetch can't fit — `c` is pinned to 1 via variable bounds),
-the coupling is **lifted**. The LP could in principle pick:
+- `c=0, e=0` — streamed but never evicted (tensor alive from initial
+  prefetch to last consumer with no PCIe round trip; peak inflates
+  with no benefit). Forbidden by `c + e ≥ 1`.
+- `c=1, e=1` — *hybrid*: cold at layout, evict mid-run, refetch
+  before later consumers. Mathematically sound, but **not currently
+  supported by the injector**. See note below.
 
-- **`c=1, e=1` for some `k`** — *hybrid*: loaded at layout for early
-  consumers, evicted mid-run when its VRAM is needed elsewhere, then
-  refetched from RAM before later consumers.
-
-The motivation: a forced-cold tensor *can* be evicted later in the
-run even though its initial JIT prefetch isn't viable; the LP should
-be free to choose that pattern when peak pressure makes it worth one
-round trip.
-
-In the current implementation, the *coupling* is correctly lifted
-(forced-cold tids' `e` variables are free), but the dead-zone peak
-classification still encodes `size · c` rather than `size · (1 − e)`,
-so the LP doesn't yet observe the VRAM savings from `e=1` and picks
-`e=0` by default (the per-byte refetch penalty in the objective
-also pushes that way). The straightforward `size · (1 − e)` rewrite
-that would let hybrid mode actually fire causes HiGHS numerical
-issues on tight-cap workloads — fixing this is a future LP
-refinement (better matrix scaling, MIP cuts, or warm-starting). For
-now the structural coupling is removed but the hybrid pattern is
-not yet incentivized.
+For **c-infeasible tids** (`c_feasibility = False`, c pinned to 1 via
+bounds), coupling forces `e = 0` on every feasible gap — they sit
+cold the whole run.
 
 Infeasible gaps have no `e` variable (implicit `e ≡ 0`).
 
+### Why no hybrid mode (`c=1, e=1`)?
+
+The hybrid pattern would let a cold-started tid reclaim VRAM during
+a long inter-consumer gap and refetch from RAM before the next use.
+Conceptually it's exactly the right knob for tight caps with
+spread-out consumers (sd3med UNet weights, llama8b decoder weights
+used across many tokens).
+
+We tested it. The LP picks hybrid plans cleanly (integer MILP via
+highspy two-phase warm-start converges), but **sim peak exceeds LP
+prediction by ~1 GB on sd3med 8g** because the injector's
+`coverage_repair` pass:
+
+1. Adds the tid to `prefetch_covered_cgsim` once any prefetch arrival
+   exists (the refetch is a prefetch).
+2. Iterates all gpu consumers of the tid and demands each be gated by
+   an async arrival in the schedule.
+3. Cold-start residency *doesn't count as a gate*. So consumers
+   BEFORE the mid-run evict are un-gated and the tid gets demoted
+   back to fully resident — adding silent-patch VRAM overhead the LP
+   didn't see.
+
+Fixing this would need either:
+
+- An injector change so cold-start counts as a gate for consumers in
+  `[layout, first_evict_node]` (out of scope here, breaks injector
+  compatibility);
+- Or modeling silent-patch overhead in the LP's peak constraint when
+  it picks hybrid (LP becomes harder to converge — adding ~size·c·e
+  bilinear terms breaks linearity).
+
+The symmetric coupling forbids `c=1, e=1` structurally so the LP
+stays in sync with what the injector + sim will actually realize.
+
 ## Feasibility filters
 
-Two structural reasons a gap is **infeasible** for evict-refetch:
+These are checks on *what's structurally expressible* by each
+variable, not bans on residency strategies. They keep the LP's plan
+honest about what the emitter + injector can actually realize.
 
-- **Gap too narrow**: `consumer_{k+1}.start_ns − consumer_k.end_ns < τ_h2d_t`,
-  where `τ_h2d_t = h2d_latency_ns + size_t / h2d_bw` is the per-tid
-  H2D transfer time. The eviction + refetch round trip can't fit, so
-  the tid stays resident across the gap. (D2H runs concurrent with
-  H2D under duplex, so only one side of the round trip enters this
-  test.)
+**Per-gap (`gap_feasibility[k]`)** — gates the existence of
+`e_{t,k}`:
 
-And **c-infeasibility** — the initial prefetch can't fit:
+- A gap is **infeasible** if `consumer_{k+1}.start − consumer_k.end <
+  τ_h2d_t`, where `τ_h2d_t = h2d_latency_ns + size_t / h2d_bw`. The
+  evict + refetch round trip can't physically fit in that window, so
+  the tid stays resident across that gap regardless of any decision.
+  No `e_{t,k}` variable is created (implicit `e ≡ 0`); the peak
+  constraint records the tid as alive across the gap. D2H runs
+  concurrent with H2D under duplex, so only one side of the round
+  trip enters this test.
 
-- **No async issuer fits**: the tid's first consumer is the earliest
-  gpu node in its graph. The emitter's issuer-picker searches
-  *within the consumer's graph* for a predecessor gpu node ≤
-  `consumer.start_ns − τ_h2d`. If none exists, the emit falls back
-  to a synchronous prefetch (issuer = consumer), which the injector's
-  coverage-repair typically demotes back to cold. So we pin `c_t = 1`
-  upfront — the LP plans the residency explicitly and the peak
-  constraint sees it.
+**Per-tid (`c_feasibility`)** — pins `c_t = 1` when the initial JIT
+prefetch can't be async:
 
-If neither path works (`!c_feasible` AND no feasible gap), the tid
-is moved into a `forced_cold` set and removed from the LP entirely;
-its bytes contribute to a constant floor.
+- A tid is **c-infeasible** if `consumer[0].start − graph_first_gpu_ns
+  < τ_h2d_t`. The emitter's issuer-picker searches *within the
+  consumer's graph* for a predecessor gpu node ≤ `consumer.start −
+  τ_h2d`. If none exists, the emit falls back to a synchronous
+  prefetch (issuer = consumer), which the injector's coverage-repair
+  silently demotes back to cold. Pinning `c_t = 1` upfront matches
+  what would happen anyway — but crucially the LP can still pick
+  `e_{t,k} = 1` for individual gaps (the coupling is lifted for
+  these tids), enabling the hybrid `(c=1, e=1)` pattern. Without
+  this pin, the LP could pretend the tid is streamed and save
+  cold_floor bytes the injector would silently take back.
+
+**Both** (`!c_feasibility` AND no feasible gap): tid moves to a
+`forced_cold` set and is removed from the LP entirely; its bytes
+contribute as a constant floor on `P`. Usually this set is empty
+(`--audit` reports `forced_cold=0` on every workload in the matrix).
 
 ## Objective
 
 ```
-minimize  L_max  +  1e6 · s_P  −  ε · Σ_t size_t · c_t
-                              +  ε · Σ_{(t,k) feasible} size_t · e_{t,k}
+minimize  Σ_i L_window_i  +  1e6 · s_P
+       −  ε · Σ_t size_t · c_t
+       +  ε · Σ_{(t,k) feasible} size_t · e_{t,k}
 ```
 
-Three layers, in order of magnitude:
+Layers in order of magnitude:
 
 1. **`s_P` at 1e6 ns/byte**: a hard penalty on overrunning the peak
    cap. 1 byte over cap ≈ 1 ms of equivalent lateness, dominating
    every other term. The LP fits cap whenever any feasible plan
    exists.
-2. **`L_max`**: the max consumer lateness across the run (ns), the
-   primary objective. The LP genuinely minimizes time compute spends
-   waiting for prefetches.
+2. **`Σ L_window_i`**: total stall summed over all timeline windows.
+   Each window's slack ≥ 0 absorbs that window's PCIe overshoot;
+   summing matches the physical reality that per-window stalls
+   cascade — total e2e wall-clock extension is the sum, not the max.
+   This is the primary objective: minimize the actual stall time.
 3. **`ε · streaming bytes` (ε = 1)**: a per-byte cold tiebreaker.
-   When multiple plans are tied at `L_max = 0` (no stall), this
+   When multiple plans tie at `Σ L_window_i = 0` (no stall), this
    pushes the LP to pick the plan with the *least* streaming —
-   equivalent to "minimize PCIe traffic for free" since cold tensors
-   load once at startup. Without this tiebreaker the LP picks an
-   arbitrary feasible plan, often heavy streaming → worse PCIe
-   contention → worse sim e2e.
+   equivalent to "minimize PCIe traffic for free." Without this
+   tiebreaker the LP picks an arbitrary feasible plan, often heavy
+   streaming → worse PCIe contention → worse sim e2e.
 
-The ε term also includes refetch bytes: a refetched tid contributes
-`size · e_{t,k}` per gap. This correctly accounts for multi-iter
-weights where streaming pays the size cost N times (one per
-refetch).
+The ε term covers both initial-prefetch bytes (`size · (1 − c_t)`,
+expanded as `−ε·size·c`) and per-feasible-gap refetch bytes
+(`size · e_{t,k}`). Multi-iter weights pay the size cost N times if
+they evict per iteration, correctly accounting for the cycle
+pattern's PCIe load.
 
 ## Peak constraint (per-moment alive-set sum)
 
@@ -172,16 +204,51 @@ Where `alive(t, T_i)` is a function of `c_t`, `e_{t,k}`, and where
 
 The "always alive" cases get added to a constant addon at `T_i`; the
 `size · c_t` cases get added to a variable-term coefficient for
-`c_t`. The peak row is then `P ≥ const_i + Σ size_t · c_t`.
+`c_t`. The peak row is `P ≥ const_i + Σ size_t · c_t`.
 
-Under the conditional coupling (c-feasible tids), the dead-zone
-contribution `size · c_t` is mathematically equivalent to
-`size · (1 − e_{t,k})` because `e = 1 − c` is enforced. We encode
-the former because it preserves a uniform row shape across all tids
-and keeps HiGHS's matrix scaling well-conditioned. The
-`size · (1 − e)` rewrite that would let hybrid mode actually fire
-for forced-cold tids is a future refinement (see "Conditional
-coupling" above).
+Under the symmetric `c + e = 1` coupling, `(1 − e) = c`, so the
+dead-zone contribution `size · (1 − e_{t,k})` reduces to
+`size · c_t` — we encode the latter for a uniform row shape across
+all regions. If the coupling were lifted (hybrid mode enabled),
+the dead-zone term would need the `size · (1 − e)` encoding to
+correctly observe the VRAM freed by mid-run eviction. See the
+"Why no hybrid mode" subsection above for why we don't currently
+do this.
+
+The peak-cap row that ties `P` to the user's target lives next to
+the lateness rows (see below).
+
+## Lateness constraint (per-window PCIe budget)
+
+The timeline `[trace_start, trace_end]` is split into `N = 20` equal
+windows. For each window `i` with bounds `[s_i, e_i]`:
+
+```
+Σ_{t : first_consumer(t).start ∈ [s_i, e_i]}        δ_t · (1 − c_t)
++ Σ_{(t,k) feasible : consumer_{k+1}.start ∈ [s_i, e_i]}  δ_t · e_{t,k}
+≤  (e_i − s_i)  +  L_window_i
+```
+
+where `δ_t = h2d_latency + size_t / h2d_bw` is the per-tid H2D time.
+
+**What this models**: with `h2d_streams = 1`, the PCIe queue is
+serial. In each window the queue has `(e_i − s_i)` ns of throughput
+available. If the H2D work whose *deadline falls in this window*
+exceeds the window length, the schedule stalls compute in that
+window — `L_window_i` absorbs the excess.
+
+**Why per-window, not a single `L_max`**: a single global slack
+lets the LP "average" PCIe load across windows — it can plan a
+plan where iter 0 has 200 ms of slack and iter 1 has 200 ms of
+overshoot, and the max would only be 200 ms. But sim's actual
+behavior is *cascading*: iter 0's slack doesn't carry forward, and
+iter 1's overshoot stalls iter 1's compute regardless. Per-window
+slacks force each iteration / phase to fit independently, and
+summing them in the objective matches the physical wall-clock
+extension (stalls add, they don't max).
+
+D2H evictions run concurrent with H2D under duplex, so eviction
+transfers don't enter the H2D budget.
 
 A separate **soft cap row** ties `P` to the user's target:
 
@@ -192,32 +259,6 @@ P − s_P  ≤  cap · (1 − margin)
 `margin` (default 0.07) is a safety pad that absorbs the gap between
 "what the LP modeled at sample points" and "what sim actually does
 at unsampled moments" — see *Sampling* below.
-
-## Lateness constraint (cumulative PCIe model)
-
-For each sample point `T_i`:
-
-```
-Σ_{t : first_consumer(t).start ≤ T_i}       δ_t · (1 − c_t)
-+ Σ_{(t,k) feasible : consumer_{k+1}.start ≤ T_i}  δ_t · e_{t,k}
-≤  T_i  +  L_max
-```
-
-where `δ_t = h2d_latency + size_t / h2d_bw` is the per-tid H2D time.
-
-**What this models**: with `h2d_streams = 1`, the PCIe queue is
-serial. At any time `T`, every transfer whose consumer's deadline has
-passed must have completed. The sum on the left is the total H2D
-work the queue must have processed by `T_i`. If that total exceeds
-`T_i`, the schedule has stalled compute — `L_max` absorbs the excess.
-
-The maximum-lateness formulation (single `L_max` shared across all
-sample-point constraints) is the right one for end-to-end time:
-under cascading stalls in a serial queue, total runtime overshoots
-the ideal by exactly the max cumulative excess, not the sum.
-
-D2H evictions run concurrent with H2D under duplex, so eviction
-transfers don't enter this cumulative budget.
 
 ## Sampling
 
@@ -259,11 +300,29 @@ etc. and skips the shape-disambiguation resolver entirely — no
 
 ## Solver
 
-HiGHS via `scipy.optimize.linprog`. The MILP (integer `c` and `e`)
-times out on workloads with >2000 binaries within the 120 s budget,
-so the implementation falls back to the LP relaxation (continuous
-`c`, `e` in [0, 1]) and rounds at 0.5 at emit time. Empirically the
-relaxation lands near-integer (e.g., sd3-med 14g: 266 ≈ 0, 2175 ≈ 1,
-only 11 fractional out of 2452) so the rounding is a small
-perturbation of the relaxation's optimum. The `--audit` flag prints
-the c-value distribution for inspection.
+**Two-phase MILP via [highspy](https://pypi.org/project/highspy/)**:
+
+1. **Phase 1**: solve LP relaxation (continuous `c`, `e` in `[0, 1]`,
+   no integrality). Fast (~1 s on sd3med scale) — gives a near-integer
+   fractional point (99 %+ of binaries at boundaries under the
+   symmetric coupling).
+2. **Round** Phase-1 solution at 0.5: each binary set to its nearest
+   integer. The symmetric coupling guarantees that 0.5-thresholding
+   keeps `c + e = 1` intact (proof by case: `c ≥ 0.5` ⇒ `c = 1` and
+   `e < 0.5` ⇒ `e = 0` since LP has `e = 1 − c`; similarly for the
+   other case).
+3. **Phase 2**: flip binaries to integer, pass the rounded values
+   as warm-start via `Highs.setSolution()`, run MILP. A good
+   warm-start sets a tight initial incumbent → aggressive
+   branch-pruning. On the validated matrix the MILP either converges
+   to integer optimality (`fell_back=False`, status `Optimal`) or
+   returns a proven-integer incumbent at time limit
+   (`fell_back=False`, status `Time limit reached`); either way the
+   plan is a real integer solution, not a rounded relaxation.
+4. **Fallback**: if highspy isn't installed, the implementation falls
+   back to `scipy.optimize.linprog` with `method='highs'` — same
+   warm-start logic isn't exposed there, so it just runs MILP cold
+   and may time out / fall back to LP relaxation rounded at 0.5.
+
+Default time limit: 240 s. The `--audit` flag prints the c-value
+distribution, MILP success status, and per-window stall breakdown.
