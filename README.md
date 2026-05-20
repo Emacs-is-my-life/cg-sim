@@ -21,7 +21,7 @@ This simulator has following characteristics:
 ```bash
 $ git clone https://github.com/Emacs-is-my-life/cg-sim.git
 $ cd cg-sim
-$ pip install -r docs/requirements.txt
+$ pip install --user -r docs/requirements.txt
 
 # graphviz should be installed separately
 # Use your system package manager: apt / yum / pacman / guix / ...
@@ -184,9 +184,80 @@ other Python code via `import`:
   than `argv`, agent code can `from parse_stall_time import main` and
   call `main(Path(result_path), "cpu", "ram")` directly after a run
   finishes, with no subprocess hop.
+- **Optional structured output (for downstream plotting):** Scripts that
+  produce tabular results MAY also write CSVs + a `meta.json` to a
+  directory, so that `scripts/visualization/` recipes can replot
+  without re-parsing the log.
+  - Signature gains a keyword-only `out_dir: Path | None = None`. When
+    `None`, write nothing (stdout summary still prints).
+  - CLI exposes it as `--out DIR`. A bare `--out` (no value) resolves
+    to the default `tmp/analysis/<script_stem>/<log_path.stem>/`.
+  - Tables are CSV with stable column names: time in microseconds with
+    `_us` suffix (`ts_us`, `dur_us`, `end_us`, `begin_us`), bytes in
+    `size_KB`, rates in `rate_KBps`, identifiers as `node_id`,
+    `tensor_id`, `hw_name`/`src_name`/`dest_name`.
+  - `meta.json` carries run config: `log_path`, hardware names,
+    `runtime_start_us`, `runtime_span_us`, plus any script knobs.
+  - Stdout summary is unchanged — disk output is a side-effect.
 
 When adding a new analysis script, copy `parse_stall_time.py` as a
-template and keep the same structure.
+template and keep the same structure. Use the helpers in
+`scripts/analysis/common/` so the column conventions are enforced
+rather than re-stated:
+
+  * `common.events` — `load_events`, `find_runtime_start`,
+    `parse_compute_jobs`, `parse_transfer_jobs`, dataclasses
+  * `common.intervals` — `merge_intervals`, `union_length`, `percentile`
+  * `common.io` — `default_out_dir`, `write_meta`, `write_table`,
+    `parse_out_flag`
+
+### Convention for `scripts/visualization/*.py`
+Visualization scripts consume the structured output of an analysis
+script (or a sweep) and render a figure. They follow the analysis
+convention with two substitutions: `log_path` → `in_dir`, stdout →
+figure file.
+
+- **Signature:** `def main(in_dir: Path, *script_specific_args, out_path: Path | None = None) -> None`.
+  `in_dir` is the analysis script's `out_dir` *or* a sweep dir
+  containing `summary.csv`. If `out_path` is `None`, the script
+  writes to `<in_dir>/<script_stem>.png` (or `.html` for Plotly).
+- **CLI:** `python scripts/visualization/<script>.py <in_dir> [extra args...] [--out PATH]`.
+- **Importable:** same rationale — Python callers pass parsed values.
+- **Shared helpers** live in `scripts/visualization/common/`:
+  * `common.style` — Okabe-Ito palette and paper-friendly matplotlib defaults
+  * `common.io` — `read_meta`, `read_table`, `load_summary`,
+    `parse_out_path_flag`, `default_viz_out_path`
+- **Library choice:** matplotlib for paper figures (line, CDF, stacked
+  bar, heatmap), Plotly for interactive timelines / Gantt views.
+
+### Convention for `scripts/experiments/*.py`
+Experiment runners produce a config matrix, run cg-sim per cell, call
+analysis helpers per cell, and aggregate metrics into a sweep
+directory.
+
+- **Output layout:**
+  ```
+  tmp/sweeps/<experiment_name>/
+      summary.csv                # one row per cell, joined metrics
+      <cell_label>/
+          result_log.json
+          stdout.log, stderr.log, command.txt
+          prefetch_quality/      # analysis --out side-output
+          link_utilization/
+          reuse_distance/
+  ```
+- **Shared driver** is `scripts/experiments/sweep/`:
+  * `Cell(label, params, overrides)` describes a single run.
+  * `run_cell(base_yaml, cell, sweep_dir)` invokes `python main.py`
+    with the Hydra overrides + a forced `logger.args.result_path`
+    pointing into the cell directory.
+  * `collect_metrics(log_path, cell_dir, compute_hw, memory_hw, ...)`
+    runs the analysis scripts on the log and returns aggregate metrics
+    extracted from their `meta.json`s.
+  * `write_summary(sweep_dir, results, param_keys)` builds
+    `summary.csv` from the metric union.
+- **Visualization pairing:** `summary.csv` is the input contract for
+  `plot_metric_vs_param.py` and `plot_time_breakdown.py`.
 
 ### Current scripts
 - `parse_stall_time.py <log.json> <compute_hw_name> <memory_hw_name>`
@@ -255,7 +326,13 @@ Implement your own scheduler logic in `sim/sched/<scheduler-name>/`.
     configs (e.g. `flexinfer.sh` sweeps memory sizes).
   - `scripts/sim_test/`: MCP / debugger tests that drive `main_agent.py`
     end-to-end (`test_mcp_*.py`).
-  - `scripts/analysis/`: Post-run log analysis (e.g. `parse_stall_time.py`).
+  - `scripts/analysis/`: Post-run log analysis (e.g. `parse_stall_time.py`,
+    `prefetch_quality.py`, `link_utilization.py`, `reuse_distance.py`,
+    `schedule_diff.py`). Shared helpers in `common/`.
+  - `scripts/experiments/`: Sweep runners (`sweep_memory.py`,
+    `compare_schedulers.py`). Shared subprocess driver in `sweep/`.
   - `scripts/visualization/`: Plotting recipes for the analysis output
-    (e.g. `plot_results.gp`).
+    (`plot_metric_vs_param.py`, `plot_time_breakdown.py`, `plot_cdf.py`,
+    `plot_miss_curve.py`, `plot_timeline.py`, `plot_results.gp`). Shared
+    style/io in `common/`.
 - `main.py`: Simulator entry point

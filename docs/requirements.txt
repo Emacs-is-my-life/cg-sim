@@ -2,11 +2,14 @@ anyio
 fastuuid
 hydra-core
 ipython
+matplotlib
 mcp
 networkx
 numpy
 omegaconf
 orjson
+pandas
+plotly
 polars
 sortedcontainers
 pygraphviz
