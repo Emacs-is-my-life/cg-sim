@@ -9,7 +9,7 @@ import orjson
 
 from sim.core.sim_object import SimObject
 from sim.core.log import Log, TrackID, Level
-from sim.core.trace import TerminalNode
+from sim.core.trace import TerminalNode, NodeStatus
 from sim.core.job import BaseJob, ComputeJob, TransferJob
 from sim.core.debug import Debugger
 from sim.hw.memory.common import BaseMemory
@@ -282,6 +282,10 @@ class Engine(SimObject):
             # Inspect retired jobs
             retired_jobs = self._runtime_forward()
             for job in retired_jobs:
+                # Node: post-run hook
+                if isinstance(job, ComputeJob) and job.node.hook_post_run:
+                    job.node.hook_post_run(self.sys)
+
                 # DEBUG: BREAK_AT_JOB_RETIRED
                 if self.debugger.BREAK_IN_RUNTIME_STAGE and job.BREAK_AT_JOB_RETIRED:
                     debug = self.debugger
@@ -335,6 +339,11 @@ class Engine(SimObject):
 
                 # Start runnable jobs
                 if job_w.is_runnable(self.sys):
+                    # Node: pre-run hook
+                    if isinstance(job_w, ComputeJob) and job_w.node.hook_pre_run:
+                        job_w.node.hook_pre_run(self.sys)
+
+                    # Job begins execution
                     self.job_waiting.popleft()
                     job_w.begin(self.log, self.sys, self.timestamp_now)
                     self.job_running.append(job_w)  # Use append here, as ETA are None for new jobs
@@ -350,7 +359,6 @@ class Engine(SimObject):
                         hw = self.sys.hw
                         trace = self.sys.trace
                         self.debugger.break_in_runtime_stage("JOB_DISPATCHED")
-
                 else:
                     # Head-of-the-line blocking w/ no running job now
                     if len(self.job_running) == 0:
@@ -390,8 +398,15 @@ class Engine(SimObject):
 
     def _cleanup(self) -> None:
         """Write a report"""
+        node_all_done = True
+        for node in self.sys.trace.node_map.values():
+            if node.status != NodeStatus.DONE:
+                node_all_done = False
+                break
+
+        sim_succ = not self.signal_abort and node_all_done
         args = {
-            "simulation_success": str(not self.signal_abort),
+            "simulation_success": str(sim_succ),
             "simulation_time": self.timestamp_now,
             "hardware": {
                 "book": [],
@@ -431,6 +446,18 @@ class Engine(SimObject):
         # automatically — no per-site wiring needed.
         args = args if args is not None else {}
         self.log.record(Log.engine(self.id, "SIMULATION_ABORT", self.timestamp_now, args))
+        # Reentrancy guard: if we're already parked at a breakpoint, the
+        # caller must be the MCP server thread running `agent_execute(...)`
+        # — e.g. an `sys.claim(...)` from `execute(...)` whose assertion
+        # failed and routed through `sys.abort -> _log_abort`. Firing
+        # `break_on_abort` here would call `_continue_event.wait()` on the
+        # MCP thread while the engine thread is already parked on the same
+        # event, deadlocking both. The abort is still logged above, and
+        # the immediate caller (typically `sys.abort`) sets
+        # `signal_abort=True` next, so the run still tears down cleanly on
+        # the next `continue_simulation`.
+        if self.debugger._at_breakpoint:
+            return
         if self.debugger.BREAK_ON_ABORT:
             debug = self.debugger
             engine = self

@@ -172,28 +172,6 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         self._gate_by_consumer: dict[int, set[int]] = defaultdict(set)
 
         self._build_arrival_index()
-
-        # ---------------- bundle-recorded transfer ops ----------------
-        # Set of node_ids tagged is_transfer_op=True by the loader's
-        # _annotate_memcpy_transfer_nodes pass (gpu_runtime Memcpy HtoD/
-        # DtoH nodes when the loader's ``model_gpu_transfer_ops`` flag
-        # is on). When such a node is ready to submit, the scheduler
-        # fires a real TransferJob on the RAM↔VRAM bandwidth resource
-        # alongside the (zero-duration) ComputeJob that retires the
-        # node and decrements children's parent_count.
-        #
-        # No explicit gate is built on dst_tid: cg-sim's data graph
-        # already has cycles between recorded HtoD nodes and earlier
-        # compute kernels that re-read the same dst tid (storage
-        # aliasing collapses multiple iterations onto the same tid).
-        # Gating descendants on dst_tid would deadlock those cycles.
-        # Instead we rely on the trace's control-graph parent_count
-        # to order things, and treat the TransferJob purely as a
-        # bandwidth-accounting event.
-        self._transfer_op_nodes: set[int] = set()
-        for nid, node in self.sys.trace.node_map.items():
-            if (node.args or {}).get("is_transfer_op"):
-                self._transfer_op_nodes.add(int(nid))
         self._init_xfer_states()
 
         return
@@ -639,32 +617,6 @@ class DeviceAwareVanillaAsync(BaseScheduler):
 
             compute = self._compute_for_node(node)
 
-            # Bundle-recorded transfer ops (gpu_runtime Memcpy HtoD /
-            # DtoH with is_transfer_op tagged). Route through a real
-            # bandwidth-bound TransferJob on RAM↔VRAM in addition to
-            # the (zero-duration) compute submit. The compute submit
-            # is still needed so the engine's _retire_completed_nodes
-            # decrements children's pending_parent_count.
-            if node_id in self._transfer_op_nodes:
-                cap_x = getattr(compute, "max_concurrent_jobs", 1)
-                running_x = len(compute.job_running)
-                committed_x = committed_per_compute.get(compute, 0)
-                if running_x + committed_x >= cap_x:
-                    self.ready_node_ids.append(node_id)
-                    continue
-                fired = self._submit_transfer_op_node(node)
-                if fired is False:
-                    # Couldn't fire (e.g. dst claim failed because
-                    # VRAM is full). Re-queue and try next tick.
-                    self.ready_node_ids.append(node_id)
-                    continue
-                if node.args.get("dispatcher_outputs"):
-                    self._preclaim_dispatcher_outputs(node)
-                self.sys.compute(compute, node)
-                committed_per_compute[compute] = committed_x + 1
-                submitted_any = True
-                continue
-
             # Alias / dispatcher nodes carry custom_deps set by the
             # loader. The engine's compute_assertion takes the bypass
             # branch on those, skipping the input-residency and
@@ -871,72 +823,6 @@ class DeviceAwareVanillaAsync(BaseScheduler):
             cgsim_tids = self._prefetch_queue.popleft()
             if self._issue_prefetch(cgsim_tids):
                 self._active_prefetch_jobs += 1
-
-    def _submit_transfer_op_node(self, node: Node) -> bool:
-        """Fire a TransferJob for a tagged gpu_runtime Memcpy node.
-
-        Routes the bandwidth work through cg-sim's RAM↔VRAM transfer
-        machinery instead of running the node as a no-op ComputeJob on
-        the gpu compute resource. The node's (now zero-duration)
-        ComputeJob still gets submitted by the caller so the engine's
-        retire path decrements children's parent counts; downstream
-        consumers of dst_tid stay parked until the TransferJob retires
-        (gated via ``_gate_by_consumer`` and ``_xfer_state``).
-
-        Returns True on success, False if claim or src lookup failed
-        (caller should re-queue the node).
-        """
-        a = node.args or {}
-        kind = str(a.get("transfer_kind") or "")
-        src_tid = int(a.get("transfer_src_tid"))
-        dst_tid = int(a.get("transfer_dst_tid"))
-        tensor_src = self.sys.trace.tensor_map.get(src_tid)
-        tensor_dst = self.sys.trace.tensor_map.get(dst_tid)
-        if tensor_src is None or tensor_dst is None:
-            return False
-
-        # Pick src / dst homes.
-        if kind == "HtoD":
-            src_home, dst_home = self._ram, self._vram
-        elif kind == "DtoH":
-            src_home, dst_home = self._vram, self._ram
-        else:
-            return False
-
-        # Already-LOADED gate? Then the transfer has already fired
-        # for this tid (e.g. an earlier transfer-op node with the
-        # same dst). Skip; just submit the zero-dur ComputeJob.
-        cur_state = self._xfer_state.get(dst_tid, _ABSENT)
-        if cur_state in (_LOADING, _LOADED, _RESIDENT):
-            return True
-
-        # Get src region.
-        src_regions = src_home.space.get_by_tensor_id(src_tid)
-        if not src_regions:
-            return False
-        src = src_regions[0]
-
-        # Get or claim dst region. For in-place HtoD writes (dst tid
-        # already present on dst_home from a prior aten::empty), reuse.
-        dst_regions = dst_home.space.get_by_tensor_id(dst_tid)
-        if dst_regions:
-            dst = dst_regions[0]
-        else:
-            dst = self._claim_region(dst_home, tensor_dst)
-            if dst is None:
-                # VRAM full — caller re-queues.
-                return False
-
-        # Fire the transfer. Use ``cross_tid_copy`` to opt out of
-        # TransferJob's same-tid assertion — bundle-recorded memcpys
-        # move bytes between two distinct trace tids.
-        job_id = self.sys.transfer(
-            [(src, dst)],
-            args={"cross_tid_copy": True, "transfer_kind": kind},
-        )
-        self._inflight_jobs[job_id] = [dst_tid]
-        self._xfer_state[dst_tid] = _LOADING
-        return True
 
     def _issue_prefetch(self, cgsim_tids: list[int]) -> bool:
         """Fire async RAM->VRAM transfer for the given tensors."""
