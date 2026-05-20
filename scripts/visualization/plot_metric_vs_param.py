@@ -22,9 +22,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
     apply_matplotlib_defaults,
+    axis_label,
+    best_time_scale,
     color_for,
+    display_name,
+    legend_label,
     load_summary,
+    minsec_formatter,
     parse_out_path_flag,
+    shared_unit,
 )
 
 
@@ -56,22 +62,47 @@ def main(
 
     df = df.sort_values(param_col)
 
+    # Choose Y-axis treatment. If all metrics share a unit we put it on
+    # the axis and keep the legend clean; if they're mixed (e.g. KB +
+    # KBps) the axis becomes "Value" and units move into the legend.
+    # For time (us) we also auto-scale so values plot as ms or s, not 1e7.
+    common_unit = shared_unit(metric_cols)
+    divisor = 1.0
+    if common_unit == "us":
+        max_us = float(df[metric_cols].to_numpy().max())
+        divisor, display_unit = best_time_scale(max_us)
+        y_label = f"time [{display_unit}]"
+        use_minsec = display_unit == "s" and (max_us / 1_000_000.0) >= 60.0
+    elif common_unit is not None:
+        y_label = f"[{common_unit}]"
+        use_minsec = False
+    else:
+        y_label = "Value"
+        use_minsec = False
+
     fig, ax = plt.subplots()
     for i, col in enumerate(metric_cols):
+        y_vals = df[col] / divisor if common_unit == "us" else df[col]
+        label = legend_label(col, include_unit=(common_unit is None))
         ax.plot(
             df[param_col],
-            df[col],
+            y_vals,
             marker="o",
             color=color_for(i),
-            label=col,
+            label=label,
         )
-    ax.set_xlabel(param_col)
-    ax.set_ylabel(metric_cols[0] if len(metric_cols) == 1 else "value")
+    ax.set_xlabel(axis_label(param_col))
+    ax.set_ylabel(y_label)
+    if use_minsec:
+        ax.yaxis.set_major_formatter(minsec_formatter())
     if log_y:
         ax.set_yscale("log")
     if len(metric_cols) > 1:
         ax.legend(frameon=False)
-    ax.set_title(f"{Path(in_dir).name}: {', '.join(metric_cols)} vs {param_col}")
+    metric_names = ", ".join(display_name(c) for c in metric_cols)
+    ax.set_title(
+        f"{Path(in_dir).name}: {metric_names} vs {display_name(param_col)}"
+    )
 
     if out_path is None:
         out_path = in_dir / "plot_metric_vs_param.png"

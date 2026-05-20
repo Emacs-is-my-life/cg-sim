@@ -34,9 +34,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sweep import (  # noqa: E402
     Cell,
     SweepResult,
+    analysis_dir,
     collect_metrics,
     default_sweep_dir,
     run_cell,
+    update_latest_symlink,
+    write_manifest,
     write_summary,
 )
 
@@ -63,45 +66,64 @@ def main(
     if common_overrides:
         print(f"common -overrides: {common_overrides}")
 
-    results: list[SweepResult] = []
+    cells: list[Cell] = []
     for entry in spec:
-        label = entry["label"]
         per_cell_overrides = list(entry.get("overrides", []))
-        cell = Cell(
-            label=label,
+        cells.append(Cell(
+            label=entry["label"],
             params={
-                "scheduler": label,
+                "scheduler": entry["label"],
                 "overrides": " ".join(per_cell_overrides),
             },
             overrides=common_overrides + per_cell_overrides,
-        )
-        print(f"\n[cell {label}] launching cg-sim …")
+        ))
+
+    write_manifest(
+        sweep_dir,
+        experiment_name=experiment_name,
+        base_yaml=base_yaml,
+        cells=cells,
+        description=(
+            f"Scheduler comparison on compute={compute_hw}, memory={memory_hw}. "
+            f"Spec: {Path(schedulers_json).name}."
+        ),
+        common_overrides=common_overrides,
+    )
+
+    results: list[SweepResult] = []
+    for cell in cells:
+        print(f"\n[cell {cell.label}] launching cg-sim …")
         try:
-            cell_dir, log_path = run_cell(base_yaml, cell, sweep_dir)
+            cell_analysis_dir, log_path = run_cell(base_yaml, cell, sweep_dir)
         except Exception as e:
-            print(f"[cell {label}] FAILED to run: {e}")
-            results.append(
-                SweepResult(cell=cell, log_path=Path(), cell_dir=sweep_dir / label,
-                            metrics={"status": "run_failed", "error": str(e)})
-            )
+            print(f"[cell {cell.label}] FAILED to run: {e}")
+            results.append(SweepResult(
+                cell=cell, log_path=Path(),
+                cell_analysis_dir=analysis_dir(sweep_dir, cell.label),
+                metrics={"status": "run_failed", "error": str(e)},
+            ))
             continue
-        print(f"[cell {label}] log → {log_path}")
+        print(f"[cell {cell.label}] log → {log_path}")
 
         try:
-            metrics = collect_metrics(log_path, cell_dir, compute_hw, memory_hw)
+            metrics = collect_metrics(
+                log_path, cell_analysis_dir, compute_hw, memory_hw,
+            )
         except Exception as e:
-            print(f"[cell {label}] analyses FAILED: {e}")
+            print(f"[cell {cell.label}] analyses FAILED: {e}")
             metrics = {"status": "analysis_failed", "error": str(e)}
         else:
             metrics["status"] = "ok"
 
-        results.append(
-            SweepResult(cell=cell, log_path=log_path, cell_dir=cell_dir, metrics=metrics)
-        )
+        results.append(SweepResult(
+            cell=cell, log_path=log_path,
+            cell_analysis_dir=cell_analysis_dir, metrics=metrics,
+        ))
 
     summary = write_summary(
         sweep_dir, results, param_keys=["scheduler", "overrides"]
     )
+    update_latest_symlink(sweep_dir)
     print(f"\nSweep complete. summary: {summary}")
     print(f"Plot with: python scripts/visualization/plot_time_breakdown.py {sweep_dir}")
 

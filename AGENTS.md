@@ -649,3 +649,101 @@ catalog and calling convention.
 During parameter sweeps, set `logger.args.result_path` to a distinct
 path per run (via the `overrides` arg of `restart_simulation`) so
 each run's log is preserved for post-mortem.
+
+# Output directory conventions
+
+Every artifact an agent produces — simulator traces, analyses, plots —
+goes under `output/<experiment-setup>/`. One experiment, one tree. No
+loose files in `output/` root, no `tmp/sweeps/`, no ad-hoc paths in
+`tmp/`. The sweep runner already enforces this layout; standalone
+agent runs should match it.
+
+## Layout
+
+```
+output/<experiment-setup>/
+  experiment.yaml           # manifest: base config, overrides, git SHA, timestamp
+  summary.csv               # one row per cell, joined metrics (sweeps only)
+  sim_results/
+    <run-id>.json           # raw cg-sim trace (Chrome-trace JSON)
+    <run-id>.command.txt    # exact `main.py` invocation + overrides
+    <run-id>.stdout.log
+    <run-id>.stderr.log
+  analysis/
+    <run-id>/
+      prefetch_quality/     # CSVs + meta.json from scripts/analysis/*.py --out
+      link_utilization/
+  plots/
+    <plot-name>.png         # from scripts/visualization/*.py --out
+    <plot-name>.html        # interactive timelines
+```
+
+Plus, refreshed at the end of every sweep:
+
+```
+output/latest -> <most-recent-experiment-setup>/   # convenience symlink
+```
+
+## Naming rules
+
+- **`<experiment-setup>`** — kebab-case identifier, one per logical
+  experiment. For sweep runners, pass it explicitly
+  (`flexinfer-mem-sweep`, `prefetch-window-tuning`). For one-off runs
+  of a stock YAML, the YAML basename is the natural default
+  (`llamacpp_llama-3-8B_flexinfer` for
+  `examples/run/llamacpp_llama-3-8B_flexinfer.yaml`).
+- **`<run-id>`** — the cell label in sweeps (`4GB`, `flexinfer-pw3`,
+  `vanilla`). For single-shot runs of a YAML use `result` (so the
+  artifact reads as `sim_results/result.json`, not the misleading
+  `default.json`). Filesystem-safe: ASCII letters/digits/underscores/dashes only.
+- **`<plot-name>`** — script stem by default
+  (`plot_metric_vs_param.png`). Override with `--out` when producing
+  multiple plots of the same script in one experiment.
+
+## When the user asks you to run experiments
+
+1. **Pick a setup name** that describes the experiment in one
+   hyphenated phrase. If the user names it, use that. Otherwise
+   default to `<base-config-basename>` for single runs or
+   `<scheduler>-<knob>-sweep` for sweeps.
+2. **Drive the run** through the sweep runner if there's more than
+   one cell, or through `main.py` with a `logger.args.result_path`
+   override otherwise. Either path must land JSONs under
+   `output/<setup>/sim_results/<run-id>.json`.
+3. **Run analyses with `--out output/<setup>/analysis/<run-id>/<analysis-name>/`**
+   so each analysis's CSVs + `meta.json` land in the canonical place.
+   The sweep runner does this for you; manual `python3
+   scripts/analysis/*.py` calls need an explicit `--out`.
+4. **Render plots with `--out output/<setup>/plots/<plot-name>.png`**
+   (or `.html`). When `--out` is omitted, the viz scripts default to
+   `<experiment-root>/plots/<script-stem>.png`, so this often happens
+   automatically — but be explicit when generating more than one plot
+   per script.
+5. **Mention the artifact path** in your final summary so the user
+   can `ls output/<setup>/`. Don't drop files in the repo root, in
+   `tmp/`, or in `output/` directly.
+
+## What goes where, by tool
+
+| Producer | Writes to |
+|---|---|
+| `main.py` / `main_agent.py` | `sim_results/<run-id>.json` (via `logger.args.result_path`) |
+| `scripts/experiments/sweep_memory.py`, `compare_schedulers.py` | full experiment tree, manifest, `summary.csv` |
+| `scripts/analysis/*.py --out PATH` | a single `<analysis-name>/` subdir (CSVs + `meta.json`) |
+| `scripts/visualization/*.py --out PATH` | a single PNG/HTML file under `plots/` |
+
+## Manifest (`experiment.yaml`)
+
+Each sweep writes a manifest at the experiment root capturing
+everything needed to reproduce it: base config path, common
+overrides, per-cell overrides, git SHA at run time, UTC timestamp,
+free-form description. Treat this file as authoritative provenance —
+do not edit it after the run; rerun the experiment instead.
+
+## Use `tmp/`, not `output/`, for scratch
+
+`output/` is for artifacts the user will browse, share, or version
+between experiments. `tmp/` is for scratch: throwaway MCP-driven
+runs, exploratory dumps, intermediate files you'll delete in the
+same session. Both are in `.gitignore`. When in doubt, put it in
+`output/` — disambiguating later is harder than overcleaning now.

@@ -213,6 +213,10 @@ def main(
 
     # --- Structured side-output ---
     runtime_span_us = max(c.end_us for c in computes) - t_start
+    # Compulsory-miss floor: any scheduler must touch each distinct tensor
+    # at least once. Sole salvageable scalar from the (deleted) Mattson
+    # reuse-distance analysis.
+    unique_tensors = len({tid for tr in transfers for tid in tr.tensor_ids})
     write_meta(
         out_dir,
         script="prefetch_quality",
@@ -224,6 +228,7 @@ def main(
         module_depth=module_depth,
         num_compute_jobs=len(computes),
         num_transfer_jobs=len(transfers),
+        unique_tensors_accessed=unique_tensors,
         total_stall_us=total_stall,
         attributed_stall_us=attrib_dur,
         unattributed_stall_us=unattr_dur,

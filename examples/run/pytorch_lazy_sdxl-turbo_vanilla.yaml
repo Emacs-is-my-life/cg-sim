@@ -1,6 +1,6 @@
 logger:
   args:
-    result_path: "output/python-lazy-sdxl-turbo.json"
+    result_path: "output/pytorch_lazy_sdxl-turbo_vanilla/sim_results/result.json"
     log_level: 1
 trace:
   type: "PytorchProfile"

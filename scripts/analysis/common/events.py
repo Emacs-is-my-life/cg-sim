@@ -10,8 +10,8 @@ The on-disk shape of the events we care about is set by
                         Payload:  {size_KB, transfer_KBps, batch: [{tensor_id}]},
                         Lifecycle:{timestamp_queued, _at_head, _begin, _end} }
 
-Events with `ts < RUNTIME_STAGE_START.ts` are dropped — matching the
-convention established by `parse_stall_time.py`.
+Events with `ts < RUNTIME_STAGE_START.ts` are dropped — only runtime
+events should figure into analysis.
 """
 from __future__ import annotations
 
@@ -61,6 +61,53 @@ class ComputeJob:
     queued_us: float
     at_head_us: float
     begin_us: float
+
+
+@dataclass(slots=True)
+class ClaimJob:
+    """A CLAIM_JOB instant event — a memory region reserved for a tensor.
+
+    Emitted by ``sim.core.job.logging.claim_logging.begin_log`` for every
+    ``sys.claim`` call. The event's ``tid`` carries the memory hw's id,
+    so analyses can filter by destination memory.
+    """
+    ts_us: float
+    tensor_id: int
+    page_idx_start: int
+    num_pages: int
+    hw_id: int
+
+
+def parse_claim_jobs(
+    events: list[dict], hw_id: int | None
+) -> list[ClaimJob]:
+    """Read CLAIM_JOB instant events on ``hw_id`` (or all if None).
+
+    No t_start filtering: layout-time claims (ts == t_start) tell
+    analyses that a tensor was placed during the layout stage, which
+    is the per-output analog of an early-arriving input.
+    """
+    out: list[ClaimJob] = []
+    for ev in events:
+        if ev.get("pid") != TRACK_EVENT or ev.get("ph") != "i":
+            continue
+        if ev.get("name") != "CLAIM_JOB":
+            continue
+        tid = ev.get("tid")
+        if hw_id is not None and tid != hw_id:
+            continue
+        args = ev.get("args") or {}
+        out.append(
+            ClaimJob(
+                ts_us=float(ev.get("ts", 0.0)),
+                tensor_id=int(args.get("tensor_id", -1)),
+                page_idx_start=int(args.get("page_idx_start", 0)),
+                num_pages=int(args.get("num_pages", 0)),
+                hw_id=int(tid) if tid is not None else -1,
+            )
+        )
+    out.sort(key=lambda j: j.ts_us)
+    return out
 
 
 @dataclass(slots=True)
@@ -166,3 +213,101 @@ def module_key(name: str, depth: int) -> str:
         return "<unknown>"
     parts = name.split(".")
     return ".".join(parts[:depth]) if parts else "<unknown>"
+
+
+@dataclass(slots=True)
+class NodeMeta:
+    node_id: int
+    name: str
+    input_tensors: list[int]
+    output_tensors: list[int]
+    parent_nodes: list[int]
+
+
+@dataclass(slots=True)
+class TensorMeta:
+    tensor_id: int
+    name: str
+    tensor_type: str
+    size_KB: float
+
+
+def parse_nodes(events: list[dict]) -> dict[int, NodeMeta]:
+    """Read the single ``NODES`` instant event into ``{node_id: NodeMeta}``.
+
+    NODES is emitted once during the layout/runtime hand-off and carries
+    the full compute-graph topology — every analysis that needs per-node
+    tensor I/O (heatmaps, lifetime analyses) reads it from here rather
+    than re-parsing the trace file.
+    """
+    for ev in events:
+        if (
+            ev.get("pid") == TRACK_ENGINE
+            and ev.get("ph") == "i"
+            and ev.get("name") == "NODES"
+        ):
+            raw = (ev.get("args") or {}).get("nodes") or []
+            out: dict[int, NodeMeta] = {}
+            for n in raw:
+                nid = n.get("id")
+                if nid is None:
+                    continue
+                dd = n.get("data_deps") or {}
+                cd = n.get("control_deps") or {}
+                out[int(nid)] = NodeMeta(
+                    node_id=int(nid),
+                    name=str(n.get("name", "")),
+                    input_tensors=[int(t) for t in (dd.get("input_tensors") or [])],
+                    output_tensors=[int(t) for t in (dd.get("output_tensors") or [])],
+                    parent_nodes=[int(p) for p in (cd.get("parent_nodes") or [])],
+                )
+            return out
+    return {}
+
+
+def parse_sim_config(events: list[dict]) -> dict:
+    """Read the single ``SIM_CONFIG`` instant event's args.
+
+    Emitted by ``sim.core.simulator.Simulator.__init__`` after all hw
+    are constructed (so IDs exist). The returned dict has the shape
+    ``{"config": <resolved Hydra cfg with cg-sim metadata>,
+       "id_map": {<name>: <obj_id>}}``. ``config["hardware"]`` and
+    ``config["scheduler"]`` mirror the input YAML; ``config["cg-sim"]``
+    carries ``git_commit``, ``git_dirty``, and ``timestamp``.
+
+    Returns ``{}`` if the event is absent (shouldn't happen for logs
+    written by the current simulator — backward compat dropped per
+    project decision).
+    """
+    for ev in events:
+        if (
+            ev.get("pid") == TRACK_ENGINE
+            and ev.get("ph") == "i"
+            and ev.get("name") == "SIM_CONFIG"
+        ):
+            return dict(ev.get("args") or {})
+    return {}
+
+
+def parse_tensors(events: list[dict]) -> dict[int, TensorMeta]:
+    """Read the single ``TENSORS`` instant event into ``{tensor_id: TensorMeta}``."""
+    for ev in events:
+        if (
+            ev.get("pid") == TRACK_ENGINE
+            and ev.get("ph") == "i"
+            and ev.get("name") == "TENSORS"
+        ):
+            raw = (ev.get("args") or {}).get("tensors") or []
+            out: dict[int, TensorMeta] = {}
+            for t in raw:
+                tid = t.get("id")
+                if tid is None:
+                    continue
+                out[int(tid)] = TensorMeta(
+                    tensor_id=int(tid),
+                    name=str(t.get("name", "")),
+                    tensor_type=str(t.get("tensor_type", "")),
+                    size_KB=float(t.get("size_KB", 0.0)),
+                )
+            return out
+    return {}

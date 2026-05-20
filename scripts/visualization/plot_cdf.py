@@ -30,14 +30,35 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
     apply_matplotlib_defaults,
+    axis_label,
+    best_time_scale,
     color_for,
+    display_name,
+    minsec_formatter,
     parse_out_path_flag,
     read_table,
+    unit_of,
 )
 
 
 def _is_sweep_dir(p: Path) -> bool:
     return (p / "summary.csv").exists()
+
+
+def _iter_sweep_cell_analysis_dirs(sweep_dir: Path) -> list[tuple[str, Path]]:
+    """Return `(run_id, analysis_dir)` pairs for each cell of a sweep.
+
+    New layout: `<sweep_dir>/analysis/<run_id>/`. Falls back to the
+    legacy layout `<sweep_dir>/<run_id>/` if `analysis/` is missing,
+    so old experiment dirs keep rendering.
+    """
+    new = sweep_dir / "analysis"
+    if new.is_dir():
+        return [(c.name, c) for c in sorted(new.iterdir()) if c.is_dir()]
+    return [
+        (c.name, c) for c in sorted(sweep_dir.iterdir())
+        if c.is_dir() and c.name not in {"sim_results", "plots", "analysis"}
+    ]
 
 
 def _cdf_xy(values):
@@ -67,17 +88,18 @@ def main(
     series: list[tuple[str, "pandas.Series"]] = []  # type: ignore[name-defined]
     in_dir = Path(in_dir)
     if _is_sweep_dir(in_dir):
-        cells = sorted(p for p in in_dir.iterdir() if p.is_dir())
-        for c in cells:
+        for run_id, cell_analysis in _iter_sweep_cell_analysis_dirs(in_dir):
             try:
-                df = read_table(c / Path(table).parent, Path(table).name) \
-                    if "/" in table else read_table(c, table)
+                df = (
+                    read_table(cell_analysis / Path(table).parent, Path(table).name)
+                    if "/" in table else read_table(cell_analysis, table)
+                )
             except FileNotFoundError:
                 continue
             if column not in df.columns:
                 continue
-            series.append((c.name, df[column]))
-        title = f"{in_dir.name}: CDF of {column} from {table}"
+            series.append((run_id, df[column]))
+        title = f"{in_dir.name}: CDF of {display_name(column)} from {table}"
     else:
         df = read_table(in_dir, table)
         if column not in df.columns:
@@ -86,19 +108,39 @@ def main(
                 f"columns: {list(df.columns)}"
             )
         series.append((in_dir.name, df[column]))
-        title = f"{in_dir.name}: CDF of {column} from {table}"
+        title = f"{in_dir.name}: CDF of {display_name(column)} from {table}"
 
     if not series:
         raise SystemExit(f"no data found for column {column!r} in any cell")
+
+    # Auto-scale microsecond-valued columns so the X axis reads "10 s"
+    # instead of "1e7 us". Other units pass through unscaled.
+    col_unit = unit_of(column)
+    divisor = 1.0
+    use_minsec = False
+    if col_unit == "us":
+        import numpy as np
+        max_abs = max(
+            float(np.nanmax(np.abs(np.asarray(s, dtype=float))))
+            for _, s in series
+            if len(s) > 0
+        )
+        divisor, display_unit = best_time_scale(max_abs)
+        x_label = f"{display_name(column)} [{display_unit}]"
+        use_minsec = display_unit == "s" and (max_abs / 1_000_000.0) >= 60.0
+    else:
+        x_label = axis_label(column)
 
     fig, ax = plt.subplots()
     for i, (label, vals) in enumerate(series):
         x, y = _cdf_xy(vals)
         if len(x) == 0:
             continue
-        ax.plot(x, y, color=color_for(i), label=label)
-    ax.set_xlabel(column)
+        ax.plot(x / divisor, y, color=color_for(i), label=label)
+    ax.set_xlabel(x_label)
     ax.set_ylabel("CDF")
+    if use_minsec:
+        ax.xaxis.set_major_formatter(minsec_formatter())
     if log_x:
         ax.set_xscale("symlog", linthresh=1.0)
     if len(series) > 1:

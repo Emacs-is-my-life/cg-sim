@@ -1,3 +1,5 @@
+import datetime as _datetime
+import subprocess as _subprocess
 import sys
 from hydra import initialize_config_dir, compose
 from omegaconf import OmegaConf
@@ -8,6 +10,37 @@ from sim.core.log import Log
 from sim.core.debug import Debugger
 from sim.core.engine import Engine
 from sim.core.trace.custom_dep import TensorAtHWDep
+
+
+def _cg_sim_metadata() -> dict:
+    """Build the ``cg-sim`` config subkey: git commit + dirty flag + UTC ts.
+
+    Run from the repo root via subprocess. If git is unavailable (e.g. the
+    repo was vendored without ``.git``), the git fields are ``None``; the
+    timestamp is always populated. Sub-second precision in the timestamp
+    helps disambiguate sweep cells that fire within the same wall second.
+    """
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    git_commit: str | None = None
+    git_dirty: bool | None = None
+    try:
+        git_commit = _subprocess.check_output(
+            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+            stderr=_subprocess.DEVNULL, text=True,
+        ).strip()
+        porcelain = _subprocess.check_output(
+            ["git", "-C", str(repo_root), "status", "--porcelain"],
+            stderr=_subprocess.DEVNULL, text=True,
+        )
+        git_dirty = bool(porcelain.strip())
+    except (_subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    return {
+        "git_commit": git_commit,
+        "git_dirty": git_dirty,
+        "timestamp": _datetime.datetime.now(_datetime.timezone.utc).isoformat(),
+    }
 
 from .init.trace import LOAD_TRACE_CLASS
 from .init.compute import LOAD_COMPUTE_CLASS
@@ -173,6 +206,20 @@ class Simulator:
             sched = SchedulerClass(sim_id.get_id(), name, log, sys, sched_cfg["args"])
             self.engine.sched = sched
 
+            # SIM_CONFIG dump. All hw IDs are assigned by now, so we can
+            # snapshot the full resolved Hydra config + id_map + cg-sim
+            # metadata in one event. Analysis scripts read this to
+            # reconstruct the run config without needing the source YAML.
+            sim_cfg = dict(cfg)
+            sim_cfg["cg-sim"] = _cg_sim_metadata()
+            id_map = {h.name: h.id for h in hw.values()}
+            id_map["Trace"] = trace.id
+            id_map["Engine"] = self.engine.id
+            id_map["Scheduler"] = sched.id
+            log.record(Log.engine(
+                self.engine.id, "SIM_CONFIG", 0.0,
+                {"config": sim_cfg, "id_map": id_map},
+            ))
 
         except BaseException:
             if self.log is not None:

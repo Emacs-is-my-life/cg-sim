@@ -13,8 +13,21 @@ from pathlib import Path
 
 
 def default_viz_out_path(script_path: str | Path, in_dir: str | Path) -> Path:
-    """`<in_dir>/<script_stem>.png` — convention default."""
-    return Path(in_dir) / f"{Path(script_path).stem}.png"
+    """Where to drop the rendered plot when the caller didn't pass `--out`.
+
+    If `in_dir` is an experiment root (has `summary.csv` or a `plots/`
+    subdir), output lands in `<in_dir>/plots/<script-stem>.png` per
+    the AGENTS.md output-directory conventions. Otherwise (a single
+    analysis run dir) it sits next to the analysis CSVs at
+    `<in_dir>/<script-stem>.png`.
+    """
+    in_dir = Path(in_dir)
+    stem = Path(script_path).stem
+    if (in_dir / "summary.csv").exists() or (in_dir / "plots").is_dir():
+        plots = in_dir / "plots"
+        plots.mkdir(parents=True, exist_ok=True)
+        return plots / f"{stem}.png"
+    return in_dir / f"{stem}.png"
 
 
 def read_meta(run_dir: Path) -> dict:
@@ -90,4 +103,9 @@ def parse_out_path_flag(
         i += 1
     if out_path is None:
         out_path = default_viz_out_path(script_path, in_dir)
+    # Either branch (default or explicit) may target a directory that
+    # doesn't exist yet — e.g. <experiment>/plots/ on a single-shot run
+    # where no sweep ever created the dir. Materialise it now so
+    # `fig.savefig` doesn't trip on a missing parent.
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     return rest, out_path

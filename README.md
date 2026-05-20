@@ -181,7 +181,7 @@ other Python code via `import`:
   — the `if __name__ == "__main__":` block parses `sys.argv` into the
   `main()` signature, prints a usage line and `sys.exit(2)`s on misuse.
 - **Importable:** because `main()` takes parsed Python values rather
-  than `argv`, agent code can `from parse_stall_time import main` and
+  than `argv`, agent code can `from prefetch_quality import main` and
   call `main(Path(result_path), "cpu", "ram")` directly after a run
   finishes, with no subprocess hop.
 - **Optional structured output (for downstream plotting):** Scripts that
@@ -200,10 +200,11 @@ other Python code via `import`:
     `runtime_start_us`, `runtime_span_us`, plus any script knobs.
   - Stdout summary is unchanged — disk output is a side-effect.
 
-When adding a new analysis script, copy `parse_stall_time.py` as a
-template and keep the same structure. Use the helpers in
-`scripts/analysis/common/` so the column conventions are enforced
-rather than re-stated:
+When adding a new analysis script, copy `link_utilization.py` as a
+template (the simplest of the existing analyses with the full
+`--out` + `meta.json` shape) and keep the same structure. Use the
+helpers in `scripts/analysis/common/` so the column conventions are
+enforced rather than re-stated:
 
   * `common.events` — `load_events`, `find_runtime_start`,
     `parse_compute_jobs`, `parse_transfer_jobs`, dataclasses
@@ -235,17 +236,10 @@ Experiment runners produce a config matrix, run cg-sim per cell, call
 analysis helpers per cell, and aggregate metrics into a sweep
 directory.
 
-- **Output layout:**
-  ```
-  tmp/sweeps/<experiment_name>/
-      summary.csv                # one row per cell, joined metrics
-      <cell_label>/
-          result_log.json
-          stdout.log, stderr.log, command.txt
-          prefetch_quality/      # analysis --out side-output
-          link_utilization/
-          reuse_distance/
-  ```
+- **Output layout:** see [AGENTS.md](AGENTS.md) "Output directory
+  conventions" for the canonical spec. Sweeps land in
+  `output/<experiment-setup>/` with `sim_results/`, `analysis/<run-id>/`,
+  `plots/`, plus `summary.csv` and `experiment.yaml`.
 - **Shared driver** is `scripts/experiments/sweep/`:
   * `Cell(label, params, overrides)` describes a single run.
   * `run_cell(base_yaml, cell, sweep_dir)` invokes `python main.py`
@@ -260,17 +254,15 @@ directory.
   `plot_metric_vs_param.py` and `plot_time_breakdown.py`.
 
 ### Current scripts
-- `parse_stall_time.py <log.json> <compute_hw_name> <memory_hw_name>`
-  — exposed-transfer stall via interval-set arithmetic:
-  `|union(TRANSFER_JOB intervals into memory_hw) \ union(COMPUTE_JOB
-  intervals on compute_hw)|`, restricted to runtime-stage events.
-  This is the prefetcher-quality metric — wall-time speedup of a
-  memory-saving scheduler comes from shrinking *this*, not from
-  shrinking raw `transfer_total_time`. Example:
-  ```
-  python scripts/analysis/parse_stall_time.py tmp/flexinfer_result.json cpu ram
-  ```
-
+- `prefetch_quality.py <log.json> <compute_hw> <memory_hw> [--out [DIR]]`
+  — the centerpiece. Four views from one log pass: stall blame
+  (which transfer caused each compute-gap), prefetch slack (how
+  early each transfer arrived relative to its consumer), transfer
+  phase decomposition (queue_wait / head_wait / xfer), and
+  per-module rollup of attributed stall.
+- `link_utilization.py <log.json> <memory_hw> [window_us] [--out [DIR]]`
+  — bandwidth-side view: busy fraction, achieved aggregate rate,
+  per-source breakdown for the offload link.
 # Codebase Overview
 ## Simulator core
 - `sim/core/`: Base directory for simulator core
@@ -326,13 +318,12 @@ Implement your own scheduler logic in `sim/sched/<scheduler-name>/`.
     configs (e.g. `flexinfer.sh` sweeps memory sizes).
   - `scripts/sim_test/`: MCP / debugger tests that drive `main_agent.py`
     end-to-end (`test_mcp_*.py`).
-  - `scripts/analysis/`: Post-run log analysis (e.g. `parse_stall_time.py`,
-    `prefetch_quality.py`, `link_utilization.py`, `reuse_distance.py`,
-    `schedule_diff.py`). Shared helpers in `common/`.
+  - `scripts/analysis/`: Post-run log analysis
+    (`prefetch_quality.py`, `link_utilization.py`). Shared helpers
+    in `common/`.
   - `scripts/experiments/`: Sweep runners (`sweep_memory.py`,
     `compare_schedulers.py`). Shared subprocess driver in `sweep/`.
   - `scripts/visualization/`: Plotting recipes for the analysis output
     (`plot_metric_vs_param.py`, `plot_time_breakdown.py`, `plot_cdf.py`,
-    `plot_miss_curve.py`, `plot_timeline.py`, `plot_results.gp`). Shared
-    style/io in `common/`.
+    `plot_timeline.py`). Shared style/io in `common/`.
 - `main.py`: Simulator entry point

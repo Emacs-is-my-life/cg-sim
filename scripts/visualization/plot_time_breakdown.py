@@ -21,9 +21,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
+    STACK_COMPONENT_LABELS,
     apply_matplotlib_defaults,
+    axis_label,
+    best_time_scale,
     color_for,
     load_summary,
+    minsec_formatter,
     parse_out_path_flag,
 )
 
@@ -56,21 +60,36 @@ def main(
     df = df.copy()
     df["compute_busy_us"] = df["runtime_span_us"] - df["total_stall_us"]
     compute = df["compute_busy_us"].clip(lower=0)
-    attr = df["attributed_stall_us"].clip(lower=0)
-    unattr = df["unattributed_stall_us"].clip(lower=0)
+    # `attributed_stall_us` = gap blamed on an in-flight transfer (= data
+    # stall). `unattributed_stall_us` = gap with no transfer to blame (=
+    # idle). The CSV keeps the analysis-side jargon; the plot uses the
+    # plain-language names from STACK_COMPONENT_LABELS.
+    data_stall = df["attributed_stall_us"].clip(lower=0)
+    idle = df["unattributed_stall_us"].clip(lower=0)
     labels = df[label_col].astype(str).tolist()
+
+    # Auto-scale microseconds → ms/s so the axis reads "10" not "1e7".
+    max_us = float((compute + data_stall + idle).max())
+    divisor, unit = best_time_scale(max_us)
+    use_minsec = unit == "s" and (max_us / 1_000_000.0) >= 60.0
+    compute = compute / divisor
+    data_stall = data_stall / divisor
+    idle = idle / divisor
 
     fig, ax = plt.subplots()
     x = list(range(len(labels)))
-    ax.bar(x, compute, color=color_for(0), label="compute")
-    ax.bar(x, attr, bottom=compute, color=color_for(1), label="stall (attributed)")
-    ax.bar(
-        x, unattr, bottom=compute + attr,
-        color=color_for(2), label="stall (unattributed)",
-    )
+    ax.bar(x, compute, color=color_for(0),
+           label=STACK_COMPONENT_LABELS["compute"])
+    ax.bar(x, data_stall, bottom=compute, color=color_for(1),
+           label=STACK_COMPONENT_LABELS["data_stall"])
+    ax.bar(x, idle, bottom=compute + data_stall, color=color_for(2),
+           label=STACK_COMPONENT_LABELS["idle"])
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=20, ha="right")
-    ax.set_ylabel("time (us)")
+    ax.set_xlabel(axis_label(label_col))
+    ax.set_ylabel(f"time [{unit}]")
+    if use_minsec:
+        ax.yaxis.set_major_formatter(minsec_formatter())
     ax.set_title(f"{Path(in_dir).name}: runtime breakdown")
     ax.legend(frameon=False, loc="upper left", bbox_to_anchor=(1.02, 1.0))
 

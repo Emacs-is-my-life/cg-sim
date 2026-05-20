@@ -32,9 +32,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sweep import (  # noqa: E402
     Cell,
     SweepResult,
+    analysis_dir,
     collect_metrics,
     default_sweep_dir,
     run_cell,
+    update_latest_symlink,
+    write_manifest,
     write_summary,
 )
 
@@ -54,44 +57,63 @@ def main(
     print(f"compute/memory : {compute_hw} / {memory_hw}")
     print(f"sizes (GB)     : {sizes_GB}")
 
-    results: list[SweepResult] = []
+    cells: list[Cell] = []
     for size_GB in sizes_GB:
         size_KB = int(size_GB * 1024 * 1024)
         label = f"{size_GB:g}GB"
-        cell = Cell(
+        cells.append(Cell(
             label=label,
             params={"memory_GB": size_GB, "memory_hw": memory_hw},
             overrides=[
                 f"hardware.memory.{memory_idx}.args.memory_size_KB={size_KB}",
             ],
-        )
-        print(f"\n[cell {label}] launching cg-sim …")
+        ))
+
+    write_manifest(
+        sweep_dir,
+        experiment_name=experiment_name,
+        base_yaml=base_yaml,
+        cells=cells,
+        description=(
+            f"Memory-budget sweep on {memory_hw} for compute={compute_hw}. "
+            f"Sizes (GB): {sizes_GB}."
+        ),
+    )
+
+    results: list[SweepResult] = []
+    for cell in cells:
+        print(f"\n[cell {cell.label}] launching cg-sim …")
         try:
-            cell_dir, log_path = run_cell(base_yaml, cell, sweep_dir)
+            cell_analysis_dir, log_path = run_cell(base_yaml, cell, sweep_dir)
         except Exception as e:
-            print(f"[cell {label}] FAILED to run: {e}")
-            results.append(
-                SweepResult(cell=cell, log_path=Path(), cell_dir=sweep_dir / label,
-                            metrics={"status": "run_failed", "error": str(e)})
-            )
+            print(f"[cell {cell.label}] FAILED to run: {e}")
+            results.append(SweepResult(
+                cell=cell, log_path=Path(),
+                cell_analysis_dir=analysis_dir(sweep_dir, cell.label),
+                metrics={"status": "run_failed", "error": str(e)},
+            ))
             continue
-        print(f"[cell {label}] log → {log_path}")
+        print(f"[cell {cell.label}] log → {log_path}")
 
         try:
-            metrics = collect_metrics(log_path, cell_dir, compute_hw, memory_hw)
+            metrics = collect_metrics(
+                log_path, cell_analysis_dir, compute_hw, memory_hw,
+            )
         except Exception as e:
-            print(f"[cell {label}] analyses FAILED: {e}")
+            print(f"[cell {cell.label}] analyses FAILED: {e}")
             metrics = {"status": "analysis_failed", "error": str(e)}
         else:
             metrics["status"] = "ok"
 
-        results.append(
-            SweepResult(cell=cell, log_path=log_path, cell_dir=cell_dir, metrics=metrics)
-        )
+        results.append(SweepResult(
+            cell=cell, log_path=log_path,
+            cell_analysis_dir=cell_analysis_dir, metrics=metrics,
+        ))
 
     summary = write_summary(
         sweep_dir, results, param_keys=["memory_GB", "memory_hw"]
     )
+    update_latest_symlink(sweep_dir)
     print(f"\nSweep complete. summary: {summary}")
     print(f"Plot with: python scripts/visualization/plot_metric_vs_param.py "
           f"{sweep_dir} memory_GB total_stall_us")

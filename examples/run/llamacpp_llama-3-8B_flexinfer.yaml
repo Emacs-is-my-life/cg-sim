@@ -3,7 +3,7 @@
 # Simulator configuration
 logger:
   args:
-    result_path: "output/flexinfer_result.json"
+    result_path: "output/llamacpp_llama-3-8B_flexinfer/sim_results/result.json"
     log_level: 2             # Events, Counters
 
 # Trace(workload) loading
