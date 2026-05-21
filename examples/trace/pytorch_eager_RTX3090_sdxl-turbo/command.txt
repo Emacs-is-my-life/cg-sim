@@ -1,0 +1,12 @@
+python3 scripts/profile_accelerate_cpu_offload.py sdxl-turbo \
+    		--model ~/Data/sdxl-turbo \
+    		--offload-mode none \
+    		--fusion none \
+    		--device cuda:0 \
+    		--height 512 \
+    		--width 512 \
+    		--steps 4 \
+    		--prompt "A lovely, Donald Trump supporter cat" \
+    		--warmup 4 \
+    		--output-dir Traces/pytorch_eager_RTX3090_sdxl-turbo \
+    		>> Traces/pytorch_eager_RTX3090_sdxl-turbo/stdout.log

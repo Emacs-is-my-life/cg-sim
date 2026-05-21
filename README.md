@@ -308,8 +308,8 @@ Implement your own scheduler logic in `sim/sched/<scheduler-name>/`.
   - `examples/trace/`: Heavy trace bundles consumed by configs in
     `examples/run/`. One subdirectory per workload trace (e.g.
     `llamacpp_CPU_llama-3-8B-Q8/`,
-    `pytorch_eager_GPU-llama-3-8B/llama_bundle/`,
-    `pytorch_lazy_GPU-sdxl-turbo/llama_bundle/`). PyTorch bundles'
+    `pytorch_eager_RTX4090-llama-3-8B/llama_bundle/`,
+    `pytorch_lazy_RTX4090-sdxl-turbo/llama_bundle/`). PyTorch bundles'
     `manifest.json` references its own siblings (`runtime_*.csv`,
     `step_*_compute_graph.dot`) by bare filenames — they resolve
     relative to the manifest, so the bundle directory is self-contained.

@@ -1,0 +1,60 @@
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:00<00:00, 33.47it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:00<00:00, 33.43it/s]
+/data/pytorch-source/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+[W519 13:51:37.194798177 execution_trace_observer.cpp:976] Enabling Execution Trace Observer
+[W519 13:51:37.554690869 execution_trace_observer.cpp:988] Disabling Execution Trace Observer
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg       CPU Mem  Self CPU Mem      CUDA Mem  Self CUDA Mem    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                       Runtime Triggered Module Loading        45.41%     163.259ms        45.41%     163.259ms       3.265ms     683.326us         3.62%     683.326us      13.667us           0 B           0 B           0 B           0 B            50  
+                                               aten::mm        14.73%      52.951ms        26.81%      96.411ms     428.494us      16.796ms        88.93%      32.774ms     145.661us           0 B           0 B      14.35 MB      14.35 MB           225  
+                                              aten::bmm        10.28%      36.960ms        12.86%      46.232ms      46.232ms       1.984us         0.01%      11.904us      11.904us           0 B           0 B       8.13 MB       8.13 MB             1  
+                                              llama_run         5.49%      19.757ms        99.96%     359.419ms     359.419ms       0.000us         0.00%      35.062ms      35.062ms           0 B         -80 B       8.13 MB     -59.35 MB             1  
+                                       cudaLaunchKernel         2.31%       8.305ms        37.89%     136.251ms     112.978us       0.000us         0.00%     223.677us       0.185us           0 B           0 B           0 B           0 B          1206  
+                                   cudaGetSymbolAddress         1.68%       6.028ms         1.69%       6.089ms       6.089ms       0.000us         0.00%       3.968us       3.968us           0 B           0 B           0 B           0 B             1  
+                                       aten::as_strided         1.65%       5.945ms         1.65%       5.945ms       7.340us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B           810  
+                                  Lazy Function Loading         1.60%       5.766ms         1.60%       5.766ms      15.335us      15.492ms        82.02%      15.492ms      41.202us           0 B           0 B           0 B           0 B           376  
+                                        aten::transpose         1.43%       5.142ms         2.45%       8.821ms      18.301us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B           482  
+                                           aten::matmul         1.04%       3.737ms        42.00%     151.015ms     668.207us       0.000us         0.00%      32.786ms     145.069us           0 B           0 B      22.47 MB           0 B           226  
+                                    aten::empty_strided         1.01%       3.643ms         1.01%       3.643ms      21.946us       0.000us         0.00%       0.000us       0.000us           0 B           0 B       8.87 MB       8.87 MB           166  
+                                              aten::mul         1.01%       3.627ms         2.63%       9.445ms      32.345us     527.942us         2.80%     536.582us       1.838us           0 B           0 B      15.12 MB      15.12 MB           292  
+                                            aten::copy_         0.78%       2.807ms         3.30%      11.862ms      45.102us     442.719us         2.34%     450.300us       1.712us           0 B           0 B           0 B           0 B           263  
+                                             aten::view         0.76%       2.747ms         0.76%       2.747ms       7.674us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B           358  
+                                            aten::empty         0.74%       2.664ms         0.74%       2.664ms      10.247us       0.000us         0.00%       0.000us       0.000us          80 B          80 B       5.06 MB       5.06 MB           260  
+                                              aten::add         0.73%       2.624ms         2.95%      10.610ms      54.976us     265.182us         1.40%     272.062us       1.410us           0 B           0 B       4.09 MB       4.09 MB           193  
+                                          aten::reshape         0.73%       2.619ms         2.33%       8.381ms      25.866us       0.000us         0.00%     118.432us       0.366us           0 B           0 B       2.50 MB           0 B           324  
+                                         aten::_to_copy         0.60%       2.153ms         4.18%      15.042ms     112.250us       0.000us         0.00%     217.405us       1.622us           0 B           0 B       7.62 MB           0 B           134  
+                                           aten::linear         0.57%       2.039ms        31.33%     112.665ms     500.732us       0.000us         0.00%      32.774ms     145.661us           0 B           0 B      14.35 MB           0 B           225  
+                                                aten::t         0.50%       1.800ms         1.66%       5.979ms      26.574us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B           225  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 359.559ms
+Self CUDA time total: 18.887ms
+
+device: cuda:0
+dtype: bfloat16
+fusion: none
+dot_level: llamasim-runtime
+profile_memory: True
+record_shapes: True
+with_stack: True
+warmup_runs: 0
+trace_path: /data/pytorch-source/exp_results/llama8b-modulecols-eager/llama_gpu_trace.json
+trace_csv_path: /data/pytorch-source/exp_results/llama8b-modulecols-eager/llama_gpu_trace.csv
+text_output_path: /data/pytorch-source/exp_results/llama8b-modulecols-eager/llama_gpu_output.txt
+execution_trace_path: /data/pytorch-source/exp_results/llama8b-modulecols-eager/llama_gpu_execution_trace.json
+llamasim_output_dir: /data/pytorch-source/exp_results/llama8b-modulecols-eager/llama_bundle
+llamasim_runtime_summary:
+  nodes: total=5833 gpu=1434 cpu=4399
+  submit_edges: exact=1434/1434 (100.00%) heuristic=0 provenance=ac2g_endpoint_exact
+  ac2g: paired=1434 matched=1434 errors=0
+  wait_edges: exact=2/3 (66.67%) heuristic=1
+  ws_sync: markers=0 leaves=0
+  wait_sources: aten_parent_scope_exact=2, kineto_sync_frontier=1
+  excluded_wait_sources: profiler_sync_excluded=1
+  wait_kinds: device_sync=1, stream_sync=2
+  wait_exact_note: wrapper emitted no ws_sync evidence; exact waits came from non-wrapper provenance
+  cpu_match_ambiguous: total=0 multiple_execution_nodes=0 no_runtime_candidate=0 multiple_runtime_candidates=0
+sequence_shape: (1, 6)
+generated_text_preview: The quick brown fox jumps
+metadata_json: {"user_annotation_args": "sample_step=0 phase=text_generation component=llama8b device=cuda:0 fusion=none"}
+metadata_parsed: {"user_annotation_args": "sample_step=0 phase=text_generation component=llama8b device=cuda:0 fusion=none"}

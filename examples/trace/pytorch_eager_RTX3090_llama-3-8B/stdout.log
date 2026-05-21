@@ -1,0 +1,58 @@
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg       CPU Mem  Self CPU Mem      CUDA Mem  Self CUDA Mem    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                  llama_cpu_offload_run        19.61%        1.468s       100.00%        7.488s        7.488s       0.000us         0.00%     796.603ms     796.603ms           0 B         -80 B       1.00 KB      -7.04 GB             1  
+                                               aten::mm         6.94%     519.678ms         8.69%     650.484ms      90.345us     692.846ms        87.03%     693.131ms      96.268us           0 B           0 B       1.84 GB       1.84 GB          7200  
+                                       cudaLaunchKernel         6.61%     494.773ms         6.61%     494.809ms      12.779us       0.000us         0.00%       1.824us       0.000us           0 B           0 B           0 B           0 B         38720  
+                                       aten::as_strided         6.25%     467.999ms         6.25%     467.999ms      21.385us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B         21884  
+                                        aten::transpose         5.96%     446.374ms        10.44%     782.166ms      50.711us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B         15424  
+                                              aten::mul         4.54%     339.760ms         5.99%     448.340ms      47.982us      26.742ms         3.36%      26.746ms       2.862us           0 B           0 B       1.94 GB       1.94 GB          9344  
+                                           aten::matmul         4.14%     309.681ms        18.33%        1.373s     189.815us       0.000us         0.00%     693.189ms      95.850us           0 B           0 B       1.84 GB           0 B          7232  
+                                         aten::_to_copy         3.59%     268.681ms         9.63%     721.506ms     114.434us       0.000us         0.00%      10.540ms       1.672us           0 B           0 B     999.72 MB           0 B          6305  
+                                    aten::empty_strided         3.42%     256.432ms         3.42%     256.432ms      34.989us       0.000us         0.00%       0.000us       0.000us           0 B           0 B       1.14 GB       1.14 GB          7329  
+                                              aten::add         3.13%     234.713ms         4.08%     305.532ms      49.216us      12.516ms         1.57%      12.519ms       2.017us           0 B           0 B     534.03 MB     534.03 MB          6208  
+                                               aten::to         2.77%     207.653ms        12.41%     929.159ms     108.712us       0.000us         0.00%      10.540ms       1.233us           0 B           0 B     999.72 MB           0 B          8547  
+                                             aten::view         2.76%     206.817ms         2.76%     206.817ms      18.022us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B         11476  
+                                           aten::linear         2.67%     199.856ms        27.75%        2.078s     288.616us       0.000us         0.00%     693.279ms      96.289us           0 B           0 B       1.84 GB           0 B          7200  
+                                          aten::reshape         2.44%     182.444ms         4.44%     332.425ms      39.955us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          8320  
+                                            aten::copy_         2.30%     171.947ms         3.12%     233.568ms      36.858us      10.581ms         1.33%      10.581ms       1.670us           0 B           0 B           0 B           0 B          6337  
+                                            aten::empty         2.17%     162.344ms         2.17%     162.344ms      26.142us       0.000us         0.00%       0.000us       0.000us          80 B          80 B       3.75 MB       3.75 MB          6210  
+                                                aten::t         2.16%     161.609ms         6.91%     517.090ms      71.818us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          7200  
+                                              aten::cat         2.14%     160.363ms         2.88%     215.296ms      51.754us      13.505ms         1.70%      13.505ms       3.246us           0 B           0 B     287.34 MB     287.34 MB          4160  
+                                            aten::slice         1.95%     145.762ms         3.11%     232.970ms      56.877us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          4096  
+                                     aten::_unsafe_view         1.61%     120.582ms         1.61%     120.582ms      16.673us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          7232  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 7.488s
+Self CUDA time total: 796.092ms
+
+model: /home/kwpark/Data/Llama-3-8B
+requested_device: cuda:0
+offload_mode: none
+offload_device: not_used
+fusion: none
+accelerate_version: not_used
+dtype: bfloat16
+profile_memory: True
+record_shapes: True
+with_stack: True
+warmup_runs: 1
+trace_path: Traces/pytorch_eager_RTX3090_llama-3-8B/llama8b_none_cpu_offload_tokens32_profile_trace.json
+trace_csv_path: Traces/pytorch_eager_RTX3090_llama-3-8B/llama8b_none_cpu_offload_tokens32_profile_trace.csv
+text_output_path: Traces/pytorch_eager_RTX3090_llama-3-8B/llama8b_none_cpu_offload_tokens32_profile_output.txt
+execution_trace_path: Traces/pytorch_eager_RTX3090_llama-3-8B/llama8b_none_cpu_offload_tokens32_profile_execution_trace.json
+llamasim_output_dir: Traces/pytorch_eager_RTX3090_llama-3-8B/llama_bundle
+llamasim_runtime_summary:
+  nodes: total=162796 gpu=42753 cpu=120043
+  submit_edges: exact=42753/42753 (100.00%) heuristic=0 provenance=ac2g_endpoint_exact
+  ac2g: paired=42753 matched=42753 errors=0
+  wait_edges: exact=33/34 (97.06%) heuristic=1
+  ws_sync: markers=0 leaves=0
+  wait_sources: aten_parent_scope_exact=33, kineto_sync_frontier=1
+  excluded_wait_sources: profiler_sync_excluded=1
+  wait_kinds: device_sync=1, stream_sync=33
+  wait_exact_note: wrapper emitted no ws_sync evidence; exact waits came from non-wrapper provenance
+  cpu_match_ambiguous: total=0 multiple_execution_nodes=0 no_runtime_candidate=0 multiple_runtime_candidates=0
+sequence_shape: (1, 37)
+generated_text_preview: The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over
+metadata_json: {"user_annotation_args": "model_family=llama8b device=cuda:0 dtype=bfloat16 offload_mode=none fusion=none"}
+metadata_parsed: {"user_annotation_args": "model_family=llama8b device=cuda:0 dtype=bfloat16 offload_mode=none fusion=none"}

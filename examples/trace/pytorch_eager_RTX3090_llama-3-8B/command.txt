@@ -1,0 +1,11 @@
+mkdir -p Traces/pytorch_eager_RTX3090_llama-3-8B
+  python3 scripts/profile_llama_accelerate_cpu_offload.py \
+          --model ~/Data/Llama-3-8B \
+          --device cuda:0 \
+          --dtype bfloat16 \
+          --offload-mode none \
+    	  --fusion none \
+          --max-new-tokens 32 \
+          --warmup-runs 1 \
+          --output-dir Traces/pytorch_eager_RTX3090_llama-3-8B \
+    		>> Traces/pytorch_eager_RTX3090_llama-3-8B/stdout.log

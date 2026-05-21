@@ -5,7 +5,7 @@ logger:
 trace:
   type: "PytorchProfile"
   args:
-    bundle_manifest: "../trace/pytorch_lazy_GPU-sdxl-turbo/llama_bundle/manifest.json"
+    bundle_manifest: "../trace/pytorch_lazy_RTX4090-sdxl-turbo/llama_bundle/manifest.json"
     skip_zero_byte_tensors: true
     zero_wait_nodes: true
     add_temporal_data_control_edges: true

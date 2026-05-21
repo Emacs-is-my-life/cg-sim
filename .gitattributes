@@ -1,2 +1,2 @@
-examples/trace/pytorch_lazy_GPU-sdxl-turbo/sdxl_turbo_gpu_inductor_trace.json filter=lfs diff=lfs merge=lfs -text
-examples/trace/pytorch_lazy_GPU-llama-3-8B/llama_31_8b_gpu_inductor_trace.json filter=lfs diff=lfs merge=lfs -text
+examples/trace/pytorch_lazy_RTX4090-sdxl-turbo/sdxl_turbo_gpu_inductor_trace.json filter=lfs diff=lfs merge=lfs -text
+examples/trace/pytorch_lazy_RTX4090-llama-3-8B/llama_31_8b_gpu_inductor_trace.json filter=lfs diff=lfs merge=lfs -text
