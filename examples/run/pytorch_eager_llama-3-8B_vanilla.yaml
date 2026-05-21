@@ -5,7 +5,7 @@ logger:
 trace:
   type: "PytorchProfile"
   args:
-    bundle_manifest: "../trace/pytorch_eager_RTX4090-llama-3-8B/llama_bundle/manifest.json"
+    bundle_manifest: "../trace/pytorch_eager_RTX4090_llama-3-8B/llama_bundle/manifest.json"
     skip_zero_byte_tensors: true
     zero_wait_nodes: true
     add_temporal_data_control_edges: true
