@@ -53,15 +53,26 @@ def _validate_node(trace: Trace, node_id: int, role: str) -> None:
             f"[inject_eager_schedule] {role} node_id={node_id} not in trace."
         )
     rk = str((node.args or {}).get("resource_kind") or "")
-    # Consumers must be GPU (they consume cuda-resident weights).
-    # Issuers may be GPU OR CPU dispatchers (cpu_thread cuLaunchKernel
-    # nodes) — DAV fires prefetches on any ComputeJob retire.
-    if role == "consumer" and rk not in _GPU_ROLES:
+    # Consumers gate on the prefetch tids being LOADED before the
+    # consumer's compute begins. Two valid kinds:
+    #   - GPU node (resource_kind in _GPU_ROLES): the GPU kernel that
+    #     directly reads the streamed weight. Async semantics — host
+    #     can keep launching other kernels while the H2D is in flight.
+    #   - CPU dispatcher (cpu_thread / cpu_leaf): the cudaLaunchKernel
+    #     that submits the GPU consumer. Gating the dispatcher stalls
+    #     the cpu single-slot host pipeline until the H2D completes,
+    #     modeling real HF accelerate's cudaStreamSynchronize. Used
+    #     when the hf_accelerate solver runs with sync_calls=True.
+    # Issuers may also be GPU OR CPU dispatchers — DAV fires prefetches
+    # on any ComputeJob retire.
+    _CONSUMER_OK = _GPU_ROLES + ("cpu_thread", "cpu_leaf")
+    if role == "consumer" and rk not in _CONSUMER_OK:
         raise Exception(
-            f"[inject_eager_schedule] {role} node_id={node_id} is not "
-            f"a GPU node (resource_kind={rk!r})."
+            f"[inject_eager_schedule] {role} node_id={node_id} has "
+            f"unsupported resource_kind={rk!r} (expected GPU or "
+            f"cpu_thread/cpu_leaf dispatcher)."
         )
-    if role == "issuer" and rk not in _GPU_ROLES and rk not in ("cpu_thread", "cpu_leaf"):
+    if role == "issuer" and rk not in _CONSUMER_OK:
         raise Exception(
             f"[inject_eager_schedule] {role} node_id={node_id} has "
             f"unsupported resource_kind={rk!r}."
@@ -121,6 +132,25 @@ def inject_eager_schedule_into_trace(
             )
         evict_out[nid].update(int(t) for t in tids)
 
+    # D2H eviction arrivals (model / module-hook modes). Issuer is the
+    # tid_run's last GPU node; when it retires DAV fires a VRAM→RAM
+    # TransferJob for the tids and releases the VRAM region afterward.
+    # Replaces the free-release path of evict_after_node for the same
+    # tids.
+    d2h_in = doc.get("d2h_xfer_arrivals") or []
+    d2h_out: list[dict[str, Any]] = []
+    for a in d2h_in:
+        issuer = int(a["issuer_node_id"])
+        _validate_node(trace, issuer, "issuer")
+        tids = [int(t) for t in (a.get("cgsim_tids") or [])]
+        if not tids:
+            continue
+        d2h_out.append({
+            "issuer_node_id": issuer,
+            "cgsim_tids": tids,
+            "size_bytes": int(a.get("size_bytes") or 0),
+        })
+
     evictable = set(int(t) for t in (doc.get("evictable_tensor_ids") or []))
 
     streamed = set(int(t) for t in (doc.get("streamed_tids") or []))
@@ -150,11 +180,15 @@ def inject_eager_schedule_into_trace(
             existing_ev.setdefault(nid, set()).update(tids)
     if evictable and not disable_evict:
         trace.args.setdefault("evictable_tensor_ids", set()).update(evictable)
+    if d2h_out and not disable_evict:
+        existing_d2h = trace.args.setdefault("d2h_xfer_arrivals", [])
+        existing_d2h.extend(d2h_out)
 
     meta = doc.get("meta") or {}
     print(
         f"[inject_eager_schedule:{doc.get('schema')}] "
         f"arrivals={len(arrivals_out)} "
+        f"d2h_arrivals={len(d2h_out)} "
         f"evict_anchors={len(evict_out)} "
         f"evictable_tids={len(evictable)} "
         f"retargeted_cpu={retargeted} "

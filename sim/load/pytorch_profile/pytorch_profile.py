@@ -711,6 +711,71 @@ class PytorchProfile(TraceLoader):
                             remap[r_out] = r_in
                         break
 
+        # Pass C: cross-device merge for `Memcpy HtoD` gpu_runtime nodes.
+        # A profile records the cpu source and cuda destination of an HtoD
+        # memcpy as two separate tensor rows (different storage_ids on
+        # different devices), but they hold the same logical value — the
+        # memcpy event *is* the relocation. Modeling them as one cgsim
+        # tensor with regions on both RAM and VRAM is more faithful and
+        # makes the existing _ensure_inputs_resident path fire a BW-bound
+        # RAM->VRAM TransferJob at the memcpy node's tick (which is what
+        # weight-streaming workloads need; the prior model ran the memcpy
+        # as a fixed-duration ComputeJob on cuda compute, so PCIe BW
+        # changes had no effect on memcpy timing).
+        #
+        # We merge keeper=cuda_dst, victim=cpu_src. tensor_type promotion
+        # in merge_into (WEIGHT > INPUT > LEAF > INTERMEDIATE) correctly
+        # carries any cpu-side permanence into the cuda-side keeper. The
+        # node is tagged ``transfer_event=True`` so
+        # _annotate_alias_dispatcher_deps doesn't downgrade it to a
+        # pointer-only alias node (input==output post-rewrite would
+        # otherwise satisfy the alias criterion), and its
+        # compute_time_micros is zeroed because the wall time is now
+        # accounted for in the implicit transfer.
+        #
+        # DtoH is out of scope for this pass: it's rare in inference and
+        # would flip the keeper's device to cpu, which has subtle
+        # interactions with _init_xfer_states / placement for permanent
+        # tensors that need a separate analysis. DtoD is same-device and
+        # needs no merge.
+        for node in node_map.values():
+            if node.args.get("runtime_role") != "gpu_runtime":
+                continue
+            op_name = node.args.get("op_name") or ""
+            if not op_name.startswith("Memcpy HtoD"):
+                continue
+
+            dst_tid: int | None = None
+            for tid in node.output_tensors:
+                r = resolve(tid)
+                t = tensor_map.get(r)
+                if t is None:
+                    continue
+                dev = (t.args.get("device") or "").lower()
+                if dev.startswith("cuda"):
+                    dst_tid = r
+                    break
+            if dst_tid is None:
+                continue
+
+            merged_any = False
+            for in_tid in list(node.input_tensors):
+                r_in = resolve(in_tid)
+                if r_in == dst_tid:
+                    continue
+                in_tensor = tensor_map.get(r_in)
+                if in_tensor is None:
+                    continue
+                in_dev = (in_tensor.args.get("device") or "").lower()
+                if in_dev.startswith("cuda"):
+                    continue
+                merge_into(dst_tid, r_in)
+                merged_any = True
+
+            if merged_any:
+                node.args["transfer_event"] = True
+                node.compute_time_micros = 0.0
+
         if not remap:
             return
 
@@ -766,6 +831,15 @@ class PytorchProfile(TraceLoader):
         data-flow path.
         """
         for node in node_map.values():
+            # Cross-device memcpys merged by Pass C have input==output
+            # post-rewrite (both resolve to the merged tid), which would
+            # satisfy the alias check below. They are NOT pointer-only —
+            # they need to go through the normal compute path so
+            # _ensure_inputs_resident can fire the implicit RAM->VRAM
+            # TransferJob that models the actual data motion.
+            if node.args.get("transfer_event"):
+                continue
+
             outs = node.output_tensors
             ins = node.input_tensors
 
@@ -904,13 +978,33 @@ class PytorchProfile(TraceLoader):
         return False
 
     def _mark_implicit_inputs(self, node_map: dict[int, Node], tensor_map: dict[int, Tensor]) -> None:
+        # A tensor is an "implicit input" iff there is no real data
+        # producer for it inside the trace. We approximate "real
+        # producer" by EXCLUDING any node that uses the tensor as both
+        # input AND output — those are view / alias / in-place ops
+        # (aten::view, aten::as_strided, aten::detach_, ...) which
+        # don't *write* new bytes; they reinterpret existing storage.
+        #
+        # Counting alias nodes as producers caused spurious INPUT
+        # re-typing whenever the very first op on a tensor was a view
+        # (then first_producer == first_consumer, the `<=` check
+        # tripped). For multi-step diffusion / autoregressive traces
+        # with KV-cache views, this turned thousands of intermediate
+        # cuda tensors into permanents — pre-claimed at layout and
+        # exhausting VRAM before runtime started.
         producers_by_tensor: dict[int, list[int]] = {}
         consumers_by_tensor: dict[int, list[int]] = {}
 
         for node in node_map.values():
-            for tensor_id in node.output_tensors:
+            ins = set(node.input_tensors)
+            outs = set(node.output_tensors)
+            # Real producer = output that is NOT also an input on the
+            # same node (i.e. a real write, not a view).
+            for tensor_id in outs:
+                if tensor_id in ins:
+                    continue
                 producers_by_tensor.setdefault(tensor_id, []).append(node.id)
-            for tensor_id in node.input_tensors:
+            for tensor_id in ins:
                 consumers_by_tensor.setdefault(tensor_id, []).append(node.id)
 
         for tensor_id, tensor in tensor_map.items():
@@ -977,13 +1071,13 @@ class PytorchProfile(TraceLoader):
         if inject_path:
             inject_path_resolved = resolve_path(inject_path, bundle_dir)
             try:
-                from sim.load.pytorch_profile.graph_modifiers.inject_schedule import (
+                from graph_modifiers.inject_schedule import (
                     inject_schedule_into_trace,
                 )
             except ImportError as e:
                 raise Exception(
                     "[PytorchProfile] inject_schedule_path requires "
-                    "sim.load.pytorch_profile.graph_modifiers.inject_schedule "
+                    "graph_modifiers.inject_schedule "
                     "to be importable. "
                     f"Underlying: {e}"
                 )
@@ -992,6 +1086,34 @@ class PytorchProfile(TraceLoader):
             inject_schedule_into_trace(
                 trace, str(inject_path_resolved),
                 bundle_dir=bundle_dir,
+                disable_evict=bool(self.args.get("inject_disable_evict", False)),
+            )
+
+        # Optional eager-mode injection: schedule keyed by raw cgsim
+        # node_id / tid (no compile sidecars). Used by hf_accelerate
+        # and any future eager-bundle scheduler. Removed in 8b79b13
+        # along with the eager injector module move; restored here
+        # because the hf_accelerate workflow depends on it.
+        eager_inject_path = self.args.get("inject_eager_schedule_path")
+        if eager_inject_path:
+            eager_path_resolved = resolve_path(eager_inject_path, bundle_dir)
+            try:
+                from graph_modifiers.inject_schedule import (
+                    inject_eager_schedule_into_trace,
+                )
+            except ImportError as e:
+                raise Exception(
+                    "[PytorchProfile] inject_eager_schedule_path requires "
+                    "graph_modifiers.inject_schedule.inject_eager_schedule_into_trace "
+                    "to be importable. "
+                    f"Underlying: {e}"
+                )
+            print(
+                f"[PytorchProfile] injecting eager schedule from "
+                f"{eager_path_resolved}", flush=True,
+            )
+            inject_eager_schedule_into_trace(
+                trace, str(eager_path_resolved),
                 disable_evict=bool(self.args.get("inject_disable_evict", False)),
             )
 
