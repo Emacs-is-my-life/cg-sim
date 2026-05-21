@@ -67,6 +67,11 @@ from common import (  # noqa: E402
 
 TRACK_EVENT = 1
 NO_MODULE = "<no-module>"
+# Initial x-axis zoom fraction: the figure opens showing the first
+# INITIAL_X_FRACTION of the full runtime span — short TRANSFER segments
+# are then visually distinct (not crushed into dots). User double-clicks
+# the axis (or hits the modebar autoscale) to see the full timeline.
+INITIAL_X_FRACTION = 0.05
 
 
 def _parse_release_events(
@@ -195,6 +200,7 @@ def _figure(
     tensor_order: dict[int, int],
     tensor_info: dict[int, tuple[str, str, float]],  # name, kind, size_KB
     tensor_module: dict[int, str],
+    max_time_us: float,
 ):
     import plotly.graph_objects as go
 
@@ -253,21 +259,23 @@ def _figure(
         fig.add_trace(go.Scattergl(
             x=xs_r, y=ys_r,
             mode="markers",
-            marker=dict(color="rgba(214,39,40,0.85)", size=6, symbol="x"),
+            marker=dict(color="rgba(214,39,40,0.9)", size=3, symbol="circle"),
             name="RELEASE",
             hovertext=hovers_r,
             hoverinfo="text",
         ))
 
+    initial_x_max = max_time_us * INITIAL_X_FRACTION if max_time_us > 0 else 1.0
     fig.update_layout(
-        title="CPU-offload timeline — TRANSFER (line) & RELEASE (×) per tensor",
-        xaxis=dict(title="time (us)"),
+        title="CPU-offload timeline — TRANSFER (line) & RELEASE (•) per tensor",
+        xaxis=dict(title="time (us)", range=[0, initial_x_max]),
         yaxis=dict(
             title=f"tensor (ordered by first touch, n={len(tensor_order)})",
         ),
         hovermode="closest",
         template="plotly_white",
-        height=max(500, min(1400, 18 * len(tensor_order) // 10 + 400)),
+        autosize=True,
+        margin=dict(l=80, r=20, t=60, b=50),
     )
     return fig
 
@@ -425,11 +433,32 @@ def main(
     print(f"  csv:  {csv_path}")
     print(f"  meta: {meta_path}")
 
-    fig = _figure(rows, tensor_order, tensor_info, tensor_module)
+    max_time_us = 0.0
+    for r in rows:
+        if r["t_end_us"] > max_time_us:
+            max_time_us = r["t_end_us"]
+    fig = _figure(rows, tensor_order, tensor_info, tensor_module, max_time_us)
     plots_dir.mkdir(parents=True, exist_ok=True)
     html_path = plots_dir / "cpu_offload_timeline.html"
-    fig.write_html(str(html_path), include_plotlyjs="cdn")
-    print(f"  html: {html_path}")
+    fig_html = fig.to_html(
+        full_html=False,
+        include_plotlyjs="cdn",
+        default_height="100vh",
+        default_width="100%",
+        config={"responsive": True},
+    )
+    html_path.write_text(f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>cpu_offload_timeline</title>
+<style>
+  html, body {{ margin: 0; padding: 0; height: 100%; overflow: hidden; }}
+  .plot-wrap {{ width: 100vw; height: 100vh; }}
+</style>
+</head><body>
+<div class="plot-wrap">{fig_html}</div>
+</body></html>
+""")
+    print(f"  html: {html_path}  (initial x-zoom: 0 .. {max_time_us * INITIAL_X_FRACTION:.0f} us "
+          f"= {INITIAL_X_FRACTION*100:.1f}% of {max_time_us:.0f} us total)")
 
 
 if __name__ == "__main__":
