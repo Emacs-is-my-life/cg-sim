@@ -1,9 +1,0 @@
-{
-  "log_path": "output/pytorch-eager-llama-8B-accelerate.json",
-  "runtime_start_us": 20.0,
-  "filter_mode": "weight",
-  "n_tensors": 359,
-  "n_transfer_events": 760,
-  "n_release_events": 380,
-  "n_tensors_with_module": 359
-}

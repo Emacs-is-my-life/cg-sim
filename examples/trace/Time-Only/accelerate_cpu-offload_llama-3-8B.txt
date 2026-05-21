@@ -1,6 +1,0 @@
-GPU: RTX3090
-Model: llama-3-8B
-
-generation: 48.923s  |  32 new tokens  |  0.65 tok/s
-peak VRAM (generation): 0.993 GiB
-Write a short story about a robot learning emotions. It can be based on any emotion or combination of emotions. The story can be about a single robot or multiple robots. It can be set in any time period

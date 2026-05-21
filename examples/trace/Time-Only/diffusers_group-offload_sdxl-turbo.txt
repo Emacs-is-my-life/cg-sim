@@ -1,6 +1,0 @@
-GPU: RTX3090
-Model: sdxl-turbo
-
-end-to-end time: 3.021s
-peak VRAM (allocated): 4.584 GiB
-peak VRAM (reserved):  6.447 GiB
