@@ -66,10 +66,55 @@ from sim.core.trace import Trace
 
 _GPU_RESOURCE_KINDS = ("gpu_stream", "gpu", "gpu_runtime")
 _POOL_TENSOR_TYPES = ("WEIGHT", "LEAF", "INPUT")
-# Λ in the objective: per-byte penalty on peak-target overrun, in
-# lateness-ns units. 1e6 = 1 ms of lateness per 1 MB of overrun — heavy
-# enough that the LP always prefers a slow plan to one over cap.
 PEAK_SLACK_PENALTY = 1.0e6
+
+
+def _load_baseline_sim_times(
+    baseline_sim_result_path: str,
+) -> dict[int, tuple[int, int]]:
+    """Parse a baseline sim_result.json for per-trace-node sim times.
+
+    The sim emits ``COMPUTE_JOB`` chrome-trace events whose
+    ``args.Payload.id`` is the trace node_id and whose ``ts`` / ``dur``
+    are sim wall-clock in microseconds. We extract gpu compute events
+    (Hardware.name starts with 'gpu') and build:
+
+      {trace_node_id: (sim_start_ns, sim_end_ns)}
+
+    These are the *actual* deadlines a prefetch must beat in sim —
+    not the trace's profiler wall-clock (which includes idle gaps
+    sim collapses) and not the packed GPU-cumulative (which ignores
+    CPU interleaving). Run sim once with a neutral schedule, parse
+    its output, feed the times here, and the LP plans on the ground
+    truth.
+
+    The baseline run should ideally be cold-all (no streaming) to
+    avoid feedback. In practice any prior run works — sim times
+    perturb only slightly with different schedules.
+    """
+    import json
+    with open(baseline_sim_result_path) as f:
+        d = json.load(f)
+    sim_times: dict[int, tuple[int, int]] = {}
+    for e in d.get("traceEvents", ()):
+        if e.get("name") != "COMPUTE_JOB" or e.get("ph") != "X":
+            continue
+        args = e.get("args") or {}
+        hw = args.get("Hardware") or {}
+        if not str(hw.get("name", "")).startswith("gpu"):
+            continue
+        payload = args.get("Payload") or {}
+        nid = payload.get("id")
+        if not isinstance(nid, int):
+            continue
+        ts = float(e.get("ts") or 0)
+        dur = float(e.get("dur") or 0)
+        # Chrome-trace ts/dur are in microseconds; convert to ns to
+        # match the rest of the scheduler.
+        sim_start_ns = int(ts * 1000)
+        sim_end_ns = int((ts + dur) * 1000)
+        sim_times[int(nid)] = (sim_start_ns, sim_end_ns)
+    return sim_times
 
 
 # ---------------------------------------------------------------------------
@@ -91,39 +136,55 @@ class _PoolTensor:
     size_bytes: int
     name: str
     dtype: str
-    # (node_id, trace_start_ns, trace_end_ns) sorted by trace_start_ns.
+    # (node_id, lp_start_ns, lp_end_ns) sorted by lp_start_ns. lp_*_ns
+    # is SIM-TIME when ``sim_times`` was provided, else trace-time.
+    # The LP plans gap_feasibility, c_feasibility, peak samples, and
+    # per-window lateness rows on this axis.
     consumers: list[tuple[int, int, int]]
     tau_h2d_ns: int                  # δ_t — per-tid H2D transfer time
     tau_d2h_ns: int                  # per-tid D2H transfer time
-    # True iff consumer_{k+1}.start − consumer_k.end ≥ τ_h2d:
-    #   the gap admits an evict + refetch round trip. Otherwise the
-    #   tid stays loaded across the gap regardless of c_t.
     gap_feasibility: list[bool]
-    # True iff consumer_0.start ≥ τ_h2d: the initial prefetch can finish
-    # before the first consumer fires. Otherwise the tid must be cold.
     c_feasibility: bool
-    # Per-consumer compiled_launch_id / compiled_graph_id from the trace
-    # (when present). Used only to populate NeutralTensor fields for the
-    # schedule JSON's compile-side metadata; the injector's fast path
-    # doesn't depend on them.
     consumer_graph_ids: list[int] = field(default_factory=list)
     consumer_launch_ids: list[int] = field(default_factory=list)
+    # Parallel arrays in TRACE wall-clock ns (same order as
+    # ``consumers``). Used only by emit when populating the schedule
+    # JSON's transfer_start_ns / transfer_end_ns fields — the
+    # injector keys those to trace times. Equal to ``consumers``
+    # when sim_times isn't provided.
+    consumer_trace_starts: list[int] = field(default_factory=list)
+    consumer_trace_ends: list[int] = field(default_factory=list)
 
 
-def _build_pool(trace: Trace, hw: HwParams) -> dict[int, _PoolTensor]:
-    """Build the cgsim_tid pool of cuda-resident WEIGHT/LEAF/INPUT tensors.
-
-    A tid is admitted iff:
-      - tensor_type ∈ {WEIGHT, LEAF, INPUT}
-      - device starts with "cuda"
-      - size_bytes > 0
-      - at least one gpu trace consumer
-
-    The trace loader has already merged aliases by (device, storage_id),
-    so each entry corresponds to a distinct physical storage.
+def _build_pool(
+    trace: Trace, hw: HwParams,
+    sim_times: dict[int, tuple[int, int]] | None = None,
+) -> dict[int, _PoolTensor]:
+    """Build the pool. When ``sim_times`` is provided, the LP's
+    timing axis uses sim wall-clock from a baseline run (option #1:
+    ground-truth deadlines from a prior sim). Otherwise falls back
+    to trace_start_ns (identical to the original ct_milp_lateness).
     """
     bw_h2d = max(effective_h2d_bw(hw), 1e-9)
     bw_d2h = max(float(hw.d2h_bw), 1e-9)
+
+    def _lp_time(nid: int, trace_t: int) -> int:
+        """Pick the LP's time axis: sim_time if available, else trace."""
+        if sim_times is None:
+            return trace_t
+        st = sim_times.get(nid)
+        if st is None:
+            # Node not in baseline sim — fall back to trace time.
+            return trace_t
+        return st[0]  # sim_start_ns
+
+    def _lp_time_end(nid: int, trace_e: int) -> int:
+        if sim_times is None:
+            return trace_e
+        st = sim_times.get(nid)
+        if st is None:
+            return trace_e
+        return st[1]  # sim_end_ns
 
     candidate_tids: set[int] = set()
     for tid, t in trace.tensor_map.items():
@@ -137,15 +198,21 @@ def _build_pool(trace: Trace, hw: HwParams) -> dict[int, _PoolTensor]:
             continue
         candidate_tids.add(int(tid))
 
-    consumers_by_tid: dict[int, list[tuple[int, int, int, int, int]]] = {}
+    # consumers_by_tid stores both LP-axis (sim or trace) and trace
+    # times so emit can correctly populate transfer_start_ns/end_ns.
+    # Tuple: (lp_start, lp_end, nid, gid, lid, trace_start, trace_end).
+    consumers_by_tid: dict[int, list[tuple[int, int, int, int, int, int, int]]] = {}
     for nid, node in trace.node_map.items():
         rk = str((node.args or {}).get("resource_kind") or "")
         if rk not in _GPU_RESOURCE_KINDS:
             continue
+        nid_i = int(nid)
         start_ns = int((node.args or {}).get("start_ns") or 0)
         end_ns = int((node.args or {}).get("end_ns") or start_ns)
         if start_ns <= 0:
             continue
+        lp_s = _lp_time(nid_i, start_ns)
+        lp_e = _lp_time_end(nid_i, end_ns)
         gid_raw = (node.args or {}).get("compiled_graph_id")
         lid_raw = (node.args or {}).get("compiled_launch_id")
         try:
@@ -161,35 +228,41 @@ def _build_pool(trace: Trace, hw: HwParams) -> dict[int, _PoolTensor]:
             if t not in candidate_tids:
                 continue
             consumers_by_tid.setdefault(t, []).append(
-                (start_ns, end_ns, int(nid), gid_i, lid_i)
+                (lp_s, lp_e, nid_i, gid_i, lid_i, start_ns, end_ns)
             )
 
-    # GLOBAL gpu-node index (across all graphs). Feasibility checks
-    # use this — PCIe is a global resource, so an early gpu node from
-    # any earlier graph can issue a prefetch for a consumer in a
-    # later graph. Restricting issuer search to consumer's own graph
-    # (the old behavior) wrongly rejected tids whose graph happens
-    # to start late but has plenty of cross-graph slack.
-    graph_first_gpu_ns: dict[int, int] = {}   # kept for diagnostic
-    sorted_gpu_starts_by_graph: dict[int, list[int]] = {}  # kept for diag
+    # Per-graph + global indices over gpu nodes in LP-axis.
+    #
+    # IMPORTANT: feasibility checks now use GLOBAL gpu starts (any
+    # graph), not per-graph. PCIe is a global resource; a prefetch
+    # for a tid first consumed in graph G_3 can be issued from any
+    # earlier gpu node in graphs G_0..G_2. The same applies to
+    # cross-iter refetches in the unified timeline. Restricting to
+    # the consumer's own graph (the old behavior) made c_feasibility
+    # / gap_feasibility falsely reject tids whose graph happens to
+    # start late but have plenty of earlier cross-graph slack.
+    graph_first_gpu_ns: dict[int, int] = {}  # kept for diagnostic
+    sorted_gpu_starts_by_graph: dict[int, list[int]] = {}
     all_gpu_starts: list[int] = []
     for nid, node in trace.node_map.items():
         rk = str((node.args or {}).get("resource_kind") or "")
         if rk not in _GPU_RESOURCE_KINDS:
             continue
+        nid_i = int(nid)
         start_ns = int((node.args or {}).get("start_ns") or 0)
         if start_ns <= 0:
             continue
+        lp_s = _lp_time(nid_i, start_ns)
         gid_raw = (node.args or {}).get("compiled_graph_id")
         try:
             gid_i = int(gid_raw) if gid_raw is not None else -1
         except (TypeError, ValueError):
             gid_i = -1
         cur = graph_first_gpu_ns.get(gid_i)
-        if cur is None or start_ns < cur:
-            graph_first_gpu_ns[gid_i] = start_ns
-        sorted_gpu_starts_by_graph.setdefault(gid_i, []).append(start_ns)
-        all_gpu_starts.append(start_ns)
+        if cur is None or lp_s < cur:
+            graph_first_gpu_ns[gid_i] = lp_s
+        sorted_gpu_starts_by_graph.setdefault(gid_i, []).append(lp_s)
+        all_gpu_starts.append(lp_s)
     for g in sorted_gpu_starts_by_graph:
         sorted_gpu_starts_by_graph[g].sort()
     all_gpu_starts.sort()
@@ -201,9 +274,22 @@ def _build_pool(trace: Trace, hw: HwParams) -> dict[int, _PoolTensor]:
         size = int(tensor.size_bytes)
         tau_h2d = int(hw.h2d_latency_ns) + int(size / bw_h2d)
         tau_d2h = int(hw.d2h_latency_ns) + int(size / bw_d2h)
-        consumers = [(int(nid), int(s), int(e)) for s, e, nid, _, _ in raw]
-        graph_ids = [int(g) for _, _, _, g, _ in raw]
-        launch_ids = [int(l) for _, _, _, _, l in raw]
+        # raw rows now include trace timestamps too:
+        # (lp_start, lp_end, nid, gid, lid, trace_start, trace_end).
+        # `consumers` carries the LP axis (sim_time when available);
+        # `consumer_trace_starts/ends` carry trace wall-clock for emit.
+        consumers = [
+            (int(nid), int(lps), int(lpe))
+            for (lps, lpe, nid, _g, _l, _ts, _te) in raw
+        ]
+        graph_ids = [int(g) for (_lps, _lpe, _nid, g, _l, _ts, _te) in raw]
+        launch_ids = [int(l) for (_lps, _lpe, _nid, _g, l, _ts, _te) in raw]
+        consumer_trace_starts = [
+            int(ts) for (_lps, _lpe, _nid, _g, _l, ts, _te) in raw
+        ]
+        consumer_trace_ends = [
+            int(te) for (_lps, _lpe, _nid, _g, _l, _ts, te) in raw
+        ]
         # Per-gap feasibility check — must mirror what emit's
         # `_pick_issuer_node` + `re_ts <= ck_end` short-circuit will
         # accept, otherwise the LP picks e=1 for gaps that emit can't
@@ -226,33 +312,33 @@ def _build_pool(trace: Trace, hw: HwParams) -> dict[int, _PoolTensor]:
         # If no gpu node in consumer_{k+1}'s graph falls in this
         # window, no async issuer exists → e_var dropped, tid stays
         # alive across the gap.
-        # Per-gap feasibility: in-graph issuer search (consumer_{k+1}'s
-        # graph). Empirically on trace-time variants, switching this
-        # to global made the LP swap many small streamed tids for
-        # fewer large ones with the same total bytes — same LP-modeled
-        # peak, but sim peak diverged enough to OOM-fragment near cap.
-        # Emit *does* search globally for the issuer (see
-        # _pick_issuer_node) so the LP's per-graph veto here is a
-        # conservative filter, not a correctness invariant.
+        # GLOBAL issuer search (any graph). PCIe is global; a refetch
+        # can be issued from any earlier gpu node, not just one in
+        # consumer_{k+1}'s own graph. Without this, an early consumer
+        # in a late-starting graph (e.g. UNet first kernel in G_3
+        # when G_0..G_2 already ran) wrongly looks c-infeasible
+        # because its graph's first node provides no slack.
         gap_feas: list[bool] = []
         for i in range(len(consumers) - 1):
             ck_end = consumers[i][2]
             ckp1_start = consumers[i + 1][1]
-            next_gid = graph_ids[i + 1]
             target = ckp1_start - tau_h2d
             if target <= ck_end:
                 gap_feas.append(False)
                 continue
-            gpu_starts = sorted_gpu_starts_by_graph.get(next_gid, ())
             import bisect
-            idx = bisect.bisect_right(gpu_starts, ck_end)
-            issuer_ok = (idx < len(gpu_starts) and gpu_starts[idx] <= target)
+            idx = bisect.bisect_right(all_gpu_starts, ck_end)
+            issuer_ok = (
+                idx < len(all_gpu_starts)
+                and all_gpu_starts[idx] <= target
+            )
             gap_feas.append(issuer_ok)
-        # c_feasibility: consumer_0.start − consumer_graph's first gpu
-        # node start ≥ τ_h2d. Otherwise no async issuer in the
-        # consumer's graph fits before consumer_0 fires.
-        consumer_0_gid = graph_ids[0] if graph_ids else -1
-        origin_for_c = graph_first_gpu_ns.get(consumer_0_gid, consumers[0][1])
+        # c_feasibility: must exist a gpu node ANYWHERE that fires
+        # before consumer_0 with cum-time gap ≥ τ_h2d. Equivalent to
+        # consumer_0.lp_start ≥ τ_h2d + earliest_gpu_lp_start (≈ 0
+        # when sim_time origin or trace_t origin is small). Allows
+        # cross-graph issuers.
+        origin_for_c = all_gpu_starts[0] if all_gpu_starts else 0
         c_feas = (consumers[0][1] - origin_for_c) >= tau_h2d
         name_raw = getattr(tensor, "name", None) or ""
         dtype_raw = str((tensor.args or {}).get("dtype") or "")
@@ -268,29 +354,34 @@ def _build_pool(trace: Trace, hw: HwParams) -> dict[int, _PoolTensor]:
             c_feasibility=c_feas,
             consumer_graph_ids=graph_ids,
             consumer_launch_ids=launch_ids,
+            consumer_trace_starts=consumer_trace_starts,
+            consumer_trace_ends=consumer_trace_ends,
         )
     return pool
 
 
 def _build_gpu_consumer_timeline(
     trace: Trace,
+    sim_times: dict[int, tuple[int, int]] | None = None,
 ) -> list[tuple[int, int]]:
-    """All gpu compute nodes with valid trace_start_ns, sorted by start.
+    """All gpu compute nodes sorted by the LP's time axis.
 
-    Returns (node_id, trace_start_ns) tuples. Used as the sample grid for
-    peak and lateness constraints — sampling at every gpu compute event
-    keeps the LP aligned with sim's moment-by-moment vram state and the
-    PCIe queue's cumulative load.
+    Uses sim_time_start when ``sim_times`` provided, else trace_start_ns.
     """
     out: list[tuple[int, int]] = []
     for nid, node in trace.node_map.items():
         rk = str((node.args or {}).get("resource_kind") or "")
         if rk not in _GPU_RESOURCE_KINDS:
             continue
+        nid_i = int(nid)
         start_ns = int((node.args or {}).get("start_ns") or 0)
         if start_ns <= 0:
             continue
-        out.append((int(nid), int(start_ns)))
+        if sim_times is not None:
+            st = sim_times.get(nid_i)
+            if st is not None:
+                start_ns = int(st[0])
+        out.append((nid_i, int(start_ns)))
     out.sort(key=lambda x: x[1])
     return out
 
@@ -490,6 +581,7 @@ def _solve_milp(
     trace: Trace,
     hw: HwParams,
     *,
+    sim_times: dict[int, tuple[int, int]] | None = None,
     peak_target_bytes: int | None,
     extra_static_bytes: int,
     safety_margin_frac: float,
@@ -659,7 +751,7 @@ def _solve_milp(
     row = 0
 
     # ---- 6. Sample grid (shared by peak & lateness rows) ----
-    gpu_consumers = _build_gpu_consumer_timeline(trace)
+    gpu_consumers = _build_gpu_consumer_timeline(trace, sim_times)
     if not gpu_consumers:
         raise RuntimeError(
             "[ct_milp_lateness] no gpu consumer events in trace; "
@@ -1079,6 +1171,7 @@ def _emit_neutral(
     result: _LPResult,
     trace: Trace,
     hw: HwParams,
+    sim_times: dict[int, tuple[int, int]] | None = None,
 ) -> NeutralSchedule:
     """Build a NeutralSchedule with cgsim_tids pre-resolved on every entry.
 
@@ -1099,52 +1192,75 @@ def _emit_neutral(
     """
     KEEP_THRESHOLD = 0.5
 
-    # Per-graph issuer search (in-graph only).
-    #
-    # Originally tried a cross-graph picker but on trace-time workloads
-    # it caused regressions: cross-graph issuers fire much earlier in
-    # sim, the injector claims dst pages from that early issue point,
-    # so concurrent dst-page residency goes up and sim peak inflates
-    # by hundreds of MB → OOM fragmentation. Same-graph issuers fire
-    # close to the consumer in sim and don't have this problem.
-    # See ct_milp_lateness_simtime for the cross-graph version that
-    # works when the LP plans on sim_time deadlines.
-    nodes_by_graph_trace: dict[int, list[tuple[int, int]]] = {}
+    # Global gpu-node index in LP axis. We allow CROSS-GRAPH issuers
+    # — PCIe is a global resource, so an early gpu node from graph
+    # G_0 can issue a prefetch whose consumer is in G_3. The
+    # injector handles cross-graph via NeutralPrefetch.issue_graph_id.
+    # Each entry: (lp_start_ns, trace_start_ns, node_id, graph_id).
+    all_gpu_nodes_lp: list[tuple[int, int, int, int]] = []
     for nid, node in trace.node_map.items():
         rk = str((node.args or {}).get("resource_kind") or "")
         if rk not in _GPU_RESOURCE_KINDS:
             continue
+        nid_i = int(nid)
         start_ns = int((node.args or {}).get("start_ns") or 0)
         if start_ns <= 0:
             continue
+        lp_start = start_ns
+        if sim_times is not None:
+            st = sim_times.get(nid_i)
+            if st is not None:
+                lp_start = int(st[0])
         gid_raw = (node.args or {}).get("compiled_graph_id")
         try:
             gid_i = int(gid_raw) if gid_raw is not None else -1
         except (TypeError, ValueError):
             gid_i = -1
-        nodes_by_graph_trace.setdefault(gid_i, []).append(
-            (int(start_ns), int(nid))
-        )
-    for g in nodes_by_graph_trace:
-        nodes_by_graph_trace[g].sort(key=lambda x: x[0])
+        all_gpu_nodes_lp.append((lp_start, int(start_ns), nid_i, gid_i))
+    all_gpu_nodes_lp.sort(key=lambda x: x[0])
 
     def _pick_issuer_node(
-        consumer_gid: int, consumer_start_ns: int, tau_h2d_ns: int,
-    ) -> tuple[int, int]:
-        target = consumer_start_ns - tau_h2d_ns
-        lst = nodes_by_graph_trace.get(consumer_gid, ())
-        best_ns = -1
+        consumer_gid: int, consumer_lp_start: int, tau_h2d_ns: int,
+        earliest_allowed_lp: int = -1,
+    ) -> tuple[int, int, int]:
+        """Latest gpu node ANYWHERE whose LP-axis start ≤
+        consumer_lp_start − τ_h2d (and > earliest_allowed_lp for
+        post-evict refetches). Cross-graph allowed: the returned
+        ``issuer_graph_id`` may differ from consumer_gid.
+
+        Returns (issuer_node_id, issuer_lp_start, issuer_graph_id),
+        or (-1, -1, -1) if none.
+        """
+        target = consumer_lp_start - tau_h2d_ns
+        best_lp = -1
         best_nid = -1
-        for ts, nid in lst:
-            if ts <= target:
-                if ts > best_ns:
-                    best_ns = ts
-                    best_nid = nid
-            else:
+        best_gid = -1
+        import bisect
+        idx = bisect.bisect_right(
+            [n[0] for n in all_gpu_nodes_lp], target,
+        ) - 1
+        # Walk back from the latest candidate ≤ target until one
+        # satisfies the earliest_allowed_lp lower bound (and prefers
+        # the same graph as consumer when equally late, to match the
+        # old behavior on workloads where in-graph issuer existed).
+        while idx >= 0:
+            lp_s, _trace_s, nid, gid = all_gpu_nodes_lp[idx]
+            if lp_s <= earliest_allowed_lp:
                 break
+            if lp_s > best_lp or (
+                lp_s == best_lp and gid == consumer_gid
+            ):
+                best_lp = lp_s
+                best_nid = nid
+                best_gid = gid
+                # Prefer in-graph issuer when at the latest valid
+                # lp position; if we already have it, stop.
+                if gid == consumer_gid:
+                    break
+            idx -= 1
         if best_nid < 0:
-            return -1, -1
-        return best_nid, best_ns
+            return -1, -1, -1
+        return best_nid, best_lp, best_gid
 
     # Build NeutralTensor entries. The injector reads:
     #   - uid           — used as the cross-reference key from prefetch/evict
@@ -1220,26 +1336,36 @@ def _emit_neutral(
             ))
         else:
             consumer_0 = pt.consumers[0]
-            c0_nid, c0_start, _c0_end = consumer_0
+            c0_nid, c0_lp_start, _c0_lp_end = consumer_0
             c0_gid = pt.consumer_graph_ids[0]
             c0_lid = pt.consumer_launch_ids[0]
-            issue_nid, _ = _pick_issuer_node(
-                c0_gid, c0_start, pt.tau_h2d_ns,
+            issue_nid, _issue_lp, issue_gid = _pick_issuer_node(
+                c0_gid, c0_lp_start, pt.tau_h2d_ns,
             )
             if issue_nid < 0:
                 issue_nid = c0_nid
+                issue_gid = c0_gid
+            c0_trace_start = (
+                pt.consumer_trace_starts[0]
+                if pt.consumer_trace_starts else int(c0_lp_start)
+            )
+            # issue_graph_id: -1 if same graph as consumer, else the
+            # issuer's actual graph (cross-graph prefetch).
+            issue_graph_id_field = (
+                -1 if int(issue_gid) == int(c0_gid) else int(issue_gid)
+            )
             prefetches.append(NeutralPrefetch(
                 tensor_uid=uid,
                 issue_launch_id=max(0, int(c0_lid)),
                 wait_launch_id=max(0, int(c0_lid)),
-                transfer_start_ns=int(max(0, c0_start - pt.tau_h2d_ns)),
-                transfer_end_ns=int(c0_start),
+                transfer_start_ns=int(max(0, c0_trace_start - pt.tau_h2d_ns)),
+                transfer_end_ns=int(c0_trace_start),
                 reason="lateness_initial",
                 issue_node_id=int(issue_nid),
                 wait_node_id=int(c0_nid),
                 cgsim_tid=int(tid),
                 trusted_async=(issue_nid != c0_nid),
-                issue_graph_id=-1,
+                issue_graph_id=issue_graph_id_field,
                 iter_mask=[],
             ))
 
@@ -1257,10 +1383,19 @@ def _emit_neutral(
                 continue
             consumer_k = pt.consumers[k]
             consumer_kp1 = pt.consumers[k + 1]
-            ck_nid, _ck_start, ck_end = consumer_k
-            ckp1_nid, ckp1_start, _ckp1_end = consumer_kp1
+            ck_nid, _ck_lp_start, ck_lp_end = consumer_k
+            ckp1_nid, ckp1_lp_start, _ckp1_lp_end = consumer_kp1
             kp1_gid = pt.consumer_graph_ids[k + 1]
             kp1_lid = pt.consumer_launch_ids[k + 1]
+            # Trace times for emit's transfer fields.
+            ck_trace_end = (
+                pt.consumer_trace_ends[k]
+                if pt.consumer_trace_ends else int(ck_lp_end)
+            )
+            ckp1_trace_start = (
+                pt.consumer_trace_starts[k + 1]
+                if pt.consumer_trace_starts else int(ckp1_lp_start)
+            )
             evict_reason = (
                 "lateness_hybrid_gap_evict" if is_cold
                 else "lateness_gap_evict"
@@ -1272,33 +1407,40 @@ def _emit_neutral(
             evicts.append(NeutralEvict(
                 tensor_uid=uid,
                 issue_launch_id=max(0, int(pt.consumer_launch_ids[k])),
-                transfer_start_ns=int(ck_end),
-                transfer_end_ns=int(ck_end + pt.tau_d2h_ns),
+                transfer_start_ns=int(ck_trace_end),
+                transfer_end_ns=int(ck_trace_end + pt.tau_d2h_ns),
                 reason=evict_reason,
                 issue_node_id=int(ck_nid),
                 iter_mask=[],
                 cgsim_tid=int(tid),
             ))
-            re_nid, re_ts = _pick_issuer_node(
-                kp1_gid, ckp1_start, pt.tau_h2d_ns,
+            # Refetch issuer: search globally; must fire AFTER
+            # consumer_k.end (evict releases pages first).
+            re_nid, re_lp_ts, re_gid = _pick_issuer_node(
+                kp1_gid, ckp1_lp_start, pt.tau_h2d_ns,
+                earliest_allowed_lp=ck_lp_end,
             )
-            if re_nid < 0 or re_ts <= ck_end:
+            if re_nid < 0:
                 re_nid = ckp1_nid
-                re_ts = ckp1_start
+                re_lp_ts = ckp1_lp_start
+                re_gid = kp1_gid
+            refetch_graph_id_field = (
+                -1 if int(re_gid) == int(kp1_gid) else int(re_gid)
+            )
             prefetches.append(NeutralPrefetch(
                 tensor_uid=uid,
                 issue_launch_id=max(0, int(pt.consumer_launch_ids[k + 1])),
                 wait_launch_id=max(0, int(kp1_lid)),
                 transfer_start_ns=int(max(
-                    ck_end + 1, ckp1_start - pt.tau_h2d_ns,
+                    ck_trace_end + 1, ckp1_trace_start - pt.tau_h2d_ns,
                 )),
-                transfer_end_ns=int(ckp1_start),
+                transfer_end_ns=int(ckp1_trace_start),
                 reason=refetch_reason,
                 issue_node_id=int(re_nid),
                 wait_node_id=int(ckp1_nid),
                 cgsim_tid=int(tid),
                 trusted_async=(re_nid != ckp1_nid),
-                issue_graph_id=-1,
+                issue_graph_id=refetch_graph_id_field,
                 iter_mask=[],
             ))
 
@@ -1329,6 +1471,7 @@ def solve_neutral(
     trace: Trace,
     *,
     hw: HwParams,
+    baseline_sim_result_path: str | None = None,
     peak_target_bytes: int | None = None,
     safety_margin_frac: float = 0.07,
     max_peak_samples: int = 256,
@@ -1362,7 +1505,27 @@ def solve_neutral(
     Returns:
       A NeutralSchedule with cgsim_tid pre-resolved on every entry.
     """
-    pool = _build_pool(trace, hw)
+    # Load baseline sim_result to get per-node sim wall-clock. The
+    # LP plans on these times instead of trace_start_ns — matches sim's
+    # actual back-to-back execution rate (no profiler idle gaps,
+    # accounts for any CPU+GPU interleaving the baseline run observed).
+    sim_times: dict[int, tuple[int, int]] | None = None
+    if baseline_sim_result_path is not None:
+        sim_times = _load_baseline_sim_times(baseline_sim_result_path)
+        if audit:
+            n_total = sum(
+                1 for _nid, n in trace.node_map.items()
+                if str((n.args or {}).get("resource_kind") or "")
+                   in _GPU_RESOURCE_KINDS
+                and int((n.args or {}).get("start_ns") or 0) > 0
+            )
+            print(
+                f"[ct_milp_lateness:audit] loaded baseline sim times "
+                f"for {len(sim_times)} / {n_total} gpu trace nodes "
+                f"from {baseline_sim_result_path}"
+            )
+
+    pool = _build_pool(trace, hw, sim_times)
     if not pool:
         raise RuntimeError(
             "[ct_milp_lateness] pool is empty — no cuda WEIGHT/LEAF/INPUT "
@@ -1392,6 +1555,7 @@ def solve_neutral(
 
     result = _solve_milp(
         pool, trace, hw,
+        sim_times=sim_times,
         peak_target_bytes=peak_target_bytes,
         extra_static_bytes=extra_static_bytes,
         safety_margin_frac=safety_margin_frac,
@@ -1401,7 +1565,7 @@ def solve_neutral(
         audit=audit,
     )
 
-    neutral = _emit_neutral(pool, result, trace, hw)
+    neutral = _emit_neutral(pool, result, trace, hw, sim_times)
 
     n_cold = len(neutral.cold_starts)
     n_pf = len(neutral.prefetches)
@@ -1420,7 +1584,7 @@ def solve_neutral(
     )
 
     neutral.meta = {
-        "io_model": "ct_milp_lateness",
+        "io_model": "ct_milp_lateness_simtime",
         "graph_order": neutral.graph_order,
         "milp_peak_mb": round(result.peak_bytes / 1e6, 2),
         "milp_lateness_ms": round(result.lateness_ns / 1e6, 3),
