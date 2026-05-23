@@ -1,8 +1,8 @@
-"""Conformance check for the ``Accelerate`` scheduler against the spec.
+"""Conformance check for the ``DiffusersGroupOffload`` scheduler against the spec.
 
 Reads the simulator's Chrome-trace log file and validates the run against
 the reference numbers documented in
-``docs/offload-schemes/accelerate_cpu-offload_buffers-true.md``.
+``docs/offload-schemes/diffusers_group-offload_use-stream-true.md``.
 
 Usage:
     python scripts/check_accelerate.py [path/to/result.json]
@@ -250,14 +250,14 @@ def main(path: Path) -> int:
 
     # ---- spec checks ----
     print()
-    print("  ---- Spec checks (docs/offload-schemes/accelerate_cpu-offload_buffers-true.md) ----")
+    print("  ---- Spec checks (docs/offload-schemes/diffusers_group-offload_use-stream-true.md) ----")
     checks: list[tuple[bool, str, str]] = []
 
     # 1. Simulation must succeed.
     checks.append((sim_ok, "simulation completes without abort", str(sim_ok)))
 
-    # 2. RAM master copy ≈ full model size. Spec: ~14.96 GiB for Llama-3-8B fp16.
-    # Sum of WEIGHT bytes is what RAM must hold.
+    # 2. RAM master copy ≈ full model size. Spec line 159: SDXL-Turbo
+    # has ~6.94 GB of cuda-homed WEIGHTs across all 10 groups.
     expected_ram_min_KB = int(weight_total_KB * 0.95)
     checks.append((
         peak_ram >= expected_ram_min_KB,
@@ -265,14 +265,18 @@ def main(path: Path) -> int:
         fmt_gib(peak_ram),
     ))
 
-    # 3. Peak VRAM should be small vs. full model. Spec: max single load
-    #    ≈ 1.05 GB (lm_head). Tolerance ±50% to account for transient
-    #    overlap of adjacent loads.
-    spec_max_load_KB = max(weight_max_KB, 1)
-    vram_within_tolerance = peak_vram <= spec_max_load_KB * 1.5 + 256 * 1024
+    # 3. Peak VRAM should be strictly less than the full model — the
+    # whole point of group_offload is that you never need every
+    # weight resident at once. The simulator's "claim" semantics map
+    # to real-hardware *reserved* VRAM (no caching allocator), which
+    # is what PyTorch's max_memory_reserved reports. Real allocated is
+    # naturally lower because of intra-allocator coalescing the sim
+    # doesn't model. Cap at total weight bytes; anything below proves
+    # at least one group cycle (load/evict) actually happened.
+    vram_ceiling_KB = weight_total_KB
     checks.append((
-        vram_within_tolerance,
-        f"peak VRAM ≲ 1.5× largest weight ({fmt_gib(spec_max_load_KB)})",
+        peak_vram < vram_ceiling_KB,
+        f"peak VRAM < sum(WEIGHT bytes) [{fmt_gib(vram_ceiling_KB)}]",
         fmt_gib(peak_vram),
     ))
 
@@ -295,14 +299,19 @@ def main(path: Path) -> int:
         f"{len(unbalanced)} unbalanced",
     ))
 
-    # 6. ram->vram bytes per forward ≈ sum of cuda-homed WEIGHT bytes.
-    #    Spec: 14.96 GiB per token. This trace is one forward.
+    # 6. ram->vram bytes per pipeline run. Spec line 145-157: for a
+    # 4-inference-step SDXL-Turbo pass, the 7 UNet groups each get
+    # paged once per inference step, plus the 3 non-UNet components
+    # paged once total. Σ over groups: roughly num_inference_steps *
+    # unet_total + non_unet_total. Without knowing num_inference_steps
+    # from the log, accept any ratio in [1, 5] × Σ(WEIGHT bytes) as
+    # plausible, flag otherwise.
     expected_h2d_KB = sum(weights[tid]["size_KB"] for tid in loaded_weights)
     h2d_ratio = ram_to_vram_bytes_KB / max(1, expected_h2d_KB)
     checks.append((
-        abs(h2d_ratio - 1.0) <= 0.05,
-        f"ram->vram bytes ≈ Σ(loaded WEIGHT bytes) [{fmt_gib(expected_h2d_KB)}]",
-        fmt_gib(ram_to_vram_bytes_KB),
+        1.0 <= h2d_ratio <= 5.0,
+        f"ram->vram bytes within 1×..5× Σ(loaded WEIGHT bytes) [{fmt_gib(expected_h2d_KB)}]",
+        f"{fmt_gib(ram_to_vram_bytes_KB)} ({h2d_ratio:.2f}×)",
     ))
 
     n_ok = sum(1 for ok, _, _ in checks if ok)
@@ -317,6 +326,6 @@ def main(path: Path) -> int:
 
 
 if __name__ == "__main__":
-    default = Path("output/pytorch-eager-llama-8B-accelerate.json")
+    default = Path("output/pytorch_eager_sdxl-turbo_diffusers/sim_results/result.json")
     path = Path(sys.argv[1]) if len(sys.argv) > 1 else default
     raise SystemExit(main(path))

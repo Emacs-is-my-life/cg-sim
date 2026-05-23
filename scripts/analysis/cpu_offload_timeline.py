@@ -216,7 +216,8 @@ def _figure(
         mod = tensor_module.get(r["tensor_id"], NO_MODULE)
         hover = (
             f"<b>TRANSFER</b><br>"
-            f"tensor_id={r['tensor_id']} ({name})<br>"
+            f"<b>name=</b>{name or '&lt;unnamed&gt;'}<br>"
+            f"tensor_id={r['tensor_id']}<br>"
             f"kind={kind}  size={size:.1f} KB<br>"
             f"module={mod}<br>"
             f"{r['src_name']} → {r['dest_name']}<br>"
@@ -247,7 +248,8 @@ def _figure(
         mod = tensor_module.get(r["tensor_id"], NO_MODULE)
         hover = (
             f"<b>RELEASE</b><br>"
-            f"tensor_id={r['tensor_id']} ({name})<br>"
+            f"<b>name=</b>{name or '&lt;unnamed&gt;'}<br>"
+            f"tensor_id={r['tensor_id']}<br>"
             f"kind={kind}  size={size:.1f} KB<br>"
             f"module={mod}<br>"
             f"t={r['t_start_us']:.0f} us"

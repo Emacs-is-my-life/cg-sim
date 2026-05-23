@@ -1,94 +1,122 @@
-"""Simulator implementation of ``accelerate.cpu_offload`` (HuggingFace).
+"""Simulator implementation of diffusers ``enable_group_offload`` (HuggingFace).
 
-Algorithm (from ``docs/offload-schemes/accelerate_cpu-offload_buffers-true.md``,
-which documents both ``offload_buffers=False`` (default) and ``=True``
-variants of the real implementation):
+Algorithm (from ``docs/offload-schemes/diffusers_group-offload_use-stream-true.md``,
+which documents ``apply_group_offloading(..., offload_type='block_level',
+num_blocks_per_group=1, use_stream=True, non_blocking=False)`` — the same
+combination used in ``tmp/diffusers_group-offload_sdxl-turbo.py``):
 
   Phase 1 — Attach (modeled at layout time):
     Every WEIGHT tensor is parked in the pageable CPU master copy (RAM).
     Loaded once via SSD->RAM, then never modified. No WEIGHTs are
     pre-loaded into VRAM. Non-WEIGHT INPUT/LEAF tensors are placed on
-    their declared device (matches accelerate's view of activations
-    and the "buffers stay resident" rule under ``offload_buffers=False``).
+    their declared device — matches diffusers' view of activations
+    (intermediates flow through VRAM during a block's forward and are
+    freed by the caching allocator).
 
-  Phase 2 — Per-forward (modeled at runtime, per cgsim compute node):
+  Phase 2 — Per-block (modeled at runtime, per cgsim compute node):
     For every ready GPU compute node:
       - For each WEIGHT input that lacks a ready VRAM copy: claim a
-        VRAM region and queue a RAM->VRAM transfer. Mark the tensor
-        ``LOADING``; the compute is gated until the transfer retires
-        (``_LOADED``). One synchronous logical stream.
+        VRAM region and queue a RAM->VRAM transfer for *every member
+        of the same offload group atomically*. Mark the group
+        ``LOADING``; the compute is gated until the H2D retires
+        (``_LOADED``).
       - For each non-WEIGHT input: standard "ensure resident on
-        compute.memory" check (queues cross-device transfers as
-        needed for activations).
-      - On compute retire: attempt to release the VRAM region of every
-        WEIGHT input the retiring node consumed (see "Per-retire
-        eviction" below). The RAM master copy is *never* touched —
-        accelerate post_forward replaces the on-module tensor with a
-        zero-byte meta placeholder, the CPU copy is untouched.
+        compute.memory" check.
+      - On compute retire: attempt to release the VRAM region of the
+        consumed weight's group (see "Per-retire eviction" below).
+        The RAM master copy is *never* touched.
 
-Per-retire eviction (modeling ``post_forward_hook``):
+Group construction (spec §"offload_type=block_level"):
+  Each top-level component (``unet``, ``vae``, ``text_encoder``, ...)
+  is treated as an independent root. Within a component, only its
+  *direct-child* ``ModuleList``/``Sequential`` becomes a matched
+  container: each element of that list is one offload group
+  (``num_blocks_per_group=1`` is forced by real diffusers whenever
+  ``use_stream=True`` — spec line 81-83). Everything else in the
+  component (non-list direct children plus nested ModuleLists invisible
+  to the block-level scanner) collapses into a single "unmatched"
+  group that lives loaded for the whole component's forward.
+
+  For SDXL-Turbo this gives exactly 10 groups (spec §"Concrete count",
+  table line 149-157):
+    * 1 per fully-unmatched component: vae, text_encoder, text_encoder_2,
+      and the unet "everything else" lump (mid_block + conv_in/out +
+      time/add embeds + final norm/act).
+    * 6 from the two matched ModuleLists under unet: down_blocks[0..2]
+      and up_blocks[0..2].
+
+  The trace's bundle CSV doesn't carry an ``isinstance(., ModuleList)``
+  flag, so cgsim auto-detects matched lists by structural inference:
+  any (component, direct-child) pair whose grandchildren paths are all
+  integer-indexed is treated as a ModuleList. This is exactly what real
+  diffusers' ``named_children() → isinstance(ModuleList/Sequential)``
+  walk discovers on disk.
+
+Per-retire eviction (modeling diffusers' post-forward eviction):
   Every WEIGHT-consumer retire — not just the DAG-final consumer —
   fires ``_release_group_vram`` for the consumed weight's offload
-  group. A weight participating in K module invocations cycles
-  H2D K times across the run, matching real ``cpu_offload(model)``
-  semantics where each module's ``post_forward_hook`` evicts on the
-  way out. ``_group_state[gid]`` flips back to ``_ABSENT`` and the
-  next invocation's consumer re-triggers ``_stage_group``.
-
-  The earlier "release only when ``_group_remaining[gid]`` hits zero"
-  rule was a DAG-final check. It happened to look correct on traces
-  that contain a single forward pass (each weight has exactly one
-  consumer, "DAG-final" ≡ "post-forward"), but on multi-token
-  generation traces (e.g. 32 generated tokens → 32 consumers per
-  weight) it kept the entire model resident until the very last
-  forward retired — peak VRAM = full model rather than ~1 leaf
-  module's worth.
+  group. A group whose members are referenced by K module invocations
+  cycles H2D K times across the run, matching real ``group_offload``
+  semantics where each block's post-forward eviction returns its
+  tensors to ``offload_device``. ``_group_state[gid]`` flips back to
+  ``_ABSENT`` and the next consumer in the next invocation re-triggers
+  ``_stage_group``.
 
   Eviction is *gated* by ``_group_has_pending_consumer(gid)``: the
   scheduler scans ``ready_node_ids``, ``engine.job_waiting``, and
   ``engine.job_running`` for any node that still lists a member of
   the group in its ``input_tensors``. If any such consumer is queued
-  or executing, the release is skipped (a later retire will retry).
-  This is what prevents the "free the weight out from under a kernel
-  whose H2D just landed" deadlock: an earlier consumer (a CPU
-  dispatcher or speculative-prefetch trigger) can retire while the
-  H2D is still in flight for a downstream GPU kernel that's already
-  in ``job_waiting``. Without the gate, the deferred-release path in
-  ``_release_group_vram`` (the BEING_WRITTEN / BEING_READ → defer to
-  ``_pending_vram_group_releases``) would eventually fire after the
-  H2D completes and orphan the queued kernel.
+  or executing, the release is skipped (a later retire retries).
+  This is what prevents freeing a weight whose H2D just landed for a
+  GEMM already in ``job_waiting`` — the same correctness gate the
+  Accelerate scheduler uses.
 
-Knobs (spec section 9):
-  - ``offload_buffers`` (default False): True is not supported because
-    the pytorch profile bundle CSV does not distinguish parameter and
-    buffer tensors. Raises NotImplementedError if set.
-  - ``preload_module_classes`` (default None / []): list of nn.Module
-    class names. WEIGHTs whose owning-module path falls under an
-    ancestor in this set are coalesced into one offload group and
-    loaded/evicted atomically (real accelerate's ``place_submodules``
-    behavior). Default config → 1 group per cuda-WEIGHT leaf.
+Knobs:
+  - ``offload_type`` (default ``"block_level"``): ``"leaf_level"`` is
+    not yet implemented; raises NotImplementedError. Block-level is
+    the script-default for SDXL-Turbo.
+  - ``use_stream`` (default True): in real diffusers this gates the
+    secondary-stream prefetch and forces ``num_blocks_per_group=1``.
+    cgsim's memory subsystem is always a separate hardware lane from
+    the compute unit (transfers and compute always overlap when
+    independent), so ``use_stream=True`` is the natural model and
+    ``=False`` would only matter for fidelity around the false
+    serialization the spec describes — also raises NotImplementedError
+    until needed.
+  - ``num_blocks_per_group`` (default 1): only honored under
+    ``use_stream=True`` is forced-to-1 in real diffusers; we forbid
+    other values to match.
+  - ``components``: optional explicit list of top-level component
+    names (``["unet", "vae", "text_encoder", "text_encoder_2"]``). If
+    omitted, every distinct first dot-segment of any annotated
+    ``module_path`` in the trace becomes a component.
+  - ``block_modules``: optional dict ``{component: [direct-child
+    names ...]}`` to force matching of non-ModuleList children (spec
+    §"How to override the default matching"). Unused for SDXL-Turbo;
+    pipeline-level entry doesn't forward it per spec line 139-143.
 
 Notes vs the spec:
-  - cg-sim transfers run on the memory subsystem (PCIe bandwidth)
-    parallel to GPU compute on the compute unit, so H2D can overlap
-    with unrelated GPU work — peak weight residency exceeds spec's
-    strict "1 leaf module at a time" by a small constant.
-  - Speculative H2D prefetch: a CPU dispatcher or CPU-compute that
-    references a cuda-WEIGHT input kicks the RAM->VRAM load alongside
-    its own work so downstream GPU kernels find the weight in flight.
-    Single logical stream, no pinning, no write-back (RAM master is
-    never modified — matches accelerate's CPU state_dict semantics).
-    Interacts with per-retire eviction: when a CPU consumer of a
-    weight retires before the GPU consumer it was prefetching for,
-    the eviction is skipped via the pending-consumer gate above. If
-    no GPU consumer follows (e.g. a CPU-only ``aten::view`` on a
-    cuda-WEIGHT) the next retire will evict cleanly, but the wasted
-    H2D has already been paid — a known sim-only divergence.
+  - cg-sim already runs transfers on the memory subsystem in parallel
+    with GPU compute on the compute unit, so the prefetch overlap
+    ``use_stream=True`` is supposed to provide is *free* in the
+    simulator's hardware model — no separate prefetch hook to wire
+    up. Peak weight residency therefore tracks "currently-running
+    block + the block being prefetched" — i.e. up to two block groups
+    at once, which is the spec-correct ceiling under stream prefetch.
+  - Speculative H2D prefetch: same as in Accelerate, a CPU dispatcher
+    or CPU-compute that references a cuda-WEIGHT input kicks the
+    RAM->VRAM load alongside its own work so downstream GPU kernels
+    find the weight in flight. For diffusers this is exactly the
+    "lazy prefetching hook" attached to the root module by
+    ``apply_group_offloading`` (spec line 119) — same observable
+    behavior, same wasted-bandwidth corner case when a CPU-only
+    ``aten::view`` on a cuda-WEIGHT triggers a prefetch with no GPU
+    consumer to follow.
 """
 
 from __future__ import annotations
 
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from typing import Any, TYPE_CHECKING
 
 from sim.core.job import BaseJob, ComputeJob, TransferJob
@@ -112,14 +140,19 @@ _LOADING = "LOADING"  # RAM->VRAM transfer in flight
 _LOADED = "LOADED"    # VRAM region ready
 
 
-class Accelerate(BaseScheduler):
-    """Implements ``accelerate.cpu_offload``."""
+class DiffusersGroupOffload(BaseScheduler):
+    """Implements diffusers ``apply_group_offloading`` (block-level, use_stream)."""
 
     # Non-WEIGHT tensors whose region must never be released.
     # WEIGHTs are intentionally excluded — they are evicted from VRAM
-    # after each leaf module's last consumer retires, while the RAM
-    # master copy stays for the whole run.
+    # after each block's last consumer retires, while the RAM master
+    # copy stays for the whole run.
     _PERMANENT_TYPES = frozenset({"INPUT", "LEAF"})
+
+    # Suffix appended to a component name to denote its single
+    # "unmatched lump" group (everything in the component that isn't a
+    # direct-child ModuleList element).
+    _UNMATCHED_SUFFIX = ":unmatched"
 
     # Page size used by every memory in cg-sim (see base_memory.py).
     _PAGE_SIZE_KB: int = 4
@@ -152,48 +185,103 @@ class Accelerate(BaseScheduler):
         self.cuda_device = str(self.args.get("cuda_device", "cuda:0")).lower()
 
         if cpu_compute_name not in self.compute_by_name:
-            raise Exception(f"[Accelerate] CPU compute '{cpu_compute_name}' does not exist.")
+            raise Exception(f"[DiffusersGroupOffload] CPU compute '{cpu_compute_name}' does not exist.")
         if cuda_compute_name not in self.compute_by_name:
-            raise Exception(f"[Accelerate] CUDA compute '{cuda_compute_name}' does not exist.")
+            raise Exception(f"[DiffusersGroupOffload] CUDA compute '{cuda_compute_name}' does not exist.")
 
         self.cpu_compute: BaseCompute = self.compute_by_name[cpu_compute_name]
         self.cuda_compute: BaseCompute = self.compute_by_name[cuda_compute_name]
         self._ram: BaseMemory = self.cpu_compute.memory
         self._vram: BaseMemory = self.cuda_compute.memory
 
-        # ---------------- Algorithmic knobs (spec section 9) ----------------
-        # offload_buffers: real accelerate's flag for treating buffers as
-        # offload participants. The bundle CSV only emits WEIGHT vs
-        # CONTEXT — there is no BUFFER tag — so the True branch cannot
-        # be faithfully simulated without changes to the bundle producer.
-        self.offload_buffers: bool = bool(self.args.get("offload_buffers", False))
-        if self.offload_buffers:
+        # ---------------- Algorithmic knobs ----------------
+        # offload_type: real diffusers supports "block_level" and
+        # "leaf_level". The script-default for SDXL-Turbo is block_level
+        # and that's the only path implemented; leaf_level would
+        # require per-leaf grouping mirroring Accelerate's defaults.
+        self.offload_type: str = str(self.args.get("offload_type", "block_level"))
+        if self.offload_type != "block_level":
             raise NotImplementedError(
-                "[Accelerate] offload_buffers=True is not yet supported: "
-                "the pytorch profile bundle CSV does not distinguish "
-                "parameters from buffers (all are tagged tensor_kind=WEIGHT). "
-                "Emit a BUFFER tag from the bundle producer, then teach "
-                "the loader/scheduler to treat them separately."
+                f"[DiffusersGroupOffload] offload_type='{self.offload_type}' is not yet supported; "
+                "only 'block_level' is implemented. Use the Accelerate scheduler "
+                "with a per-leaf default for leaf-level semantics."
             )
 
-        # preload_module_classes: list of nn.Module class names whose
-        # whole subtree should load/evict as a single unit (place_submodules
-        # in real accelerate). Empty/None → per-leaf hook granularity
-        # (every direct-tensor-owning leaf is its own group). The bundle
-        # CSV's `module_class` column carries ancestor-class annotations
-        # for nodes whose immediate owning module is the ancestor (e.g.
-        # the residual-add op inside LlamaDecoderLayer is tagged
-        # module_class=LlamaDecoderLayer), so we can resolve group roots
-        # from the trace directly.
-        raw_preload = self.args.get("preload_module_classes")
-        if raw_preload is None:
-            raw_preload = []
-        if not isinstance(raw_preload, (list, tuple)):
-            raise Exception(
-                f"[Accelerate] preload_module_classes must be a list of strings; "
-                f"got {type(raw_preload).__name__}."
+        # use_stream: in real diffusers, True attaches a secondary
+        # stream + lazy prefetch hook and forces num_blocks_per_group=1.
+        # cgsim's memory subsystem is *always* a separate hardware lane
+        # from compute, so transfers naturally overlap; we encode the
+        # forcing rule here and refuse use_stream=False to avoid
+        # silently modeling something other than the script's setting.
+        self.use_stream: bool = bool(self.args.get("use_stream", True))
+        if not self.use_stream:
+            raise NotImplementedError(
+                "[DiffusersGroupOffload] use_stream=False is not yet supported; "
+                "the simulator's memory/compute parallelism already provides "
+                "the stream overlap, so the False path would require explicit "
+                "serialization that hasn't been modeled."
             )
-        self.preload_module_classes: frozenset[str] = frozenset(str(s) for s in raw_preload)
+
+        # num_blocks_per_group: real diffusers forces this to 1 whenever
+        # use_stream=True (spec line 81-83). Refuse any other value.
+        raw_nbpg = self.args.get("num_blocks_per_group", 1)
+        try:
+            nbpg = int(raw_nbpg)
+        except (TypeError, ValueError):
+            raise Exception(
+                f"[DiffusersGroupOffload] num_blocks_per_group must be an int; got {raw_nbpg!r}."
+            )
+        if nbpg != 1:
+            raise NotImplementedError(
+                f"[DiffusersGroupOffload] num_blocks_per_group={nbpg} is incompatible with "
+                "use_stream=True (real diffusers forces this to 1). Set to 1."
+            )
+        self.num_blocks_per_group: int = 1
+
+        # components: optional explicit list of top-level component
+        # names (the diffusers pipeline calls apply_group_offloading on
+        # each component separately). If omitted, auto-discover from
+        # the trace's module_path annotations.
+        raw_components = self.args.get("components")
+        if raw_components is None:
+            self.components: list[str] = self._discover_components()
+        else:
+            if not isinstance(raw_components, (list, tuple)):
+                raise Exception(
+                    f"[DiffusersGroupOffload] components must be a list of strings; "
+                    f"got {type(raw_components).__name__}."
+                )
+            self.components = [str(c) for c in raw_components]
+
+        # invocation_gap_ns: temporal-cluster threshold for detecting
+        # per-block invocation boundaries. Real diffusers' eviction
+        # fires per ``module.forward()`` call, so cgsim needs to know
+        # which consumers belong to which invocation. Consumer node
+        # ``start_ns`` values cluster naturally: within one invocation
+        # they're ~µs apart; between invocations (e.g. consecutive
+        # ``num_inference_steps`` iterations of UNet) there's a gap of
+        # tens to hundreds of ms while the rest of the pipeline runs.
+        # Default 50 ms — large enough to swallow intra-block idle
+        # spikes on the SDXL-Turbo single-step trace (sub-modules can
+        # straddle 30+ ms gaps) while still cleanly separating
+        # consecutive UNet inference steps (~200 ms apart at SDXL
+        # speeds). Override per-trace if needed.
+        self.invocation_gap_ns: int = int(self.args.get("invocation_gap_ns", 50_000_000))
+
+        # block_modules: optional dict {component: [direct-child names]}
+        # to force matching of non-ModuleList children. Mirrors real
+        # diffusers' block_modules kwarg on apply_group_offloading. The
+        # pipeline-level enable_group_offload doesn't forward this, so
+        # it's empty for the standard SDXL-Turbo script.
+        raw_block_mods = self.args.get("block_modules") or {}
+        if not isinstance(raw_block_mods, dict):
+            raise Exception(
+                f"[DiffusersGroupOffload] block_modules must be a dict of "
+                f"component -> [direct-child names]; got {type(raw_block_mods).__name__}."
+            )
+        self.block_modules_override: dict[str, list[str]] = {
+            str(k): [str(v) for v in vs] for k, vs in raw_block_mods.items()
+        }
 
         # ---------------- Trace bookkeeping ----------------
         self.pending_parent_count: dict[int, int] = {
@@ -214,19 +302,31 @@ class Accelerate(BaseScheduler):
                 self._remaining_consumers[tid] = self._remaining_consumers.get(tid, 0) + 1
 
         # ---------------- Offload-group construction ----------------
-        # tid -> group_id (string). Default config: every cuda-WEIGHT is
-        # its own singleton group, preserving per-leaf hook granularity.
-        # With preload_module_classes, cuda-WEIGHTs whose owning module
-        # path falls under a matching ancestor are merged into one group.
+        # tid -> group_id (string). For block_level + use_stream:
+        #   * Each ModuleList element under a matched container becomes
+        #     a group named "<component>.<list>.<index>".
+        #   * Everything else in a component lumps into a single group
+        #     named "<component>:unmatched".
         self._tensor_group: dict[int, str] = {}
         self._group_tids: dict[str, list[int]] = {}
+        # (component, direct-child) pairs detected as ModuleLists. Used
+        # for debuggability — see _build_offload_groups for the rule.
+        self._matched_lists: set[tuple[str, str]] = set()
         self._build_offload_groups()
 
         # Per-group residency state (cuda-WEIGHT only; cpu-device
-        # WEIGHTs stay in RAM forever). Eviction is driven by per-retire
-        # post_forward_hook semantics in _consume_inputs, not by a
-        # DAG-wide consumer counter — see that method for rationale.
+        # WEIGHTs stay in RAM forever). Eviction is driven by per-
+        # invocation consumer counts (see _build_invocation_accounting),
+        # not by DAG-wide consumer totals.
         self._group_state: dict[str, str] = {gid: _ABSENT for gid in self._group_tids}
+
+        # Per-invocation consumer accounting. Populated by
+        # _build_invocation_accounting after groups are constructed.
+        # See that method for the temporal-clustering design.
+        self._node_invocation_for_group: dict[int, dict[str, int]] = {}
+        self._group_invocation_pending: dict[str, dict[int, int]] = {}
+        self._group_active_invocation: dict[str, int] = {}
+        self._build_invocation_accounting()
 
         # TransferJob.id -> list of WEIGHT tensor ids it is loading.
         self._inflight_load_tids: dict[Any, list[int]] = {}
@@ -245,124 +345,407 @@ class Accelerate(BaseScheduler):
         # Same as DAV — the loader-driven contract.
         self._tick_pending_dest_ids: set[int] = set()
 
-        # ---------------- Explicit spec-state accumulators (spec §8) ----------------
-        # Cached after layout completes; gpu_resident_bytes is computed
-        # on demand because it changes throughout the run. peak_gpu_resident_bytes
-        # tracks the high-water mark of WEIGHT VRAM residency.
+        # ---------------- Explicit spec-state accumulators ----------------
+        # cpu_state_dict_bytes / gpu_persistent_buffer_bytes are set
+        # once at end of layout. _gpu_resident_bytes_cache is kept in
+        # sync incrementally — see _on_weight_claimed/_released and
+        # gpu_resident_bytes for the rationale (per-tick rescan over
+        # all tensors was 87% of wall time on SDXL-Turbo).
         self.cpu_state_dict_bytes: int = 0
         self.gpu_persistent_buffer_bytes: int = 0
         self.peak_gpu_resident_bytes: int = 0
+        self._gpu_resident_bytes_cache: int = 0
         return
 
     # ============================================================ groups
-    def _build_offload_groups(self) -> None:
-        """Assign every cuda-device WEIGHT to an offload group.
-
-        Default (no ``preload_module_classes``): each cuda-WEIGHT is its
-        own singleton, matching per-leaf hook granularity in real
-        accelerate.
-
-        With ``preload_module_classes``: scan the bundle's per-node
-        ``module`` annotation to build ``module_path -> module_class``
-        (PyTorch profiler tags each op with the innermost owning
-        nn.Module, which may be an ancestor of the leaf weight's
-        Linear/etc., so ancestor paths show up naturally for ops
-        executed directly in the ancestor's forward). Paths whose class
-        is in the preload set become group roots; cuda-WEIGHTs whose
-        owning-leaf path falls under a root share that root's group_id.
-        Deeper roots win on ties.
-        """
-        trace = self.sys.trace
-        # All cuda-device WEIGHTs participate in load/evict; cpu-device
-        # WEIGHTs stay in RAM forever and are not group members.
-        weight_tids = [
-            tid for tid, t in trace.tensor_map.items()
-            if t.args.get("tensor_type") == "WEIGHT"
-            and str(t.args.get("device", "")).lower().startswith("cuda")
-        ]
-
-        if not self.preload_module_classes:
-            for tid in weight_tids:
-                gid = f"w:{tid}"
-                self._tensor_group[tid] = gid
-                self._group_tids[gid] = [tid]
-            return
-
-        # path -> module_class (first seen wins; all node rows on the
-        # same path carry the same class in practice).
-        path_to_class: dict[str, str] = {}
-        for node in trace.node_map.values():
-            mod = node.args.get("module")
-            if not mod:
-                continue
-            path = mod.get("module_path")
-            cls = mod.get("module_class")
-            if path and cls:
-                path_to_class.setdefault(path, cls)
-
-        # tid -> set of all consumer-module paths. Tracking every path
-        # (not just the first-seen) closes a coverage gap: a WEIGHT
-        # consumed by both a leaf Linear (path under the layer) and an
-        # un-annotated submit/wait node would have missed the layer
-        # group if first-seen happened to be the un-annotated one.
-        tid_to_paths: dict[int, set[str]] = {}
-        for node in trace.node_map.values():
+    def _discover_components(self) -> list[str]:
+        """Auto-detect top-level components by collecting the first
+        dot-segment of every annotated ``module_path``. Returns sorted
+        for determinism."""
+        components: set[str] = set()
+        for node in self.sys.trace.node_map.values():
             mod = node.args.get("module")
             if not mod:
                 continue
             path = mod.get("module_path")
             if not path:
                 continue
+            components.add(path.split(".", 1)[0])
+        return sorted(components)
+
+    def _detect_matched_lists(self) -> set[tuple[str, str]]:
+        """For each (component, direct-child) pair seen in the trace,
+        check whether the grandchildren are integer-indexed — the
+        structural signature of a ``ModuleList``/``Sequential``.
+        Returns the set of (component, child) tuples that qualify.
+
+        Mirrors real diffusers' ``named_children() →
+        isinstance(ModuleList | Sequential)`` walk: only direct children
+        of the component root count (spec §"offload_type=block_level",
+        "direct children only, not recursive"). Augmented by any
+        ``block_modules_override`` the user passes through YAML.
+        """
+        by_comp_child: dict[tuple[str, str], set[str]] = defaultdict(set)
+        for node in self.sys.trace.node_map.values():
+            mod = node.args.get("module")
+            if not mod:
+                continue
+            path = mod.get("module_path")
+            if not path:
+                continue
+            parts = path.split(".")
+            if len(parts) < 3:
+                continue
+            comp, child, grand = parts[0], parts[1], parts[2]
+            if comp not in self.components:
+                continue
+            by_comp_child[(comp, child)].add(grand)
+
+        matched: set[tuple[str, str]] = set()
+        for (comp, child), grandchildren in by_comp_child.items():
+            # A ModuleList's children are all integer-indexed. A mixed
+            # set (some int, some named) wouldn't be a ModuleList in
+            # PyTorch; rule it out.
+            if grandchildren and all(g.isdigit() for g in grandchildren):
+                matched.add((comp, child))
+
+        for comp, children in self.block_modules_override.items():
+            for child in children:
+                matched.add((comp, child))
+        return matched
+
+    def _group_for_path(self, path: str) -> str:
+        """Map a module path to its block_level offload group.
+
+        Rule:
+          * len(parts) ≥ 3 and (parts[0], parts[1]) is a matched
+            ModuleList and parts[2] is the integer block index →
+            ``"<comp>.<list>.<idx>"``.
+          * Anything else (path under a component but not under a
+            matched list) → ``"<comp>:unmatched"``.
+        """
+        parts = path.split(".")
+        comp = parts[0]
+        if (
+            len(parts) >= 3
+            and (comp, parts[1]) in self._matched_lists
+            and parts[2].isdigit()
+        ):
+            return f"{comp}.{parts[1]}.{parts[2]}"
+        return f"{comp}{self._UNMATCHED_SUFFIX}"
+
+    def _build_effective_module_paths(self) -> dict[int, str]:
+        """Map every node to its *effective* module_path.
+
+        A node's effective path is its own ``args["module"]["module_path"]``
+        when annotated; otherwise the path of the CPU dispatcher that
+        launched it. This matches real diffusers' pre/post-forward-hook
+        scope: a GPU kernel emitted during ``module.forward()`` has its
+        ``cudaLaunchKernel`` CPU dispatcher as its submit-edge parent,
+        and that dispatcher carries the module's ``module_path``.
+
+        Climb strategy, in priority order:
+          1. **Submit-edge parent** (matching ``correlation_id``):
+             every GPU kernel emitted by ``cudaLaunchKernel`` shares a
+             ``correlation_id`` with the CPU launch row in the PyTorch
+             profile. Among ``parent_nodes``, we pick the one whose
+             ``args['correlation_id']`` equals this node's — that's the
+             true control-flow parent (vs. data-flow parents). Walk
+             this chain until we hit an annotated ancestor.
+          2. **Fallback BFS upstream** through any parent kind. Used
+             for unannotated CPU helpers (e.g.
+             ``aten::_has_compatible_shallow_copy_type``) that don't
+             share a ``correlation_id`` with their launchers; their
+             nearest annotated thread-order ancestor is the right
+             owner.
+
+        Why not BFS-all-parents from the start: the trace bundle's
+        ``add_temporal_data_control_edges`` adds parent links from data
+        producers to consumers, which crosses component boundaries
+        (e.g. UNet's last output feeds VAE's first op, so a
+        VAE-internal kernel's parent set includes UNet ancestors).
+        Generic BFS happily walks into UNet and mislabels VAE weights.
+        The correlation_id-first walk stays inside the current module's
+        forward scope.
+        """
+        trace = self.sys.trace
+        eff: dict[int, str] = {}
+        for nid, node in trace.node_map.items():
+            mod = node.args.get("module")
+            if mod and mod.get("module_path"):
+                eff[nid] = mod["module_path"]
+
+        def _submit_parent(nid: int) -> int | None:
+            node = trace.node_map[nid]
+            corr = node.args.get("correlation_id")
+            if not corr:
+                return None
+            for pid in node.parent_nodes:
+                p_corr = trace.node_map[pid].args.get("correlation_id")
+                if p_corr == corr:
+                    return pid
+            return None
+
+        for nid in list(trace.node_map):
+            if nid in eff:
+                continue
+            # (1) Correlation-id submit-edge chain.
+            cur: int = nid
+            steps = 0
+            found_path: str | None = None
+            while steps < 16:
+                sp = _submit_parent(cur)
+                if sp is None:
+                    break
+                if sp in eff:
+                    found_path = eff[sp]
+                    break
+                cur = sp
+                steps += 1
+            if found_path is not None:
+                eff[nid] = found_path
+                continue
+
+            # (2) Fallback: BFS through any parent kind.
+            visited = {nid}
+            queue: deque[int] = deque(trace.node_map[nid].parent_nodes)
+            for pid in trace.node_map[nid].parent_nodes:
+                visited.add(pid)
+            while queue:
+                cur = queue.popleft()
+                if cur in eff:
+                    found_path = eff[cur]
+                    break
+                for pid in trace.node_map[cur].parent_nodes:
+                    if pid in visited:
+                        continue
+                    visited.add(pid)
+                    queue.append(pid)
+            if found_path is not None:
+                eff[nid] = found_path
+        return eff
+
+    def _build_offload_groups(self) -> None:
+        """Assign every cuda-device WEIGHT to a block_level group.
+
+        Four passes:
+          1. Detect matched ModuleLists (depends on self.components).
+          2. Compute every node's *effective* module_path via correlation-
+             id submit-edge climbing (see ``_build_effective_module_paths``).
+          3. Collect consumer paths per cuda-WEIGHT, separately tracking
+             GPU consumers (the kernels that actually read the weight
+             data) and CPU consumers (metadata-only ops like
+             ``aten::as_strided`` that don't touch the bytes).
+          4. Decide the owning module: GPU-consumer paths win if any
+             exist; otherwise fall back to CPU-consumer paths. Within
+             the chosen set, pick the most-specific group via majority
+             vote across paths, breaking ties by depth and "matched
+             beats unmatched". WEIGHTs with no reachable consumers
+             become ``"orphan:<tid>"`` singletons.
+
+        Why prefer GPU consumers: PyTorch profiler tags storage-aliased
+        tensors with whichever module's ``as_strided``/``view`` happened
+        to alias into the same allocator slot first. That alias can
+        live in a totally different component than the real owning
+        Linear/Conv whose GEMM does the GPU read. The GPU consumer's
+        annotation is the only signal that survives storage aliasing —
+        all the metadata aliases agree about the slot, only one of them
+        agrees about the data.
+        """
+        trace = self.sys.trace
+        weight_tids = [
+            tid for tid, t in trace.tensor_map.items()
+            if t.args.get("tensor_type") == "WEIGHT"
+            and str(t.args.get("device", "")).lower().startswith("cuda")
+        ]
+
+        # Pass 1.
+        self._matched_lists = self._detect_matched_lists()
+
+        # Pass 2.
+        effective_path = self._build_effective_module_paths()
+
+        # Pass 3.
+        tid_gpu_paths: dict[int, list[str]] = defaultdict(list)
+        tid_cpu_paths: dict[int, list[str]] = defaultdict(list)
+        for nid, node in trace.node_map.items():
+            path = effective_path.get(nid)
+            if not path:
+                continue
+            dev = (node.args.get("device_type") or "").upper()
+            bucket = tid_gpu_paths if dev == "CUDA" else tid_cpu_paths
             for tid in node.input_tensors:
                 t = trace.tensor_map.get(tid)
                 if t is None or t.args.get("tensor_type") != "WEIGHT":
                     continue
-                tid_to_paths.setdefault(tid, set()).add(path)
+                bucket[tid].append(path)
 
-        def _matching_root(path: str) -> str | None:
-            """Walk the dot-hierarchy from leaf to root; return the
-            deepest ancestor whose class is in the preload set."""
-            parts = path.split(".")
-            for depth in range(len(parts), 0, -1):
-                ancestor = ".".join(parts[:depth])
-                if path_to_class.get(ancestor) in self.preload_module_classes:
-                    return ancestor
-            return None
-
+        # Pass 4.
         for tid in weight_tids:
-            best_root: str | None = None
-            best_depth = -1
-            for path in tid_to_paths.get(tid, ()):
-                root = _matching_root(path)
-                if root is None:
-                    continue
-                d = root.count(".")
-                if d > best_depth:
-                    best_depth = d
-                    best_root = root
-            gid = f"g:{best_root}" if best_root is not None else f"w:{tid}"
+            paths = tid_gpu_paths.get(tid) or tid_cpu_paths.get(tid) or []
+            if not paths:
+                gid = f"orphan:{tid}"
+            else:
+                # Score by (vote_count, is_matched, path_depth). Vote
+                # count wins first, so a true majority-component path
+                # beats a single misrouted alias.
+                counts: Counter[str] = Counter(paths)
+                best_gid: str | None = None
+                best_score: tuple[int, int, int] = (-1, -1, -1)
+                for p, n in counts.items():
+                    g = self._group_for_path(p)
+                    is_matched = 1 if not g.endswith(self._UNMATCHED_SUFFIX) else 0
+                    score = (n, is_matched, p.count("."))
+                    if score > best_score:
+                        best_score = score
+                        best_gid = g
+                gid = best_gid or f"orphan:{tid}"
             self._tensor_group[tid] = gid
             self._group_tids.setdefault(gid, []).append(tid)
+        return
+
+    # ============================================================ invocations
+    def _build_invocation_accounting(self) -> None:
+        """Detect per-group invocation boundaries via temporal
+        clustering on consumer ``start_ns``, then build per-(group,
+        invocation) consumer counts so eviction can wait for the
+        *current* invocation to drain rather than thrashing the group
+        on every consumer retire.
+
+        Real diffusers fires post-forward eviction once per module
+        invocation; for SDXL-Turbo with ``num_inference_steps=4`` that's
+        4 evict cycles per UNet block, not 4 × N where N is the number
+        of ops inside the block. Without per-invocation accounting,
+        eager-evict-on-every-retire over-evicts by ~N× (we measured
+        ~580× extra H2D bytes on SDXL-Turbo before this).
+
+        Algorithm:
+          1. For each group, gather the trace ``start_ns`` of every
+             node that consumes any member tid.
+          2. Sort, then split at gaps > ``invocation_gap_ns``. Each
+             cluster = one invocation.
+          3. Assign each consumer node ``invocation_index`` per group.
+          4. Tally per-(gid, inv_idx) consumer counts as the eviction
+             gate.
+
+        Why not structural CPU module_path enter/exit instead of
+        timestamps: the PyTorch profiler's CPU module annotations can
+        bleed across threads — text_encoder_2 ops keep their old
+        ``module_path`` tag when execution context shifts back to
+        UNet, producing spurious enter/leave flips on every other
+        CPU op. Timestamp clustering is robust to that noise as long
+        as the gap threshold is larger than any intra-block stall.
+
+        Edge case: a consumer node may belong to multiple groups (one
+        op reading two weights from two ModuleLists). Each (gid,
+        inv_idx) pair is tracked independently.
+        """
+        trace = self.sys.trace
+
+        # tid -> gid lookup is already in self._tensor_group. Build
+        # the reverse: gid -> (start_ns, consumer_node_id), one entry
+        # per (node, gid) pair (deduped so a node touching two
+        # members of the same group counts once).
+        gid_consumers: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        for nid, node in trace.node_map.items():
+            seen_groups: set[str] = set()
+            for tid in node.input_tensors:
+                gid = self._tensor_group.get(tid)
+                if gid is None or gid in seen_groups:
+                    continue
+                seen_groups.add(gid)
+                start_ns = int(node.args.get("start_ns") or 0)
+                gid_consumers[gid].append((start_ns, nid))
+
+        for gid, events in gid_consumers.items():
+            events.sort()  # by start_ns, then nid
+            inv_idx = 0
+            prev_ns: int | None = None
+            pending: dict[int, int] = defaultdict(int)
+            for st, nid in events:
+                if prev_ns is not None and (st - prev_ns) > self.invocation_gap_ns:
+                    inv_idx += 1
+                prev_ns = st
+                self._node_invocation_for_group.setdefault(nid, {})[gid] = inv_idx
+                pending[inv_idx] += 1
+            self._group_invocation_pending[gid] = dict(pending)
         return
 
     # ============================================================ spec-state accumulators
     @property
     def gpu_resident_bytes(self) -> int:
-        """Current WEIGHT bytes resident on VRAM (spec §8 state field).
-        Sums over *all* WEIGHTs — grouped cuda-WEIGHTs plus any cpu-device
-        WEIGHT that was promoted via the singleton-fallback path."""
-        total_pages = 0
-        for tid, t in self.sys.trace.tensor_map.items():
-            if t.args.get("tensor_type") != "WEIGHT":
-                continue
-            for r in self._vram.space.get_by_tensor_id(tid):
-                total_pages += r.page_idx_end - r.page_idx_start
-        return total_pages * self._PAGE_SIZE_KB * 1024
+        """Current WEIGHT bytes resident on VRAM (spec state field).
+
+        Returns the cached counter ``_gpu_resident_bytes_cache``, which
+        is kept in sync incrementally via ``_on_weight_claimed`` /
+        ``_on_weight_released`` rather than rescanned every tick. A
+        full rescan over ``trace.tensor_map`` was 87% of total wall
+        time on SDXL-Turbo (15k tensors × O(n) ``get_by_tensor_id``
+        per tick) — the incremental form is O(1).
+        """
+        return self._gpu_resident_bytes_cache
+
+    def _on_weight_claimed(self, tensor: Tensor) -> None:
+        """Hook fired whenever a WEIGHT region is claimed on VRAM (via
+        ``_claim_region`` from ``_stage_group`` or the singleton
+        cpu-WEIGHT path)."""
+        size_bytes = tensor.num_pages * self._PAGE_SIZE_KB * 1024
+        self._gpu_resident_bytes_cache += size_bytes
+        if self._gpu_resident_bytes_cache > self.peak_gpu_resident_bytes:
+            self.peak_gpu_resident_bytes = self._gpu_resident_bytes_cache
+
+    def _on_weight_released(self, tensor: Tensor) -> None:
+        """Hook fired whenever a WEIGHT region is released from VRAM."""
+        size_bytes = tensor.num_pages * self._PAGE_SIZE_KB * 1024
+        self._gpu_resident_bytes_cache -= size_bytes
+
+    def _on_group_load_started(self, node: Node, gid: str) -> None:
+        """Called from ``_kick_cuda_weight_prefetch`` /
+        ``_ensure_weight_loaded`` when a group transitions to LOADING
+        on behalf of ``node``. Sets the group's active invocation
+        index from the consumer's per-group invocation tag so
+        subsequent retires of the same invocation drain the right
+        counter."""
+        inv = self._node_invocation_for_group.get(node.id, {}).get(gid)
+        if inv is not None:
+            self._group_active_invocation[gid] = inv
+
+    def _on_weight_consumer_retired(self, node: Node, gid: str) -> None:
+        """Decrement the per-invocation pending count for ``gid``;
+        attempt eviction iff this drains the *current* invocation.
+        Cross-group consumers (one node reading two ModuleLists) call
+        this once per gid via the loop in ``_consume_inputs``."""
+        inv_map = self._node_invocation_for_group.get(node.id) or {}
+        inv = inv_map.get(gid)
+        if inv is None:
+            # Consumer wasn't picked up by clustering (rare — e.g. a
+            # weight whose only consumer is itself the load trigger).
+            # Fall back to immediate evict-attempt to preserve the
+            # spec post-forward semantics.
+            self._release_group_vram(gid)
+            return
+        bucket = self._group_invocation_pending.get(gid)
+        if bucket is None:
+            self._release_group_vram(gid)
+            return
+        remaining = bucket.get(inv, 0) - 1
+        if remaining > 0:
+            bucket[inv] = remaining
+            return
+        bucket.pop(inv, None)
+        # Only evict if this was the active invocation; otherwise a
+        # later invocation is already underway and will manage the
+        # next eviction cycle.
+        if self._group_active_invocation.get(gid) == inv:
+            self._group_active_invocation.pop(gid, None)
+        self._release_group_vram(gid)
 
     def _refresh_peak_gpu_resident(self) -> None:
-        cur = self.gpu_resident_bytes
-        if cur > self.peak_gpu_resident_bytes:
-            self.peak_gpu_resident_bytes = cur
+        """No-op now that ``gpu_resident_bytes`` is incrementally
+        maintained. Kept as a call site for clarity at the few places
+        in ``runtime``/``_handle_transfer_retires`` where the peak
+        might historically have been sampled — the actual peak update
+        happens inside ``_on_weight_claimed``."""
         return
 
     # ============================================================ compile
@@ -557,7 +940,11 @@ class Accelerate(BaseScheduler):
         return ids
 
     def _ensure_weight_loaded(
-        self, tensor: Tensor, transfers: list[tuple[DataRegion, DataRegion]], loading_tids: list[int]
+        self,
+        tensor: Tensor,
+        transfers: list[tuple[DataRegion, DataRegion]],
+        loading_tids: list[int],
+        node: Node | None = None,
     ) -> bool | None:
         """For a WEIGHT input of a GPU compute node, make sure a ready
         VRAM region exists. If a transfer is already in flight, return
@@ -565,6 +952,10 @@ class Accelerate(BaseScheduler):
         ``transfers`` / ``loading_tids`` and return True. Returns False
         only if we can't make progress (no idle dest etc.) so the node
         is re-queued for next tick.
+
+        ``node`` is the consumer; when present, used to tag the group's
+        active invocation so the matching ``_on_weight_consumer_retired``
+        knows when this invocation has drained.
 
         Group-aware: staging operates on the tensor's whole offload
         group at once (under ``preload_module_classes``), so a single
@@ -588,6 +979,7 @@ class Accelerate(BaseScheduler):
             dst = self._claim_region(self._vram, tensor)
             if dst is None:
                 return False
+            self._on_weight_claimed(tensor)
             transfers.append((ram_regions[0], dst))
             loading_tids.append(tensor.id)
             return True
@@ -604,6 +996,8 @@ class Accelerate(BaseScheduler):
             # whose regions are still readable are skipped inside
             # _stage_group.
             self._group_state[gid] = _ABSENT
+        if node is not None:
+            self._on_group_load_started(node, gid)
         return self._stage_group(gid, transfers, loading_tids)
 
     def _stage_group(
@@ -635,6 +1029,7 @@ class Accelerate(BaseScheduler):
                 # _claim_region already signalled OOM → abort path;
                 # partial claims here are moot since the sim ends.
                 return False
+            self._on_weight_claimed(member)
             transfers.append((src, dst))
             loading_tids.append(member.id)
 
@@ -780,6 +1175,7 @@ class Accelerate(BaseScheduler):
 
             batch: list[tuple[DataRegion, DataRegion]] = []
             staged: list[int] = []
+            self._on_group_load_started(node, gid)
             if not self._stage_group(gid, batch, staged):
                 # Master copy not ready or OOM; try again next tick.
                 continue
@@ -855,7 +1251,7 @@ class Accelerate(BaseScheduler):
                 t = tensor_map[tid]
                 ttype = t.args.get("tensor_type")
                 if ttype == "WEIGHT" and memory is self._vram:
-                    ok = self._ensure_weight_loaded(t, transfers, loading_tids)
+                    ok = self._ensure_weight_loaded(t, transfers, loading_tids, node=node)
                 else:
                     ok = self._ensure_non_weight_resident(t, memory, transfers)
                 if not ok:
@@ -978,9 +1374,13 @@ class Accelerate(BaseScheduler):
                     self._pending_vram_group_releases.add(gid)
                     return
 
+        tensor_map = self.sys.trace.tensor_map
         for member_tid in members:
+            member = tensor_map.get(member_tid)
             for region in list(self._vram.space.get_by_tensor_id(member_tid)):
                 self.sys.release(region)
+                if member is not None:
+                    self._on_weight_released(member)
 
         self._pending_vram_group_releases.discard(gid)
         self._group_state[gid] = _ABSENT
@@ -1002,6 +1402,10 @@ class Accelerate(BaseScheduler):
 
     def _consume_inputs(self, node: Node) -> None:
         tensor_map = self.sys.trace.tensor_map
+        # Per-(node, gid) dedup: invocation accounting counts a node
+        # once per group regardless of how many members it consumes,
+        # so we have to decrement at the same granularity here.
+        consumed_groups: set[str] = set()
         for tid in node.input_tensors:
             remaining = self._remaining_consumers.get(tid)
             if remaining is None:
@@ -1011,27 +1415,35 @@ class Accelerate(BaseScheduler):
             ttype = tensor.args.get("tensor_type") if tensor is not None else None
             gid = self._tensor_group.get(tid) if ttype == "WEIGHT" else None
 
-            # WEIGHTs: evict on every consumer retire, modeling accelerate's
-            # post_forward_hook. The next consumer (next module invocation)
-            # re-triggers _stage_group via _group_state == _ABSENT. A
-            # cuda-WEIGHT used in K module invocations therefore cycles
-            # H2D K times — matches cpu_offload(model). The earlier
-            # "evict only when _group_remaining hits 0" logic was a DAG-
-            # final check, correct only for single-forward traces.
+            # WEIGHTs: evict per-invocation, modeling diffusers' per-
+            # block post-forward eviction. We track which invocation
+            # of each group this node belongs to (from offline temporal
+            # clustering — see _build_invocation_accounting) and only
+            # fire the release when the current invocation's consumer
+            # count hits zero. Eager evict on every retire would
+            # thrash a block group on every internal op; this defers
+            # to the natural module-forward boundary.
             #
-            # _release_group_vram's all-members-IDLE guard handles the
-            # multi-member group case (preload_module_classes): if a
-            # sibling is still BEING_READ, the eviction is deferred via
-            # _pending_vram_group_releases and retried on the next tick.
+            # _release_group_vram's all-members-IDLE guard + pending-
+            # consumer queue gate (_group_has_pending_consumer) then
+            # cover the rare race where an in-flight H2D for the next
+            # invocation has already arrived in job_waiting while the
+            # current one's last consumer is retiring.
             if ttype == "WEIGHT" and tensor is not None:
                 if gid is not None:
-                    self._release_group_vram(gid)
+                    # Dedup per-(node, gid) to match the granularity
+                    # that _build_invocation_accounting used when it
+                    # counted pending consumers.
+                    if gid not in consumed_groups:
+                        consumed_groups.add(gid)
+                        self._on_weight_consumer_retired(node, gid)
                 else:
                     # cpu-device WEIGHT promoted to VRAM by a GPU consumer
                     # — released as a singleton, RAM master left alone.
                     for region in list(self._vram.space.get_by_tensor_id(tid)):
                         if region.access_status == DataRegionAccess.IDLE:
                             self.sys.release(region)
+                            self._on_weight_released(tensor)
 
             if remaining > 0:
                 self._remaining_consumers[tid] = remaining
@@ -1073,19 +1485,33 @@ class Accelerate(BaseScheduler):
             self._release_non_weight_regions(tid)
 
     def _retire_computes(self, retired_jobs: list[BaseJob]) -> None:
+        # Two passes: (1) promote every retired job's children to
+        # ready_node_ids so the pending-consumer gate in eviction sees
+        # them; (2) actually fire _consume_inputs / _release_dead_outputs.
+        # Without this ordering the eviction in _consume_inputs runs
+        # *before* the just-retired node's children have been promoted,
+        # so _group_has_pending_consumer can't see them and evicts a
+        # weight that a sibling op is about to consume — causing
+        # massive H2D thrash inside a single block forward (we saw
+        # ~580× extra ram->vram bytes on SDXL-Turbo before this).
+        node_map = self.sys.trace.node_map
         for job in retired_jobs:
             if not isinstance(job, ComputeJob):
                 continue
-            self._consume_inputs(job.node)
-            self._release_dead_outputs(job.node)
             for child_id in job.node.children_nodes:
                 if child_id not in self.pending_parent_count:
                     continue
                 if self.pending_parent_count[child_id] > 0:
                     self.pending_parent_count[child_id] -= 1
-                child = self.sys.trace.node_map[child_id]
+                child = node_map[child_id]
                 if self.pending_parent_count[child_id] == 0 and child.status == NodeStatus.TODO:
                     self.ready_node_ids.append(child_id)
+
+        for job in retired_jobs:
+            if not isinstance(job, ComputeJob):
+                continue
+            self._consume_inputs(job.node)
+            self._release_dead_outputs(job.node)
 
     # ============================================================ runtime
     def runtime(self, retired_jobs: list[BaseJob]) -> None:
