@@ -11,8 +11,8 @@ trace:
   type: "Llamacpp"
   args:
     # Provide path relative to current input.yaml file
-    record_path: "../trace/llamacpp_CPU_llama-3-8B-Q8/ggml_profile_node_records.csv"
-    graph_path: "../trace/llamacpp_CPU_llama-3-8B-Q8/step_0_compute_graph.dot"
+    record_path: "../trace/llamacpp__llama-3-8B-Q8__datai/ggml_profile_node_records.csv"
+    graph_path: "../trace/llamacpp__llama-3-8B-Q8__datai/step_0_compute_graph.dot"
 
 # Hardware configuration
 hardware:

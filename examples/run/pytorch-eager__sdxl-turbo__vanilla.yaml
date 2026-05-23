@@ -1,11 +1,11 @@
 logger:
   args:
-    result_path: "output/pytorch_eager_sdxl-turbo_vanilla/sim_results/result.json"
+    result_path: "output/pytorch-eager__sdxl-turbo__vanilla/sim_results/result.json"
     log_level: 1
 trace:
   type: "PytorchProfile"
   args:
-    bundle_manifest: "../trace/pytorch_eager_RTX4090_sdxl-turbo/llama_bundle/manifest.json"
+    bundle_manifest: "../trace/pytorch-eager__sdxl-turbo__RTX4090/llama_bundle/manifest.json"
     skip_zero_byte_tensors: true
     zero_wait_nodes: true
     add_temporal_data_control_edges: true

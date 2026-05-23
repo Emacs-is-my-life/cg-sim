@@ -1,0 +1,21 @@
+cmdline:
+  /home/royce/anaconda3/envs/ptvenv/bin/python /data/pytorch-source/scripts/profile_sdxl_gpu.py --model /data/llamasim/models/sdxl-turbo --prompt A cute dog and a cat in a park --fusion none --output-prefix sdxl_eager_gpu --steps 4 --warmup-runs 4 --seed 0 --device cuda:0 --dtype float16 --vae-model madebyollin/sdxl-vae-fp16-fix --variant fp16 --height 512 --width 512 --disable-progress-bar --output-dir exp_results/0521_sweep/sdxl_eager
+
+effective_args:
+  model: '/data/llamasim/models/sdxl-turbo'
+  prompt: 'A cute dog and a cat in a park'
+  steps: 4
+  height: 512
+  width: 512
+  seed: 0
+  device: 'cuda:0'
+  dtype: 'float16'
+  vae_model: 'madebyollin/sdxl-vae-fp16-fix'
+  variant: 'fp16'
+  fusion: 'none'
+  compile_mode: 'default'
+  fullgraph: False
+  warmup_runs: 4
+  disable_progress_bar: True
+  output_prefix: 'sdxl_eager_gpu'
+  output_dir: 'exp_results/0521_sweep/sdxl_eager'

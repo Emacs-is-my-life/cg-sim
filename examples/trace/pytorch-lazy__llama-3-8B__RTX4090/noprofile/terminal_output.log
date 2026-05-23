@@ -1,0 +1,27 @@
+
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]
+Loading checkpoint shards:  50%|█████     | 2/4 [00:00<00:00, 16.60it/s]
+Loading checkpoint shards: 100%|██████████| 4/4 [00:00<00:00, 19.60it/s]
+/data/pytorch-source/torch/utils/_config_module.py:540: FutureWarning: torch._dynamo.config.skip_code_recursive_on_recompile_limit_hit is deprecated and does not do anything. It will be removed in a future version of PyTorch.
+  config[key] = copy.deepcopy(getattr(self, key))
+device: cuda:0
+dtype: bfloat16
+fusion: inductor
+seed: 0
+enable_eos_stop: False
+max_new_tokens: 15
+batch_size: 1
+warmup_runs: 1
+text_path: exp_results/0521_sweep/llama8b_inductor/noprofile/llama8b_inductor_gpu_inductor_tokens15_output.txt
+sequence_shape: (1, 20)
+generated_text_preview: The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog
+GPU memory: 15324.6 MB allocated, 15338.5 MB peak
+load_seconds: 3.838069
+warmup_seconds: 20.360159
+inference_seconds: 0.283013
+decode_seconds: 0.000208
+save_seconds: 0.000161
+e2e_seconds: 24.481622
+
+# exit_code: 0
+# elapsed_seconds: 26.571

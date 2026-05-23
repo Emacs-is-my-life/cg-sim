@@ -1,0 +1,41 @@
+2026-05-22 12:50:33.510182: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-05-22 12:50:33.519725: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1779421833.530343 3206509 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1779421833.533856 3206509 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1779421833.543796 3206509 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1779421833.543803 3206509 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1779421833.543805 3206509 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1779421833.543805 3206509 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+2026-05-22 12:50:33.546496: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+
+Loading pipeline components...:   0%|          | 0/7 [00:00<?, ?it/s]
+Loading pipeline components...:  29%|██▊       | 2/7 [00:00<00:00, 12.15it/s]
+Loading pipeline components...:  86%|████████▌ | 6/7 [00:00<00:00,  9.01it/s]
+Loading pipeline components...: 100%|██████████| 7/7 [00:00<00:00,  7.68it/s]
+Loading pipeline components...: 100%|██████████| 7/7 [00:00<00:00,  8.22it/s]
+device: cuda:0
+dtype: float16
+vae_model: madebyollin/sdxl-vae-fp16-fix
+variant: fp16
+fusion: none
+steps: 4
+seed: 0
+warmup_runs: 4
+image_path: exp_results/0521_sweep/sdxl_eager/noprofile/sdxl_eager_gpu_steps4_output.png
+latent_shape: (1, 4, 64, 64)
+GPU memory: 6624.5 MB allocated, 7233.7 MB peak
+load_seconds: 5.482947
+warmup_seconds: 1.237026
+inference_seconds: 0.184748
+save_seconds: 0.063432
+e2e_seconds: 6.968165
+
+# exit_code: 0
+# elapsed_seconds: 8.760
