@@ -182,6 +182,37 @@ class PytorchProfile(TraceLoader):
         node_map[child_id].add_parent_node(parent_id)
         return
 
+    @staticmethod
+    def _is_start_gated_edge(
+        node_map: dict[int, Node],
+        parent_id: int,
+        child_id: int,
+        edge_kind: str,
+    ) -> bool:
+        """A kineto `submit` edge from a submit-role node into a
+        gpu_runtime kernel models the cudaLaunchKernel→kernel async-
+        enqueue boundary: the kernel can dispatch as soon as the
+        launch begins; it does not need to wait for the CPU side's
+        RecordFunction-wrapped duration to complete. These edges are
+        carved out of the control graph entirely (no parent_nodes /
+        children_nodes entry) and are routed through
+        `trace.args["start_gated_edges"]` for the scheduler to gate
+        on START rather than DONE. Other control edges (thread_order,
+        stream_order, wait) stay in the control graph."""
+        if edge_kind != "submit":
+            return False
+        if parent_id == child_id:
+            return False
+        parent = node_map.get(parent_id)
+        child = node_map.get(child_id)
+        if parent is None or child is None:
+            return False
+        if (parent.args.get("runtime_role") or "") != "submit":
+            return False
+        if (child.args.get("runtime_role") or "") != "gpu_runtime":
+            return False
+        return True
+
     # Runtime roles that correspond to pointer-passing CPU operations —
     # they launch / synchronize GPU work but do not read or write tensor
     # data on the CPU side. Any data_input / data_output edge landing on
@@ -230,7 +261,11 @@ class PytorchProfile(TraceLoader):
                 elif edge_kind in control_edge_kinds:
                     parent_id = profile_to_node.get(src)
                     child_id = profile_to_node.get(dst)
-                    if parent_id is not None and child_id is not None:
+                    if parent_id is None or child_id is None:
+                        continue
+                    if self._is_start_gated_edge(node_map, parent_id, child_id, edge_kind):
+                        self._start_gated_edges.append((parent_id, child_id))
+                    else:
                         self._add_control_edge(node_map, parent_id, child_id)
 
         return
@@ -447,7 +482,11 @@ class PytorchProfile(TraceLoader):
                 parent_id = profile_to_node.get(src)
                 child_id = profile_to_node.get(dst)
                 if parent_id is not None and child_id is not None:
-                    self._add_control_edge(node_map, parent_id, child_id)
+                    edge_kind = (_attrs or {}).get("label") or ""
+                    if self._is_start_gated_edge(node_map, parent_id, child_id, edge_kind):
+                        self._start_gated_edges.append((parent_id, child_id))
+                    else:
+                        self._add_control_edge(node_map, parent_id, child_id)
                 continue
 
             self._handle_validation_failure(f"Unsupported DOT edge direction: {src}->{dst}.")
@@ -476,7 +515,6 @@ class PytorchProfile(TraceLoader):
         self._apply_storage_aliasing(node_map, tensor_map)
         self._mark_implicit_inputs(node_map, tensor_map)
         self._annotate_alias_dispatcher_deps(node_map, tensor_map)
-        self._annotate_memcpy_transfer_nodes(node_map, tensor_map)
         if bool(self.args.get("add_temporal_data_control_edges", False)):
             self._add_temporal_data_control_edges(node_map)
         self._add_terminal_node(node_map)
@@ -484,6 +522,18 @@ class PytorchProfile(TraceLoader):
         return Trace(self.id, self.name, self.log, node_map, tensor_map)
 
     def _add_temporal_data_control_edges(self, node_map: dict[int, Node]) -> None:
+        # FIXME — known incorrect: alias/in-place nodes (tid appears
+        # in both input and output of the same node) are counted as
+        # both producers and consumers. The principled rule excludes
+        # them from both sides (same shape as the symmetric fix in
+        # `_mark_implicit_inputs`). Switching to that form is correct
+        # by data-flow reasoning but exposes a separate bug: sim peak
+        # VRAM rises (sd3_med_eager exceeds the 24 GB cap and aborts;
+        # other peaks +100-600 MB above real). Hypothesis: sim under-
+        # models the CUDA caching allocator's intermediate reuse, and
+        # the over-constraining alias edges here were coincidentally
+        # serializing work enough to mask it. Audit Item 1 — to revisit
+        # once allocator reuse / intermediate release timing is fixed.
         producers_by_tensor: dict[int, list[int]] = {}
         consumers_by_tensor: dict[int, list[int]] = {}
 
@@ -514,28 +564,34 @@ class PytorchProfile(TraceLoader):
         Fully data-driven from the tensor map — no op-name heuristics.
 
         Pass A (lifetime-aware storage dedup): group every tensor by
-        (device, storage_id). Within a group, two tensors are aliases of
-        the same underlying allocation iff their lifetimes overlap. PyTorch
-        profile rows for views / aliases / register_buffer copies all share
-        the same storage_id with overlapping lifetimes — those merge.
-        Storage that gets freed and reallocated (allocator reuse) appears
-        as multiple rows with the same storage_id but disjoint lifetimes —
-        those stay separate.
+        (device, storage_id). Within a group, two tensors are aliases
+        of the *same live allocation* iff their lifetimes overlap.
+        PyTorch profile rows for views / aliases / register_buffer
+        copies all share the same storage_id with overlapping lifetimes
+        — those merge. Storage that gets freed and reallocated by the
+        CUDA caching allocator appears as multiple rows with the same
+        storage_id but DISJOINT lifetimes — those stay as separate
+        cgsim tids and rely on the scheduler's per-tensor
+        claim-at-producer / release-at-last-consumer lifecycle to model
+        the slot's reuse over time. Peak VRAM then reflects actual
+        concurrent occupancy on the slot, not a union-lifetime
+        approximation.
 
-        Tensors with type WEIGHT/INPUT/LEAF are treated as alive for the
-        entire run (birth=0, death=inf), so any other tensor sharing their
-        storage automatically merges into them.
+        Tensors with type WEIGHT/INPUT/LEAF are treated as alive for
+        the entire run (birth=0, death=inf), so any other tensor
+        sharing their storage automatically merges into them.
 
-        Pass B (per-node aliasing): for every node, if any output tensor
-        shares (device, storage_id) with any input tensor, merge. This
-        is the same-time, same-op view check; with Pass A doing most of
-        the work it now mainly catches view ops on intermediates that
-        Pass A's lifetime sweep missed by margin.
+        Pass B (per-node aliasing): for every node, if any output
+        tensor shares (device, storage_id) with any input tensor,
+        merge. This is the same-time, same-op view check; with Pass A
+        doing most of the work it now mainly catches view ops on
+        intermediates that Pass A's lifetime sweep missed by margin.
 
         Allocator ops (aten::empty, etc.) have no inputs, so per-node
         aliasing never merges their output with a prior tensor — they
         stay distinct unless their lifetime overlaps with another
-        tensor's on the same storage_id, which Pass A handles correctly.
+        tensor's on the same storage_id, which Pass A handles
+        correctly.
         """
         remap: dict[int, int] = {}
 
@@ -591,13 +647,15 @@ class PytorchProfile(TraceLoader):
 
         def merge_into(keeper_tid: int, victim_tid: int) -> None:
             """Merge victim into keeper. Keeper's `size_bytes` is *never*
-            bumped up from a victim view — view rows can over-state the
-            underlying storage size when as_strided/expand creates an
-            oversized numel through replication / non-contiguous strides.
-            The keeper is chosen by the cluster-build loop to be the
-            authoritative size source (the WEIGHT row if one exists,
-            otherwise the smallest member of the cluster — which is a
-            tight upper bound on a contiguous view of the storage).
+            bumped up from a victim — as_strided/expand views can
+            over-state the storage size by replicating / striding into
+            an oversized numel, so growing from a victim could compound
+            that error. The cluster-build loop picks the keeper as the
+            largest WEIGHT/INPUT/LEAF row when one exists (its size is
+            the real parameter allocation), otherwise the largest member
+            of the cluster (smaller members are partial views into the
+            storage, so the max is the closest available bound on the
+            true allocation).
             """
             keeper = tensor_map[keeper_tid]
             victim = tensor_map[victim_tid]
@@ -634,14 +692,19 @@ class PytorchProfile(TraceLoader):
         for key, tids in groups.items():
             if len(tids) < 2:
                 continue
-            # Sort by birth time. Sweep clusters: tensors whose lifetime
-            # overlaps (b <= cluster_max_death) join the cluster.
+            # Lifetime-aware clustering: members whose [birth, death]
+            # intervals overlap are concurrent aliases of the same
+            # live allocation; members with disjoint intervals are
+            # sequential reincarnations of the same physical slot
+            # (allocator reuse) and stay separate. Permanents have
+            # death=inf, so any group containing a permanent collapses
+            # into a single cluster anchored on it — that case falls
+            # out of the same algorithm without a separate branch.
             tids_sorted = sorted(tids, key=lambda t: lifetime(t)[0])
             clusters: list[list[int]] = []
             cluster_deaths: list[float] = []
             for tid in tids_sorted:
                 b, d = lifetime(tid)
-                # Find any open cluster this overlaps with.
                 placed = False
                 for ci in range(len(clusters)):
                     if b <= cluster_deaths[ci]:
@@ -653,18 +716,11 @@ class PytorchProfile(TraceLoader):
                 if not placed:
                     clusters.append([tid])
                     cluster_deaths.append(d)
-            # Within each cluster, merge into a chosen anchor whose
-            # size_bytes best matches the underlying storage. Prefer
-            # WEIGHT/INPUT/LEAF rows (their size is set by the
-            # parameter's actual allocation, not a viewed numel). Among
-            # permanent rows we pick the *largest* — for a real param
-            # buffer the row recording the contiguous, full-size view
-            # has the buffer's true byte count, while smaller permanent
-            # rows may be partial views (e.g. weight-norm splits).
-            #
-            # If no permanent in the cluster, use the smallest size as a
-            # tight upper bound on the storage (views via as_strided /
-            # expand can over-state via overlapping strides).
+            # Within each cluster, pick an anchor and merge the rest.
+            # Anchor preference: largest permanent row (its size is
+            # the real parameter allocation), or largest member if no
+            # permanent (an upper bound on the underlying storage —
+            # smaller members are partial views).
             for c in clusters:
                 if len(c) < 2:
                     continue
@@ -675,18 +731,18 @@ class PytorchProfile(TraceLoader):
                 if permanent:
                     anchor = max(permanent, key=lambda t: tensor_map[t].size_bytes)
                 else:
-                    # Pure-intermediate cluster: take max as the best
-                    # estimate of the underlying storage. The downside
-                    # (overlapping as_strided views can over-state
-                    # numel) is small in practice for SDXL-style traces;
-                    # the alternative (min) under-counts real activations.
                     anchor = max(c, key=lambda t: tensor_map[t].size_bytes)
                 for victim in c:
                     if victim == anchor:
                         continue
                     merge_into(anchor, victim)
 
-        # Pass B: per-node aliasing. Nodes in id order (= temporal order).
+        # Pass B: per-node aliasing. Nodes in id order (= temporal
+        # order). In practice on every workload we've measured, Pass
+        # A's lifetime-aware clustering catches all storage aliasing
+        # and Pass B never fires — but it's kept as a safety net for
+        # edge cases where (device, storage_id) groups are split
+        # across clusters that Pass A's margin-overlap missed.
         for node_id in sorted(node_map.keys()):
             node = node_map[node_id]
             for out_tid in list(node.output_tensors):
@@ -710,71 +766,6 @@ class PytorchProfile(TraceLoader):
                         if r_out != r_in:
                             remap[r_out] = r_in
                         break
-
-        # Pass C: cross-device merge for `Memcpy HtoD` gpu_runtime nodes.
-        # A profile records the cpu source and cuda destination of an HtoD
-        # memcpy as two separate tensor rows (different storage_ids on
-        # different devices), but they hold the same logical value — the
-        # memcpy event *is* the relocation. Modeling them as one cgsim
-        # tensor with regions on both RAM and VRAM is more faithful and
-        # makes the existing _ensure_inputs_resident path fire a BW-bound
-        # RAM->VRAM TransferJob at the memcpy node's tick (which is what
-        # weight-streaming workloads need; the prior model ran the memcpy
-        # as a fixed-duration ComputeJob on cuda compute, so PCIe BW
-        # changes had no effect on memcpy timing).
-        #
-        # We merge keeper=cuda_dst, victim=cpu_src. tensor_type promotion
-        # in merge_into (WEIGHT > INPUT > LEAF > INTERMEDIATE) correctly
-        # carries any cpu-side permanence into the cuda-side keeper. The
-        # node is tagged ``transfer_event=True`` so
-        # _annotate_alias_dispatcher_deps doesn't downgrade it to a
-        # pointer-only alias node (input==output post-rewrite would
-        # otherwise satisfy the alias criterion), and its
-        # compute_time_micros is zeroed because the wall time is now
-        # accounted for in the implicit transfer.
-        #
-        # DtoH is out of scope for this pass: it's rare in inference and
-        # would flip the keeper's device to cpu, which has subtle
-        # interactions with _init_xfer_states / placement for permanent
-        # tensors that need a separate analysis. DtoD is same-device and
-        # needs no merge.
-        for node in node_map.values():
-            if node.args.get("runtime_role") != "gpu_runtime":
-                continue
-            op_name = node.args.get("op_name") or ""
-            if not op_name.startswith("Memcpy HtoD"):
-                continue
-
-            dst_tid: int | None = None
-            for tid in node.output_tensors:
-                r = resolve(tid)
-                t = tensor_map.get(r)
-                if t is None:
-                    continue
-                dev = (t.args.get("device") or "").lower()
-                if dev.startswith("cuda"):
-                    dst_tid = r
-                    break
-            if dst_tid is None:
-                continue
-
-            merged_any = False
-            for in_tid in list(node.input_tensors):
-                r_in = resolve(in_tid)
-                if r_in == dst_tid:
-                    continue
-                in_tensor = tensor_map.get(r_in)
-                if in_tensor is None:
-                    continue
-                in_dev = (in_tensor.args.get("device") or "").lower()
-                if in_dev.startswith("cuda"):
-                    continue
-                merge_into(dst_tid, r_in)
-                merged_any = True
-
-            if merged_any:
-                node.args["transfer_event"] = True
-                node.compute_time_micros = 0.0
 
         if not remap:
             return
@@ -831,22 +822,49 @@ class PytorchProfile(TraceLoader):
         data-flow path.
         """
         for node in node_map.values():
-            # Cross-device memcpys merged by Pass C have input==output
-            # post-rewrite (both resolve to the merged tid), which would
-            # satisfy the alias check below. They are NOT pointer-only —
-            # they need to go through the normal compute path so
-            # _ensure_inputs_resident can fire the implicit RAM->VRAM
-            # TransferJob that models the actual data motion.
-            if node.args.get("transfer_event"):
-                continue
-
             outs = node.output_tensors
             ins = node.input_tensors
 
             is_alias = bool(outs) and all(t in ins for t in outs)
             is_dispatcher = self._loader_is_dispatcher(node, tensor_map)
 
-            if not (is_alias or is_dispatcher):
+            # A cpu_leaf node whose outputs were dropped by storage
+            # aliasing (because they aliased a permanent buffer) AND
+            # whose inputs are all on CUDA is a pointer-only op on a
+            # CUDA tensor: aten::view of a weight, aten::as_strided
+            # into a permanent's storage, in-place metadata ops, etc.
+            # The CPU thread cannot read the CUDA tensor's bytes
+            # without an explicit sync/copy (those would be separate
+            # nodes), and the node writes nothing (outputs dropped),
+            # so the op's recorded duration is RecordFunction
+            # enter/exit overhead, not data work.
+            #
+            # Restricted to `bool(ins)` and `all ins CUDA` on purpose
+            # — those are the constraints that distinguish this
+            # class from other no-data-flow ops that DO have CPU
+            # work (allocations like aten::empty, CPU API queries
+            # like cudaDeviceGetAttribute, cudaMemsetAsync issues,
+            # etc.). Broadening to any "no data flow" cpu_leaf
+            # over-matches.
+            #
+            # Without custom_deps such a node would fall through to
+            # the normal compute path, whose _ensure_inputs_resident
+            # claims a cpu.memory region for each CUDA input and
+            # fires a VRAM->RAM transfer to "land" data the op never
+            # actually reads. Tagging it alias-class skips that path.
+            role = node.args.get("runtime_role") or ""
+            is_pointer_metadata = (
+                role == "cpu_leaf"
+                and not outs
+                and bool(ins)
+                and all(
+                    (tensor_map.get(t) is not None)
+                    and ((tensor_map[t].args.get("device") or "cpu").lower().startswith("cuda"))
+                    for t in ins
+                )
+            )
+
+            if not (is_alias or is_dispatcher or is_pointer_metadata):
                 continue
 
             if is_dispatcher and not is_alias:
@@ -860,102 +878,26 @@ class PytorchProfile(TraceLoader):
             for parent_id in node.parent_nodes:
                 node.custom_deps.append(NodeDoneDep(parent_id))
 
-    def _annotate_memcpy_transfer_nodes(
-        self,
-        node_map: dict[int, Node],
-        tensor_map: dict[int, Tensor],
-    ) -> None:
-        """Treat `Memcpy HtoD/DtoH/DtoD` gpu_runtime nodes as transfers,
-        not as compute jobs that demand co-located inputs.
-
-        Why: a Memcpy node is a transfer event — it reads its source from
-        ``src_device`` memory and writes its dest into ``dst_device``
-        memory. PyTorch's profile records the source as one of the node's
-        ``data_input`` edges. cg-sim's scheduler runs the node as a
-        ComputeJob on its compute device (cuda for ``gpu_runtime``) and
-        invokes ``_ensure_inputs_resident``, which claims a VRAM region
-        for any cpu-resident input and stages it RAM->VRAM. For accelerate
-        offload, that's how 1420 cpu source tensors end up permanently
-        stamped into VRAM.
-
-        The fix: strip cross-device data inputs from the Memcpy node and
-        replace them with control-only ``NodeDoneDep`` references to each
-        source's producer (so the Memcpy still gates on "source is
-        ready"). Same-device inputs are left intact. The dst tensor stays
-        as the node's output and gets claimed via the normal output path.
-        Compute duration on the node's home compute is unchanged, so
-        timing modelling continues to work; bandwidth contention modelling
-        would require routing this through a TransferJob, but that's a
-        scheduler-side change not needed for VRAM accounting.
-
-        Mirrors the pattern of ``_annotate_alias_dispatcher_deps`` but on
-        the input side.
-        """
-        producers_by_tensor: dict[int, list[int]] = {}
-        for node in node_map.values():
-            for tid in node.output_tensors:
-                producers_by_tensor.setdefault(tid, []).append(node.id)
-
-        annotated = 0
-        for node in node_map.values():
-            if node.args.get("runtime_role") != "gpu_runtime":
-                continue
-            op_name = node.args.get("op_name") or ""
-            # Scope: only HtoD memcpys. DtoH/DtoD have different semantics
-            # (cuda input on cuda compute = same-device, no stripping
-            # needed; OR cpu->cpu via DtoH, where cpu output is handled
-            # by dispatcher annotation). Limiting to HtoD avoids
-            # introducing scheduler deadlocks that the broader rule
-            # was triggering on DtoH cases.
-            if not op_name.startswith("Memcpy HtoD"):
-                continue
-
-            # Compute device for a gpu_runtime node is cuda.
-            compute_dev_short = "cuda"
-
-            cross_inputs: list[int] = []
-            for tid in list(node.input_tensors):
-                tensor = tensor_map.get(tid)
-                if tensor is None:
-                    continue
-                tdev = (tensor.args.get("device") or "cpu").lower()
-                tdev_short = "cuda" if tdev.startswith("cuda") else "cpu"
-                if tdev_short != compute_dev_short:
-                    cross_inputs.append(tid)
-
-            if not cross_inputs:
-                continue
-
-            transfer_kind = (
-                "HtoD" if "HtoD" in op_name
-                else "DtoH" if "DtoH" in op_name
-                else "DtoD" if "DtoD" in op_name
-                else "Memcpy"
-            )
-            node.args["transfer_kind"] = transfer_kind
-            node.args["transfer_src_tids"] = list(cross_inputs)
-
-            # Strip cross-device inputs and replace each with a control dep
-            # on every node that produces it (so source-readiness is still
-            # gated, but no VRAM staging is forced).
-            node.input_tensors = [t for t in node.input_tensors if t not in cross_inputs]
-            # NOTE: source-readiness via NodeDoneDeps is intentionally NOT
-            # added here. The trace's control-graph parent_nodes already
-            # cover ordering — the original data_input was an
-            # ordering+residency edge, and we're replacing only the
-            # residency aspect (the ordering aspect is redundant with the
-            # existing control edges). Adding NodeDoneDeps caused
-            # deadlocks because they conflict with the engine's normal
-            # node-readiness logic when an input's producer was an
-            # alias/dispatcher node that itself had cleared outputs.
-            annotated += 1
-
-        if annotated:
-            print(
-                f"[PytorchProfile] annotated {annotated} memcpy nodes as transfers "
-                f"(stripped cross-device data inputs).",
-                flush=True,
-            )
+            # CPU-thread nodes (cpu_leaf, submit) are timed via
+            # RecordFunction wrapping each aten dispatch:
+            #   recorded_duration = RF_enter + actual_op_work + RF_exit
+            # For a node that this branch matched (alias / dispatcher
+            # / metadata-only), the data-flow proves `actual_op_work`
+            # is pointer-only — aten::view, aten::as_strided,
+            # aten::detach_, aten::empty(device=cuda), etc. The
+            # recorded duration is therefore RF overhead, not work,
+            # and we treat it as zero.
+            #
+            # GPU nodes (gpu_runtime) are timed via CUPTI on the GPU
+            # stream — that measurement is kernel-execution time on
+            # the device, independent of the CPU-side RecordFunction
+            # path. It is the simulator's ground truth and is not
+            # subject to this rule, regardless of whether the alias
+            # check happens to match (some in-place GPU kernels
+            # legitimately have `outs ⊆ ins`).
+            runtime_role = node.args.get("runtime_role") or ""
+            if runtime_role == "cpu_leaf":
+                node.compute_time_micros = 0.0
 
     @staticmethod
     def _loader_is_dispatcher(node: Node, tensor_map: dict[int, Tensor]) -> bool:
@@ -980,31 +922,40 @@ class PytorchProfile(TraceLoader):
     def _mark_implicit_inputs(self, node_map: dict[int, Node], tensor_map: dict[int, Tensor]) -> None:
         # A tensor is an "implicit input" iff there is no real data
         # producer for it inside the trace. We approximate "real
-        # producer" by EXCLUDING any node that uses the tensor as both
-        # input AND output — those are view / alias / in-place ops
-        # (aten::view, aten::as_strided, aten::detach_, ...) which
-        # don't *write* new bytes; they reinterpret existing storage.
+        # producer" / "real consumer" by EXCLUDING any node that uses
+        # the tensor as both input AND output — those are view / alias
+        # / in-place ops (aten::view, aten::as_strided, aten::detach_,
+        # in-place RMW kernels) which neither *create* nor *consume*
+        # the tensor's data — they just touch metadata or rewrite
+        # in-place. Both sides of the same check must skip them.
         #
-        # Counting alias nodes as producers caused spurious INPUT
-        # re-typing whenever the very first op on a tensor was a view
-        # (then first_producer == first_consumer, the `<=` check
-        # tripped). For multi-step diffusion / autoregressive traces
-        # with KV-cache views, this turned thousands of intermediate
-        # cuda tensors into permanents — pre-claimed at layout and
-        # exhausting VRAM before runtime started.
+        # The producer-exclusion was already in place; the consumer
+        # side used to count alias nodes as consumers. On diffusion
+        # eager traces (sdxl/sd3) the pattern conv(t)->view(t) makes
+        # the view node the *first* node referencing tid (view's input
+        # AND output is t, since storage-aliasing has collapsed all
+        # views of the same storage onto t). Counting view as a
+        # consumer made `first_consumer(view) <= first_producer(conv)`
+        # trip the check, so thousands of conv-output intermediates
+        # were retyped INPUT and pre-claimed at layout. sd3_med_eager
+        # over-claimed 22 GB this way and aborted with VRAM exhaustion;
+        # sdxl_turbo_eager inflated peak VRAM by 1.2 GB.
         producers_by_tensor: dict[int, list[int]] = {}
         consumers_by_tensor: dict[int, list[int]] = {}
 
         for node in node_map.values():
             ins = set(node.input_tensors)
             outs = set(node.output_tensors)
-            # Real producer = output that is NOT also an input on the
-            # same node (i.e. a real write, not a view).
+            # Real producer / real consumer = node where the tid is on
+            # exactly one side (a real write OR a real read), not an
+            # alias / in-place op where the tid is on both sides.
             for tensor_id in outs:
                 if tensor_id in ins:
                     continue
                 producers_by_tensor.setdefault(tensor_id, []).append(node.id)
             for tensor_id in ins:
+                if tensor_id in outs:
+                    continue
                 consumers_by_tensor.setdefault(tensor_id, []).append(node.id)
 
         for tensor_id, tensor in tensor_map.items():
@@ -1041,6 +992,14 @@ class PytorchProfile(TraceLoader):
     def load(self) -> Trace:
         bundle_dir, manifest = self._bundle_paths()
 
+        # Accumulator for start-gated edges (kineto submit edges from
+        # a submit-role node into a gpu_runtime kernel). These are
+        # carved out of the control graph in `_read_edges` /
+        # `_read_dot_edges` and exposed to schedulers via
+        # `trace.args["start_gated_edges"]`. See `_is_start_gated_edge`
+        # for the predicate.
+        self._start_gated_edges: list[tuple[int, int]] = []
+
         graph_source = str(self.args.get("graph_source", "csv")).lower()
         if graph_source == "dot":
             trace = self._load_dot(bundle_dir, manifest)
@@ -1055,13 +1014,14 @@ class PytorchProfile(TraceLoader):
             self._apply_storage_aliasing(node_map, tensor_map)
             self._mark_implicit_inputs(node_map, tensor_map)
             self._annotate_alias_dispatcher_deps(node_map, tensor_map)
-            self._annotate_memcpy_transfer_nodes(node_map, tensor_map)
             if bool(self.args.get("add_temporal_data_control_edges", False)):
                 self._add_temporal_data_control_edges(node_map)
             self._add_terminal_node(node_map)
             trace = Trace(self.id, self.name, self.log, node_map, tensor_map)
         else:
             raise Exception(f"[PytorchProfile] Unsupported graph_source: {graph_source}")
+
+        trace.args["start_gated_edges"] = list(self._start_gated_edges)
 
         # Optional: inject a weight-streaming schedule so DAV simulates
         # the schedule's effect via standard transfer-on-input-mismatch
