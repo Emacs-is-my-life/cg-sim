@@ -128,10 +128,20 @@ class PytorchProfile(TraceLoader):
         profile_node_id = row["node_id"]
         duration_ns = parse_float(row.get("duration_ns"))
         runtime_role = row.get("runtime_role") or ""
+        op_name = row.get("op_name") or ""
+
+        # Subtract per-op probe-effect calibration if a table was loaded for
+        # this trace. Clamped at 0 to avoid negative compute times when a
+        # short call's duration falls below the calibrated overhead.
+        probe_effect_ns = self._probe_effect_ns.get(op_name, 0) if self._probe_effect_ns else 0
+        effective_duration_ns = max(0.0, duration_ns - probe_effect_ns)
+        if probe_effect_ns and effective_duration_ns == 0.0 and duration_ns < probe_effect_ns:
+            self._probe_clamp_count += 1
+
         compute_time_micros = (
             0.0
             if bool(self.args.get("zero_wait_nodes", True)) and runtime_role == "wait"
-            else duration_ns / 1_000
+            else effective_duration_ns / 1_000
         )
 
         module_path = row.get("module_path") or None
@@ -950,8 +960,36 @@ class PytorchProfile(TraceLoader):
 
         return
 
+    def _load_probe_effect_table(self, trace_dir: Path) -> dict[str, int]:
+        """Optional per-trace calibration of kineto-induced duration inflation.
+
+        Looks for `probe_effect_table.csv` in the trace directory (sibling
+        of the bundle dir). CSV schema:
+            op_name,probe_effect_ns[,note]
+
+        Missing file → returns empty dict (no correction applied).
+        See docs/eager-lazy-probing-effect.md for derivation.
+        """
+        path = trace_dir / "probe_effect_table.csv"
+        if not path.exists():
+            return {}
+        table: dict[str, int] = {}
+        with open(path, newline="") as f:
+            for r in csv.DictReader(f):
+                try:
+                    table[r["op_name"]] = int(float(r["probe_effect_ns"]))
+                except (KeyError, ValueError):
+                    continue
+        print(f"[PytorchProfile] Loaded probe_effect_table.csv ({len(table)} entries) from {path}")
+        return table
+
     def load(self) -> Trace:
         bundle_dir, manifest = self._bundle_paths()
+
+        # Per-op probe-effect calibration (optional). Lives one level up from
+        # the bundle (i.e. in the trace directory). Applied in `_node_from_row`.
+        self._probe_effect_ns: dict[str, int] = self._load_probe_effect_table(bundle_dir.parent)
+        self._probe_clamp_count: int = 0
 
         # Accumulator for start-gated edges (kineto submit edges from
         # a submit-role node into a gpu_runtime kernel). These are
@@ -983,6 +1021,10 @@ class PytorchProfile(TraceLoader):
             raise Exception(f"[PytorchProfile] Unsupported graph_source: {graph_source}")
 
         trace.args["start_gated_edges"] = list(self._start_gated_edges)
+
+        if self._probe_effect_ns and self._probe_clamp_count:
+            print(f"[PytorchProfile] probe_effect clamped to 0 for "
+                  f"{self._probe_clamp_count} node(s) (duration_ns < probe_effect_ns).")
 
         # Optional: inject a weight-streaming schedule so DAV simulates
         # the schedule's effect via standard transfer-on-input-mismatch
