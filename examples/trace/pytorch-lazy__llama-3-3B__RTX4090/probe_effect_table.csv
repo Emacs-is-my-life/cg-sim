@@ -1,0 +1,7 @@
+op_name,probe_effect_ns,trace_median_ns,occurrences,microbench_probed_ns,note
+aten::view,0,0,0,1325,op absent in this trace
+aten::as_strided,4258,5781,1695,1523,"trace_median - microbench_probed_ns (RTX4090, kineto record_shapes=True)"
+aten::_unsafe_view,0,0,0,2080,op absent in this trace
+aten::empty,4187,7143,2552,2956,"trace_median - microbench_probed_ns (RTX4090, kineto record_shapes=True)"
+aten::empty_strided,0,1287277,1,2963,too few occurrences (n<20); calibration skipped
+aten::to,3418,4097,872,679,"trace_median - microbench_probed_ns (RTX4090, kineto record_shapes=True)"

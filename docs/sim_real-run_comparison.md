@@ -13,15 +13,38 @@
 |-----------------|---------------|------------------|------------------|------------------|------------------|
 | Lazy (Inductor) | Normal Run    | 0.137s, 6.1 GB   | 0.283s, 15 GB    | 0.889s, 15 GB    | 0.180s, 6.6 GB   |
 | Lazy (Inductor) | Profiled Run  | 0.587s, 6.2 GB   | 0.673s, 15 GB    | 1.658s, 17 GB    | 0.798s, 8 GB     |
-| Lazy (Inductor) | cg-sim Replay | 0.130s, 6.09 GB  | 0.266s, 15.16 GB | 0.988s, 16.54 GB | 0.167s, 7.55 GB  |
+| Lazy (Inductor) | cg-sim Replay | 0.129s, 6.09 GB  | 0.266s, 15.16 GB | 0.967s, 16.54 GB | 0.149s, 7.55 GB  |
 | Eager           | Normal Run    | 0.159s, 6.1 GB   | 0.307s, 15 GB    | 1.193s, 15 GB    | 0.185s, 6.6 GB   |
 | Eager           | Profiled Run  | 1.16s, 6.2 GB    | 1.382s, 15 GB    | 3.271s, 16 GB    | 1.023s, 7 GB     |
-| Eager           | cg-sim Replay | 0.428s, 5.99 GB  | 0.529s, 14.96 GB | 1.967s, 15.48 GB | 0.343s, 6.78 GB  |
+| Eager           | cg-sim Replay | 0.273s, 5.99 GB  | 0.371s, 14.96 GB | 1.551s, 15.48 GB | 0.204s, 6.78 GB  |
+
+cg-sim Replay numbers above are with the per-op probe-effect compensation
+table applied (`examples/trace/*/probe_effect_table.csv`, loaded by
+`sim/load/pytorch_profile`). The eager rows previously read 0.428 /
+0.529 / 1.967 / 0.343s — pre-compensation.
 
 ## Findings: why eager Replay overshoots Normal Run
 
-**Symptom.** Peak VRAM matches across all rows. Wall time matches for lazy Replay
-(within ±10% of Normal). Eager Replay overshoots Normal by 65–169%.
+**Symptom (pre-compensation).** Peak VRAM matches across all rows. Wall time
+matches for lazy Replay (within ±10% of Normal). Eager Replay overshoots
+Normal by 65–169%.
+
+**After per-op probe-effect compensation.** Eager gap shrinks across the
+board:
+
+| Eager workload | Normal | Replay (pre) | Replay (post) | Pre gap | Post gap |
+|----------------|-------:|-------------:|--------------:|--------:|---------:|
+| llama-3-3B     | 0.159s |   0.428s     |    0.273s     |  2.69×  |  1.72×   |
+| llama-3-8B     | 0.307s |   0.529s     |    0.371s     |  1.72×  |  1.21×   |
+| sd3            | 1.193s |   1.967s     |    1.551s     |  1.65×  |  1.30×   |
+| sdxl-turbo     | 0.185s |   0.343s     |    0.204s     |  1.85×  |  1.10×   |
+
+Compensation subtracts the per-op `probe_effect_ns` (trace_median − microbench
+probed cost; see `docs/eager-lazy-probing-effect.md`) from every cpu_leaf
+`duration_ns` at load time, clamped at 0. Workloads where the dispatch path
+itself dominates (sdxl-turbo, llama-3-8B) close to within 10–21%; llama-3-3B
+still overshoots because its per-op GPU/CPU ratio is 0.97 — even compensated
+CPU dispatch stays on the critical path.
 
 **Thesis.** The kineto profiler used to record the trace embeds per-op observer
 overhead (RecordFunction wrapper, input snapshotting, callback chain) into
