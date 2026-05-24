@@ -566,7 +566,7 @@ class PytorchProfile(TraceLoader):
 
         Fully data-driven from the tensor map — no op-name heuristics.
 
-        Pass A (lifetime-aware storage dedup): group every tensor by
+        Lifetime-aware storage dedup: group every tensor by
         (device, storage_id). Within a group, two tensors are aliases
         of the *same live allocation* iff their lifetimes overlap.
         PyTorch profile rows for views / aliases / register_buffer
@@ -583,18 +583,6 @@ class PytorchProfile(TraceLoader):
         Tensors with type WEIGHT/INPUT/LEAF are treated as alive for
         the entire run (birth=0, death=inf), so any other tensor
         sharing their storage automatically merges into them.
-
-        Pass B (per-node aliasing): for every node, if any output
-        tensor shares (device, storage_id) with any input tensor,
-        merge. This is the same-time, same-op view check; with Pass A
-        doing most of the work it now mainly catches view ops on
-        intermediates that Pass A's lifetime sweep missed by margin.
-
-        Allocator ops (aten::empty, etc.) have no inputs, so per-node
-        aliasing never merges their output with a prior tensor — they
-        stay distinct unless their lifetime overlaps with another
-        tensor's on the same storage_id, which Pass A handles
-        correctly.
         """
         remap: dict[int, int] = {}
 
@@ -683,7 +671,7 @@ class PytorchProfile(TraceLoader):
             death[keeper_tid] = max(kd, vd)
             remap[victim_tid] = keeper_tid
 
-        # ---- Pass A: lifetime-aware dedup grouped by (device, storage_id). ----
+        # ---- Lifetime-aware dedup grouped by (device, storage_id). ----
         groups: dict[tuple[str | None, object], list[int]] = {}
         for tid, tensor in tensor_map.items():
             sid = tensor.args.get("storage_id")
@@ -739,36 +727,6 @@ class PytorchProfile(TraceLoader):
                     if victim == anchor:
                         continue
                     merge_into(anchor, victim)
-
-        # Pass B: per-node aliasing. Nodes in id order (= temporal
-        # order). In practice on every workload we've measured, Pass
-        # A's lifetime-aware clustering catches all storage aliasing
-        # and Pass B never fires — but it's kept as a safety net for
-        # edge cases where (device, storage_id) groups are split
-        # across clusters that Pass A's margin-overlap missed.
-        for node_id in sorted(node_map.keys()):
-            node = node_map[node_id]
-            for out_tid in list(node.output_tensors):
-                if out_tid in node.input_tensors:
-                    continue
-                out_tensor = tensor_map.get(resolve(out_tid))
-                if out_tensor is None:
-                    continue
-                out_sid = out_tensor.args.get("storage_id")
-                if out_sid is None:
-                    continue
-                out_dev = out_tensor.args.get("device")
-                for in_tid in node.input_tensors:
-                    in_tensor = tensor_map.get(resolve(in_tid))
-                    if in_tensor is None:
-                        continue
-                    if (in_tensor.args.get("storage_id") == out_sid
-                            and in_tensor.args.get("device") == out_dev):
-                        r_out = resolve(out_tid)
-                        r_in = resolve(in_tid)
-                        if r_out != r_in:
-                            remap[r_out] = r_in
-                        break
 
         if not remap:
             return
