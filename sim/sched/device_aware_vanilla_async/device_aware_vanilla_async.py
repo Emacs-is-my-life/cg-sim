@@ -46,6 +46,7 @@ from typing import Any, TYPE_CHECKING
 from sim.core.job import BaseJob, ComputeJob, TransferJob
 from sim.core.log import Log
 from sim.core.trace import Node, NodeStatus, Tensor, TerminalNode, Trace
+from sim.core.trace.custom_dep import NodeDoneDep
 from sim.hw.common import DataRegion, DataRegionAccess
 from sim.hw.compute.common import BaseCompute
 from sim.hw.memory.common import BaseMemory
@@ -161,9 +162,44 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         # loader's storage aliasing has collapsed views / allocators onto
         # their real identities.
         self._remaining_consumers: dict[int, int] = {}
+        # CPU-only consumer count: nodes with role in {cpu_leaf, submit}
+        # that have the tid in their input_tensors. This models the
+        # Python refcount — the bytes become available to the caching
+        # allocator the moment the last CPU op that referenced the
+        # tensor retires, even if downstream GPU consumers are still
+        # pending in the stream chain. Real PyTorch's caching allocator
+        # marks the block "free pending event" at this point and lets
+        # new aten::empty calls reuse it; subsequent kernels serialize
+        # on the GPU stream behind the still-pending old consumer.
+        self._remaining_cpu_consumers: dict[int, int] = {}
         for node in self.sys.trace.node_map.values():
             for tid in node.input_tensors:
                 self._remaining_consumers[tid] = self._remaining_consumers.get(tid, 0) + 1
+            role = node.args.get("runtime_role") or ""
+            if role in ("cpu_leaf", "submit"):
+                for tid in node.input_tensors:
+                    self._remaining_cpu_consumers[tid] = self._remaining_cpu_consumers.get(tid, 0) + 1
+        # Tensor ids that have been Python-released (last CPU consumer
+        # retired but some GPU consumer still pending). Their VRAM
+        # regions have been freed; pending consumers' input residency
+        # check is bypassed via custom_deps. Custom_deps are attached
+        # at python-release time (so a node already in engine.job_waiting
+        # gets the bypass on the engine's next is_runnable check) and
+        # also at submit time (covers the case where the consumer
+        # entered ready_node_ids after the python-release).
+        self._python_released_tids: set[int] = set()
+
+        # Reverse index of real (non-alias) consumers per tensor:
+        # tid → list of node_ids that take tid as input but not output.
+        # Used by `_maybe_python_release` to patch pending consumers'
+        # `custom_deps` so they bypass the engine's input residency
+        # check after their input's region is freed.
+        self._consumers_by_tid: dict[int, list[int]] = {}
+        for nid, n in self.sys.trace.node_map.items():
+            for tid in n.input_tensors:
+                if tid in n.output_tensors:
+                    continue
+                self._consumers_by_tid.setdefault(tid, []).append(nid)
 
         # Tensors whose last consumer has retired but whose regions were
         # not IDLE when we tried to release (e.g. being read by an
@@ -279,6 +315,7 @@ class DeviceAwareVanillaAsync(BaseScheduler):
     def _claim_region(self, memory: BaseMemory, tensor: Tensor):
         page_idx = self._find_free_page(memory, tensor.num_pages)
         if page_idx is None:
+            self._dump_abort_diag(memory, tensor)
             self.sys.abort({
                 "from": self.name,
                 "error": "LAYOUT_FAILURE",
@@ -298,6 +335,119 @@ class DeviceAwareVanillaAsync(BaseScheduler):
             return None
 
         return self.sys.claim(memory, tensor, page_idx)
+
+    def _dump_abort_diag_consumers(self, memory: BaseMemory) -> None:
+        """For each resident intermediate, classify pending consumers
+        by role to test the Python-ref-drop hypothesis."""
+        from collections import Counter, defaultdict
+        resident = set()
+        for r in memory.space._regions_by_page_idx_start.values():
+            tid = getattr(r, "tensor_id", None)
+            if tid is None: continue
+            t = self.sys.trace.tensor_map.get(tid)
+            if t and t.args.get("tensor_type") == "INTERMEDIATE":
+                resident.add(tid)
+        # Build per-tid consumer list
+        all_consumers = defaultdict(list)
+        for nid, n in self.sys.trace.node_map.items():
+            for tid in n.input_tensors:
+                if tid in resident and tid not in n.output_tensors:
+                    all_consumers[tid].append((nid, n.args.get("runtime_role") or "", n.status))
+        # Classify each resident: how many CPU vs GPU pending?
+        c = Counter()
+        cpu_done_gpu_pending = 0
+        any_pending_cpu = 0
+        for tid in resident:
+            cons = all_consumers.get(tid, [])
+            pending_cpu = sum(1 for _, role, st in cons
+                              if role in ("cpu_leaf", "submit") and st != NodeStatus.DONE)
+            pending_gpu = sum(1 for _, role, st in cons
+                              if role == "gpu_runtime" and st != NodeStatus.DONE)
+            done_cpu = sum(1 for _, role, st in cons
+                           if role in ("cpu_leaf", "submit") and st == NodeStatus.DONE)
+            done_gpu = sum(1 for _, role, st in cons
+                           if role == "gpu_runtime" and st == NodeStatus.DONE)
+            if pending_cpu == 0 and pending_gpu > 0:
+                cpu_done_gpu_pending += 1
+            if pending_cpu > 0:
+                any_pending_cpu += 1
+            c[(pending_cpu, pending_gpu)] += 1
+        print(f"[DAV diag2] resident intermediates: {len(resident)}", flush=True)
+        print(f"  all CPU consumers DONE, GPU pending: {cpu_done_gpu_pending}", flush=True)
+        print(f"  some CPU consumer pending:           {any_pending_cpu}", flush=True)
+        print(f"  (pending_cpu, pending_gpu) histogram (top 10):", flush=True)
+        for k, v in c.most_common(10):
+            print(f"    {k}: {v}", flush=True)
+
+    def _dump_abort_diag(self, memory: BaseMemory, failed_tensor: Tensor) -> None:
+        self._dump_abort_diag_consumers(memory)
+        """Diagnose VRAM-cap abort: dump sim_t, what's resident,
+        the producer/consumer state for resident intermediates, and
+        how trace timestamps compare to sim wall time."""
+        from collections import Counter, defaultdict
+        sim_t = self.sys.engine.timestamp_now
+        print(f"\n[DAV diag] === abort at sim_t={sim_t/1000:.2f} ms; need tensor {failed_tensor.id} ({failed_tensor.name}) {failed_tensor.num_pages*4/1024:.2f}MB ===", flush=True)
+
+        # Resident summary
+        per_tensor_pages = defaultdict(int)
+        for r in memory.space._regions_by_page_idx_start.values():
+            tid = getattr(r, "tensor_id", None)
+            if tid is not None:
+                per_tensor_pages[tid] += r.page_idx_end - r.page_idx_start
+        by_type = defaultdict(lambda: [0, 0])
+        for tid, p in per_tensor_pages.items():
+            t = self.sys.trace.tensor_map.get(tid)
+            ttype = t.args.get("tensor_type") if t else "?"
+            by_type[ttype][0] += 1
+            by_type[ttype][1] += p
+        for ttype, (n, p) in sorted(by_type.items(), key=lambda kv: -kv[1][1]):
+            print(f"  resident {ttype!s:<14} n={n:6} pages={p:>10} ({p*4/1024:8.1f} MB)", flush=True)
+
+        # Status counts by role
+        status_by_role = Counter()
+        for n in self.sys.trace.node_map.values():
+            status_by_role[(n.args.get("runtime_role") or "", str(n.status).split(".")[-1])] += 1
+        print(f"  status by role:", flush=True)
+        for (role, status), c in sorted(status_by_role.items()):
+            print(f"    ({role!s:<14}, {status:<8}): {c}", flush=True)
+
+        # Producer info for top resident intermediates
+        producer_of = {}
+        for nid, n in self.sys.trace.node_map.items():
+            for tid in n.output_tensors:
+                if tid not in n.input_tensors:
+                    producer_of.setdefault(tid, nid)
+            for tid in (n.args.get("dispatcher_outputs") or []):
+                producer_of.setdefault(tid, nid)
+        kept = []
+        for tid, p in per_tensor_pages.items():
+            t = self.sys.trace.tensor_map.get(tid)
+            if t is None: continue
+            if t.args.get("tensor_type") != "INTERMEDIATE": continue
+            kept.append((p, tid, t.name))
+        kept.sort(reverse=True)
+        print(f"  top 5 resident INTERMEDIATES, producer info + trace times:", flush=True)
+        for p, tid, name in kept[:5]:
+            pnid = producer_of.get(tid)
+            pn = self.sys.trace.node_map.get(pnid) if pnid is not None else None
+            prole = (pn.args.get("runtime_role") or "") if pn else "?"
+            pstatus = str(pn.status).split(".")[-1] if pn else "?"
+            p_start = pn.args.get("start_ns") if pn else None
+            rc = self._remaining_consumers.get(tid, 0)
+            # Find earliest unfired consumer
+            earliest_unfired = None
+            for nid, n in self.sys.trace.node_map.items():
+                if tid in n.input_tensors and tid not in n.output_tensors:
+                    if n.status != NodeStatus.DONE:
+                        s = n.args.get("start_ns")
+                        if s is not None and (earliest_unfired is None or s < earliest_unfired[0]):
+                            earliest_unfired = (s, nid, n.args.get("runtime_role") or "")
+            ratio = ""
+            if p_start is not None and sim_t > 0:
+                # profile_time_at_producer (ns) → ms
+                ratio = f" trace_t={p_start/1e6:.1f}ms  sim_advance={p_start/1e6 / (sim_t/1000):.1f}x"
+            ef = f"  next_consumer=({earliest_unfired[1]}, {earliest_unfired[2]}, trace_t={earliest_unfired[0]/1e6:.1f}ms)" if earliest_unfired else ""
+            print(f"    tid={tid} {p*4/1024:.1f}MB rc={rc} prod=({pnid},{prole},{pstatus}){ratio}{ef}", flush=True)
 
     def _ensure_home_region(self, tensor: Tensor):
         memory = self._memory_for_tensor(tensor)
@@ -459,6 +609,13 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         pending_dest_ids.update(self._tick_pending_dest_ids)
 
         for tensor_id in node.input_tensors:
+            # Python-released tids have had their VRAM region freed at
+            # last-CPU-consumer retire; we don't try to find or stage
+            # them — the consumer's compute_assertion is bypassed via
+            # custom_deps added at submit time.
+            if tensor_id in self._python_released_tids:
+                continue
+
             tensor = self.sys.trace.tensor_map[tensor_id]
             target_regions = memory.space.get_by_tensor_id(tensor_id)
 
@@ -520,10 +677,40 @@ class DeviceAwareVanillaAsync(BaseScheduler):
 
     def _consume_inputs(self, node: Node) -> None:
         """Decrement per-tensor remaining-consumer counts for this node's
-        input tensors, releasing regions of tensors whose last consumer
-        has now retired (unless the tensor is permanent: WEIGHT/INPUT/LEAF
-        AND not in the explicit ``_evictable_tensor_ids`` opt-in set)."""
+        input tensors. Two release events are possible per tensor:
+
+        * Python-release (when the last CPU consumer retires while some
+          GPU consumer is still pending): genuinely free the VRAM region
+          and mark the tid as python-released. Models the CUDA caching
+          allocator returning the block to its cache when Python's
+          refcount drops at end-of-scope. Pending GPU consumers' input
+          residency check is bypassed via custom_deps at submit time
+          (the data they need is conceptually still consistent because
+          stream_order serializes any subsequent kernel that reuses the
+          bytes).
+
+        * Full release (when all consumers — CPU and GPU — have
+          retired): no-op for already python-released tids; releases
+          regions for tids that never had CPU consumers.
+
+        Skipped for permanent tensors (WEIGHT / INPUT / LEAF) unless
+        the tid is in the explicit ``_evictable_tensor_ids`` set.
+        """
+        node_role = node.args.get("runtime_role") or ""
+        is_cpu_role = node_role in ("cpu_leaf", "submit")
         for tid in node.input_tensors:
+            # CPU-side decrement (Python refcount analogue)
+            if is_cpu_role:
+                cpu_left = self._remaining_cpu_consumers.get(tid, 0)
+                if cpu_left > 0:
+                    cpu_left -= 1
+                    if cpu_left == 0:
+                        self._remaining_cpu_consumers.pop(tid, None)
+                        self._maybe_python_release(tid)
+                    else:
+                        self._remaining_cpu_consumers[tid] = cpu_left
+
+            # Full-release decrement (all consumers)
             remaining = self._remaining_consumers.get(tid)
             if remaining is None:
                 continue
@@ -538,7 +725,73 @@ class DeviceAwareVanillaAsync(BaseScheduler):
             ttype = tensor.args.get("tensor_type")
             if ttype in self._PERMANENT_TYPES and tid not in self._evictable_tensor_ids:
                 continue
+            # If already python-released, the region was freed earlier
+            # (or deferred to `_pending_releases` if it was BUSY then).
+            # Still call _release_tensor_regions: it's a no-op when the
+            # region is already gone, and it retries the deferred case.
+            if tid in self._python_released_tids:
+                self._python_released_tids.discard(tid)
             self._release_tensor_regions(tid)
+
+    def _maybe_python_release(self, tid: int) -> None:
+        """Last CPU consumer of `tid` just retired. If some GPU consumer
+        is still pending, release the VRAM region now (Python refcount
+        drop) and mark the tid python-released. Pending GPU consumers
+        of the tid will have their input residency check bypassed at
+        submit time via custom_deps."""
+        if tid in self._python_released_tids:
+            return
+        if self._remaining_consumers.get(tid, 0) <= 0:
+            # All consumers (incl. GPU) have already retired; normal
+            # full-release path will handle it.
+            return
+        tensor = self.sys.trace.tensor_map.get(tid)
+        if tensor is None:
+            return
+        ttype = tensor.args.get("tensor_type")
+        if ttype in self._PERMANENT_TYPES and tid not in self._evictable_tensor_ids:
+            return
+        self._python_released_tids.add(tid)
+        self._release_tensor_regions(tid)
+        # Patch pending consumers' custom_deps so the engine's
+        # compute_assertion bypasses the input-residency check on the
+        # tid we just freed. Necessary for consumers that were
+        # already submitted to engine.job_waiting before this
+        # python-release fired — they get the bypass on the engine's
+        # next is_runnable retry.
+        for cid in self._consumers_by_tid.get(tid, []):
+            consumer = self.sys.trace.node_map.get(cid)
+            if consumer is None:
+                continue
+            if consumer.status == NodeStatus.DONE:
+                continue
+            if consumer.custom_deps:
+                continue
+            for parent_id in consumer.parent_nodes:
+                consumer.custom_deps.append(NodeDoneDep(parent_id))
+
+    def _python_release_producer_outputs(self, node: Node) -> None:
+        """At a producer's retirement, python-release any output tid
+        that has zero remaining CPU consumers (the producer was the
+        last Python touch). Covers both `output_tensors` and
+        `dispatcher_outputs` (which the loader stripped from
+        output_tensors). Pending GPU consumers of a python-released
+        tid get their `custom_deps` patched inside
+        `_maybe_python_release` so the engine's subsequent
+        compute_assertion takes the bypass branch."""
+        candidates = []
+        for tid in node.output_tensors:
+            if tid in node.input_tensors:
+                continue
+            candidates.append(tid)
+        for tid in (node.args.get("dispatcher_outputs") or []):
+            candidates.append(tid)
+        for tid in candidates:
+            if tid in self._python_released_tids:
+                continue
+            if self._remaining_cpu_consumers.get(tid, 0) > 0:
+                continue
+            self._maybe_python_release(tid)
 
     def _release_tensor_regions(self, tensor_id: int) -> None:
         """Free every region holding this tensor. If any region is busy
@@ -752,6 +1005,19 @@ class DeviceAwareVanillaAsync(BaseScheduler):
                 if running_x + committed_x >= cap_x:
                     self.ready_node_ids.append(node_id)
                     continue
+                # If the node has real outputs (e.g. a gpu_runtime kernel
+                # that landed on this branch because python-release
+                # patched custom_deps onto it to bypass input residency
+                # for a freed tid), claim their regions here. The
+                # original dispatcher / alias cases have their real
+                # output_tensors stripped, so this is a no-op for them.
+                if node.output_tensors:
+                    if not self._ensure_outputs_claimed(node, compute.memory):
+                        self.ready_node_ids.appendleft(node_id)
+                        continue
+                    if not self._outputs_free(node, compute.memory):
+                        self.ready_node_ids.append(node_id)
+                        continue
                 if node.args.get("dispatcher_outputs"):
                     self._preclaim_dispatcher_outputs(node)
                 self.sys.compute(compute, node)
@@ -790,6 +1056,19 @@ class DeviceAwareVanillaAsync(BaseScheduler):
             if not self._outputs_free(node, memory):
                 self.ready_node_ids.append(node_id)
                 continue
+
+            # If any input is python-released (last CPU consumer has
+            # retired, VRAM region freed), the engine's compute_assertion
+            # would fail its input-residency check. Add NodeDoneDep
+            # custom_deps so the engine takes the bypass branch on this
+            # node: it skips the input/output residency checks and
+            # gates only on the parents' DONE status. Output regions
+            # claimed above by `_ensure_outputs_claimed` are still
+            # picked up by begin_mutation.
+            if any(tid in self._python_released_tids for tid in node.input_tensors):
+                if not node.custom_deps:
+                    for parent_id in node.parent_nodes:
+                        node.custom_deps.append(NodeDoneDep(parent_id))
 
             self.sys.compute(compute, node)
             self._release_started_children(node)
@@ -834,6 +1113,7 @@ class DeviceAwareVanillaAsync(BaseScheduler):
                 continue
 
             self._consume_inputs(job.node)
+            self._python_release_producer_outputs(job.node)
             self._release_dead_outputs(job.node)
             # Per-node explicit release (set by schedule injection): if
             # the trace's evict_after_node[node_id] lists tensors, they

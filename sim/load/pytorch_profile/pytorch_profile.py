@@ -522,25 +522,28 @@ class PytorchProfile(TraceLoader):
         return Trace(self.id, self.name, self.log, node_map, tensor_map)
 
     def _add_temporal_data_control_edges(self, node_map: dict[int, Node]) -> None:
-        # FIXME — known incorrect: alias/in-place nodes (tid appears
-        # in both input and output of the same node) are counted as
-        # both producers and consumers. The principled rule excludes
-        # them from both sides (same shape as the symmetric fix in
-        # `_mark_implicit_inputs`). Switching to that form is correct
-        # by data-flow reasoning but exposes a separate bug: sim peak
-        # VRAM rises (sd3_med_eager exceeds the 24 GB cap and aborts;
-        # other peaks +100-600 MB above real). Hypothesis: sim under-
-        # models the CUDA caching allocator's intermediate reuse, and
-        # the over-constraining alias edges here were coincidentally
-        # serializing work enough to mask it. Audit Item 1 — to revisit
-        # once allocator reuse / intermediate release timing is fixed.
+        # Add a control edge from the most recent real producer of
+        # each tensor to each real consumer that follows it. Alias /
+        # in-place nodes (tid appears in both input and output of the
+        # same node) are excluded from BOTH the producer and the
+        # consumer aggregation: they don't create the tensor's data
+        # and they don't consume it, they touch metadata only.
+        # Counting them as producers would let a view be picked as
+        # the "most recent producer" before a downstream kernel,
+        # missing the real writer further back.
         producers_by_tensor: dict[int, list[int]] = {}
         consumers_by_tensor: dict[int, list[int]] = {}
 
         for node in node_map.values():
-            for tensor_id in node.output_tensors:
+            ins = set(node.input_tensors)
+            outs = set(node.output_tensors)
+            for tensor_id in outs:
+                if tensor_id in ins:
+                    continue
                 producers_by_tensor.setdefault(tensor_id, []).append(node.id)
-            for tensor_id in node.input_tensors:
+            for tensor_id in ins:
+                if tensor_id in outs:
+                    continue
                 consumers_by_tensor.setdefault(tensor_id, []).append(node.id)
 
         for tensor_id, consumer_ids in consumers_by_tensor.items():
@@ -878,26 +881,20 @@ class PytorchProfile(TraceLoader):
             for parent_id in node.parent_nodes:
                 node.custom_deps.append(NodeDoneDep(parent_id))
 
-            # CPU-thread nodes (cpu_leaf, submit) are timed via
-            # RecordFunction wrapping each aten dispatch:
-            #   recorded_duration = RF_enter + actual_op_work + RF_exit
-            # For a node that this branch matched (alias / dispatcher
-            # / metadata-only), the data-flow proves `actual_op_work`
-            # is pointer-only — aten::view, aten::as_strided,
-            # aten::detach_, aten::empty(device=cuda), etc. The
-            # recorded duration is therefore RF overhead, not work,
-            # and we treat it as zero.
-            #
-            # GPU nodes (gpu_runtime) are timed via CUPTI on the GPU
-            # stream — that measurement is kernel-execution time on
-            # the device, independent of the CPU-side RecordFunction
-            # path. It is the simulator's ground truth and is not
-            # subject to this rule, regardless of whether the alias
-            # check happens to match (some in-place GPU kernels
-            # legitimately have `outs ⊆ ins`).
-            runtime_role = node.args.get("runtime_role") or ""
-            if runtime_role == "cpu_leaf":
-                node.compute_time_micros = 0.0
+            # NOTE: previous iterations of this branch zeroed
+            # `compute_time_micros` for alias / dispatcher /
+            # pointer-metadata cpu_leaf nodes under the framing
+            # "recorded duration is RecordFunction overhead, not real
+            # work." That framing was fit-shaped — the recorded
+            # duration also contains the actual op cost (C++ dispatch,
+            # TensorImpl construction, allocator call), not just the
+            # RF wrapper. Zeroing removed real CPU work and let the
+            # sim's CPU pipeline race ahead of the GPU. The sim now
+            # uses the recorded duration as-is for every cpu_leaf;
+            # the custom_deps annotation above still bypasses the
+            # spurious VRAM→RAM transfers that would otherwise fire
+            # on alias / dispatcher / pointer-metadata nodes via
+            # `_ensure_inputs_resident`.
 
     @staticmethod
     def _loader_is_dispatcher(node: Node, tensor_map: dict[int, Tensor]) -> bool:
