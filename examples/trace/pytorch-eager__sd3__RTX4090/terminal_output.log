@@ -1,0 +1,91 @@
+2026-05-22 12:52:18.884641: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-05-22 12:52:18.895140: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1779421938.905996 3208528 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1779421938.909681 3208528 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1779421938.919770 3208528 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1779421938.919780 3208528 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1779421938.919781 3208528 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1779421938.919782 3208528 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+2026-05-22 12:52:18.922293: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+
+Loading pipeline components...:   0%|          | 0/9 [00:00<?, ?it/s]
+Loading pipeline components...:  22%|██▏       | 2/9 [00:00<00:00, 19.92it/s]
+Loading pipeline components...:  44%|████▍     | 4/9 [00:01<00:02,  1.93it/s]You set `add_prefix_space`. The tokenizer needs to be converted from the slow tokenizers
+
+Loading pipeline components...:  56%|█████▌    | 5/9 [00:01<00:01,  2.49it/s]
+Loading pipeline components...:  89%|████████▉ | 8/9 [00:02<00:00,  4.09it/s]
+
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s][A
+
+Loading checkpoint shards:  50%|█████     | 1/2 [00:01<00:01,  1.11s/it][A
+
+Loading checkpoint shards: 100%|██████████| 2/2 [00:02<00:00,  1.20s/it][A
+Loading checkpoint shards: 100%|██████████| 2/2 [00:02<00:00,  1.18s/it]
+
+Loading pipeline components...: 100%|██████████| 9/9 [00:04<00:00,  1.37it/s]
+Loading pipeline components...: 100%|██████████| 9/9 [00:04<00:00,  1.86it/s]
+[W522 12:52:52.095230732 execution_trace_observer.cpp:1010] Enabling Execution Trace Observer
+[W522 12:52:55.740515026 execution_trace_observer.cpp:1022] Disabling Execution Trace Observer
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg       CPU Mem  Self CPU Mem      CUDA Mem  Self CUDA Mem    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                sd3_run        18.28%     666.470ms       100.00%        3.645s        3.645s       0.000us         0.00%        1.142s        1.142s           0 B      -4.51 MB     128.00 KB    -214.36 GB             1  
+                                       aten::as_strided         7.69%     280.312ms         7.69%     280.312ms       7.495us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B         37400  
+                                       cudaLaunchKernel         5.67%     206.729ms         5.68%     206.923ms       4.291us       0.000us         0.00%       3.744us       0.000us           0 B           0 B           0 B           0 B         48221  
+                                            aten::addmm         5.48%     199.593ms         7.03%     256.234ms      34.491us     573.000ms        50.18%     573.063ms      77.139us           0 B           0 B      35.93 GB      35.93 GB          7429  
+                                        aten::transpose         4.92%     179.165ms         8.39%     305.977ms      17.947us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B         17049  
+                                             aten::view         4.70%     171.326ms         4.70%     171.326ms       7.756us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B         22090  
+                                           aten::linear         4.15%     151.128ms        26.12%     951.995ms     109.274us       0.000us         0.00%     662.095ms      75.998us           0 B           0 B      40.57 GB           0 B          8712  
+                                            aten::slice         4.11%     149.634ms         6.81%     248.189ms      18.644us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B         13312  
+                                            aten::empty         3.67%     133.744ms         3.67%     133.744ms      10.751us       0.000us         0.00%       0.000us       0.000us      14.81 KB      14.81 KB      21.97 GB      21.97 GB         12440  
+                                              aten::mul         3.52%     128.415ms         4.50%     164.030ms      16.751us      69.710ms         6.11%      69.714ms       7.119us           0 B           0 B      51.24 GB      51.24 GB          9792  
+                                              aten::add         3.52%     128.202ms         4.62%     168.365ms      17.687us      78.413ms         6.87%      78.457ms       8.242us           0 B           0 B      19.48 GB      19.48 GB          9519  
+                                            aten::copy_         2.53%      92.238ms         4.25%     154.895ms      19.727us      81.449ms         7.13%      81.450ms      10.373us           0 B         -80 B           0 B           0 B          7852  
+                                          aten::reshape         2.33%      85.027ms         6.59%     240.080ms      27.205us       0.000us         0.00%       8.916ms       1.010us           0 B           0 B       7.48 GB           0 B          8825  
+                                         aten::_to_copy         2.24%      81.618ms         6.86%     249.888ms      47.525us       0.000us         0.00%      32.278ms       6.139us       4.50 MB           0 B      33.21 GB           0 B          5258  
+                                               aten::to         2.07%      75.289ms         8.92%     325.177ms      37.372us       0.000us         0.00%      32.278ms       3.710us       4.50 MB           0 B      33.21 GB           0 B          8701  
+                                        aten::unsqueeze         2.02%      73.722ms         3.43%     125.153ms      19.084us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          6558  
+                                    aten::empty_strided         1.94%      70.654ms         1.94%      70.654ms      11.776us       0.000us         0.00%       0.000us       0.000us       4.50 MB       4.50 MB      38.46 GB      38.46 GB          6000  
+                                                aten::t         1.89%      68.968ms         6.15%     224.283ms      25.741us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          8713  
+                                aten::native_layer_norm         1.67%      60.948ms         6.26%     228.284ms     108.707us      10.410ms         0.91%      50.174ms      23.892us           0 B           0 B       7.58 GB      -5.74 GB          2100  
+                                           aten::narrow         1.49%      54.465ms         4.56%     166.036ms      25.043us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          6630  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 3.645s
+Self CUDA time total: 1.142s
+
+device: cuda:0
+dtype: bfloat16
+fusion: none
+dot_level: llamasim-runtime
+seed: 0
+profile_memory: True
+record_shapes: True
+with_stack: True
+warmup_runs: 20
+trace_path: exp_results/0521_sweep/sd3_eager/sd3_eager_gpu_trace.json
+image_path: exp_results/0521_sweep/sd3_eager/sd3_eager_gpu_output.png
+execution_trace_path: exp_results/0521_sweep/sd3_eager/sd3_eager_gpu_execution_trace.json
+llamasim_output_dir: exp_results/0521_sweep/sd3_eager/llama_bundle
+llamasim_runtime_summary:
+  nodes: total=209772 gpu=54908 cpu=154864
+  submit_edges: exact=54908/54908 (100.00%) heuristic=0 provenance=ac2g_endpoint_exact
+  ac2g: paired=54908 matched=54908 errors=0
+  wait_edges: exact=10/11 (90.91%) heuristic=1
+  ws_sync: markers=0 leaves=0
+  wait_sources: aten_parent_scope_exact=10, kineto_sync_frontier=1
+  excluded_wait_sources: profiler_sync_excluded=1
+  wait_kinds: device_sync=1, stream_sync=10
+  wait_exact_note: wrapper emitted no ws_sync evidence; exact waits came from non-wrapper provenance
+  cpu_match_ambiguous: total=0 multiple_execution_nodes=0 no_runtime_candidate=0 multiple_runtime_candidates=0
+latent_shape: (1, 16, 64, 64)
+metadata_json: None
+
+# exit_code: 0
+# elapsed_seconds: 207.559

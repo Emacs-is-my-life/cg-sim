@@ -1,0 +1,192 @@
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/attention_processor.py:52: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class Attention(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/hooks/context_parallel.py:341: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  def _all_gather_anything(tensor: torch.Tensor, dim: int, group: dist.device_mesh.DeviceMesh) -> torch.Tensor:
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/attention.py:538: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class GatedSelfAttentionDense(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/attention.py:580: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class JointTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/attention.py:752: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class BasicTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/attention.py:1133: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class TemporalBasicTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/attention.py:1335: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class FreeNoiseTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/auraflow_transformer_2d.py:147: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class AuraFlowSingleTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/auraflow_transformer_2d.py:197: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class AuraFlowJointTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/cogvideox_transformer_3d.py:38: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class CogVideoXBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/consisid_transformer_3d.py:232: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class ConsisIDBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/hunyuan_transformer_2d.py:57: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class HunyuanDiTBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/stable_audio_transformer.py:65: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class StableAudioDiTBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_allegro.py:36: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class AllegroTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/attention_dispatch.py:1771: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  def all_to_all_single_any_qkv_async(
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/attention_dispatch.py:1805: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  def all_to_all_single_any_o_async(x: torch.Tensor, group: dist.ProcessGroup, **kwargs) -> Callable[..., torch.Tensor]:
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_bria.py:366: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class BriaTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_bria.py:451: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class BriaSingleTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_bria_fibo.py:244: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class BriaFiboSingleTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_bria_fibo.py:308: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class BriaFiboTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_flux.py:356: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class FluxSingleTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_flux.py:410: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class FluxTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_chroma.py:204: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class ChromaSingleTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_chroma.py:276: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class ChromaTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_chronoedit.py:435: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class WanTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_cogview4.py:456: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class CogView4TransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_easyanimate.py:209: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class EasyAnimateTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_glm_image.py:351: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class GlmImageTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_helios.py:376: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class HeliosTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_hidream_image.py:140: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class HiDreamAttention(Attention):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_hidream_image.py:421: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class HiDreamImageSingleTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_hidream_image.py:490: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class HiDreamImageTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_hunyuanimage.py:267: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class HunyuanImageIndividualTokenRefinerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_hunyuanimage.py:461: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class HunyuanImageSingleTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_hunyuanimage.py:538: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class HunyuanImageTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_longcat_image.py:215: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class LongCatImageSingleTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_longcat_image.py:269: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class LongCatImageTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_ltx.py:282: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class LTXVideoTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_ltx.py:385: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class LTXVideoTransformer3DModel(
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_mochi.py:119: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class MochiTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_mochi.py:309: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class MochiTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin, CacheMixin):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_ovis_image.py:215: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class OvisImageSingleTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_ovis_image.py:272: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class OvisImageTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_qwenimage.py:578: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class QwenImageTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_sd3.py:39: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class SD3SingleTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_skyreels_v2.py:439: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class SkyReelsV2TransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_wan.py:420: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class WanTransformerBlock(nn.Module):
+/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_z_image.py:184: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
+  class ZImageTransformerBlock(nn.Module):
+
+Loading pipeline components...:   0%|          | 0/9 [00:00<?, ?it/s]
+Loading pipeline components...:  11%|█         | 1/9 [00:01<00:10,  1.35s/it]
+Loading pipeline components...:  44%|████▍     | 4/9 [00:01<00:01,  3.48it/s]You set `add_prefix_space`. The tokenizer needs to be converted from the slow tokenizers
+
+Loading pipeline components...:  67%|██████▋   | 6/9 [00:01<00:00,  5.26it/s]
+
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s][A
+
+Loading checkpoint shards:  50%|█████     | 1/2 [00:01<00:01,  1.12s/it][A
+
+Loading checkpoint shards: 100%|██████████| 2/2 [00:02<00:00,  1.19s/it][A
+Loading checkpoint shards: 100%|██████████| 2/2 [00:02<00:00,  1.18s/it]
+
+Loading pipeline components...:  89%|████████▉ | 8/9 [00:05<00:00,  1.19it/s]
+Loading pipeline components...: 100%|██████████| 9/9 [00:05<00:00,  1.28it/s]
+Loading pipeline components...: 100%|██████████| 9/9 [00:05<00:00,  1.51it/s]
+/data/pytorch-source/torch/utils/_config_module.py:540: FutureWarning: torch._dynamo.config.skip_code_recursive_on_recompile_limit_hit is deprecated and does not do anything. It will be removed in a future version of PyTorch.
+  config[key] = copy.deepcopy(getattr(self, key))
+/data/pytorch-source/torch/_dynamo/variables/functions.py:2387: UserWarning: Dynamo detected a call to a `functools.lru_cache`-wrapped function at 'upsampling.py:156'. Dynamo ignores the cache wrapper and directly traces the wrapped function. Silent incorrectness is only a *potential* risk, not something we have observed. Enable TORCH_LOGS=+dynamo for a DEBUG stack trace.
+
+This call originates from:
+  File "/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/upsampling.py", line 156, in forward
+    if dtype == torch.bfloat16 and is_torch_version("<", "2.1"):
+
+  torch._dynamo.utils.warn_once(msg)
+/data/pytorch-source/torch/_dynamo/variables/functions.py:2387: UserWarning: Dynamo detected a call to a `functools.lru_cache`-wrapped function at 'upsampling.py:180'. Dynamo ignores the cache wrapper and directly traces the wrapped function. Silent incorrectness is only a *potential* risk, not something we have observed. Enable TORCH_LOGS=+dynamo for a DEBUG stack trace.
+
+This call originates from:
+  File "/home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/upsampling.py", line 180, in forward
+    if dtype == torch.bfloat16 and is_torch_version("<", "2.1"):
+
+  torch._dynamo.utils.warn_once(msg)
+/data/pytorch-source/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+[W521 23:20:43.465752427 execution_trace_observer.cpp:976] Enabling Execution Trace Observer
+[W521 23:20:45.124905028 execution_trace_observer.cpp:988] Disabling Execution Trace Observer
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg       CPU Mem  Self CPU Mem      CUDA Mem  Self CUDA Mem    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+## Call CompiledFxGraph fyxsxmbqlydxrwdrwx74wi33rzit...        17.65%     292.771ms        84.56%        1.403s      70.130ms       0.000us         0.00%     770.149ms      38.507ms           0 B           0 B       5.00 MB      -5.54 GB            20  
+                                            aten::addmm        11.93%     197.886ms        15.11%     250.670ms      33.742us     565.947ms        65.69%     566.019ms      76.191us           0 B           0 B           0 B           0 B          7429  
+                                         cuLaunchKernel         3.77%      62.512ms         3.77%      62.512ms       5.184us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B         12059  
+                                        aten::transpose         2.29%      37.977ms         3.70%      61.379ms      18.504us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          3317  
+                                            aten::empty         1.98%      32.843ms         1.98%      32.843ms       9.275us       0.000us         0.00%       0.000us       0.000us      14.81 KB      14.81 KB      11.02 GB      11.02 GB          3541  
+                                       cudaLaunchKernel         1.97%      32.744ms         1.97%      32.744ms       5.217us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          6276  
+                                               aten::mm         1.95%      32.327ms         2.53%      41.960ms      32.705us      76.649ms         8.90%      76.649ms      59.742us           0 B           0 B           0 B           0 B          1283  
+                                        cudaMemcpyAsync         1.94%      32.242ms         1.94%      32.242ms     921.201us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B            35  
+              aten::_scaled_dot_product_flash_attention         1.63%      27.059ms         9.62%     159.498ms     215.537us       0.000us         0.00%     116.068ms     156.849us           0 B           0 B       5.42 GB           0 B           740  
+                                       aten::as_strided         1.63%      27.056ms         1.63%      27.056ms       7.297us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          3708  
+                         aten::_flash_attention_forward         1.59%      26.440ms         4.64%      77.036ms     104.102us     116.068ms        13.47%     116.068ms     156.849us           0 B           0 B       5.42 GB        -512 B           740  
+                                                sd3_run         1.55%      25.634ms        99.99%        1.659s        1.659s       0.000us         0.00%     861.877ms     861.877ms           0 B      -4.51 MB     128.00 KB     -75.56 MB             1  
+                               TorchDynamo Cache Lookup         1.08%      17.982ms         1.08%      17.982ms     665.988us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B            27  
+                                        cudaMemsetAsync         0.87%      14.367ms         0.87%      14.367ms       3.013us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          4768  
+triton_per_fused__to_copy_add_mean_mul_pow_rsqrt_tra...         0.86%      14.238ms         1.15%      19.065ms      19.860us       4.436ms         0.51%       4.436ms       4.621us           0 B           0 B           0 B           0 B           960  
+triton_per_fused__to_copy_add_mean_mul_pow_rsqrt_tra...         0.78%      13.013ms         1.09%      18.075ms      18.828us       2.117ms         0.25%       2.117ms       2.206us           0 B           0 B           0 B           0 B           960  
+                                    aten::empty_strided         0.60%      10.002ms         0.60%      10.002ms      12.424us       0.000us         0.00%       0.000us       0.000us       4.50 MB       4.50 MB       5.26 GB       5.26 GB           805  
+## Call CompiledFxGraph f2dc7iwndm57s7lbsfwd7rcfe3v4...         0.53%       8.832ms         3.59%      59.557ms      29.778ms       0.000us         0.00%       5.980ms       2.990ms           0 B      -1.00 KB      12.79 MB     775.00 KB             2  
+                                       aten::empty_like         0.53%       8.722ms         1.12%      18.505ms      22.902us       0.000us         0.00%       0.000us       0.000us           0 B           0 B       6.58 GB           0 B           808  
+## Call CompiledFxGraph fwcxixa4zkekmydtwvuapirwmc34...         0.50%       8.331ms         2.68%      44.469ms      22.234ms       0.000us         0.00%      34.730ms      17.365ms           0 B           0 B       4.00 MB       4.00 MB             2  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 1.659s
+Self CUDA time total: 861.595ms
+
+inductor_unique_graphs: 5
+device: cuda:0
+dtype: bfloat16
+fusion: inductor
+dot_level: llamasim-runtime
+seed: 0
+profile_memory: True
+record_shapes: True
+with_stack: True
+warmup_runs: 20
+trace_path: exp_results/0521_sweep/sd3_inductor/sd3_inductor_gpu_inductor_trace.json
+trace_csv_path: exp_results/0521_sweep/sd3_inductor/sd3_inductor_gpu_inductor_trace.csv
+image_path: exp_results/0521_sweep/sd3_inductor/sd3_inductor_gpu_inductor_output.png
+execution_trace_path: exp_results/0521_sweep/sd3_inductor/sd3_inductor_gpu_inductor_execution_trace.json
+llamasim_output_dir: exp_results/0521_sweep/sd3_inductor/llama_bundle
+llamasim_runtime_summary:
+  nodes: total=62348 gpu=21585 cpu=40763
+  submit_edges: exact=21585/21585 (100.00%) heuristic=0 provenance=ac2g_endpoint_exact
+  ac2g: paired=21585 matched=21585 errors=0
+  wait_edges: exact=10/11 (90.91%) heuristic=1
+  ws_sync: markers=0 leaves=0
+  wait_sources: aten_parent_scope_exact=10, kineto_sync_frontier=1
+  excluded_wait_sources: profiler_sync_excluded=1
+  wait_kinds: device_sync=1, stream_sync=10
+  wait_exact_note: wrapper emitted no ws_sync evidence; exact waits came from non-wrapper provenance
+  cpu_match_ambiguous: total=0 multiple_execution_nodes=0 no_runtime_candidate=0 multiple_runtime_candidates=0
+latent_shape: (1, 16, 64, 64)
+metadata_json: {"user_annotation_args": "sample_step=0 phase=text_to_image component=sd3_pipeline device=cuda:0 fusion=inductor"}
+metadata_parsed: {"user_annotation_args": "sample_step=0 phase=text_to_image component=sd3_pipeline device=cuda:0 fusion=inductor"}
+
+# exit_code: 0
+# elapsed_seconds: 84.764

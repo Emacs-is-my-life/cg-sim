@@ -1,0 +1,21 @@
+cmdline:
+  /home/royce/anaconda3/envs/ptvenv/bin/python /data/pytorch-source/scripts/profile_sd3_gpu.py --model /data/llamasim/models/sd-3.5-med --prompt A cute dog and a cat in a park --fusion none --output-prefix sd3_eager_gpu --steps 20 --warmup-runs 20 --seed 0 --device cuda:0 --dtype bfloat16 --guidance-scale 4.5 --height 512 --width 512 --max-sequence-length 256 --disable-progress-bar --output-dir exp_results/0521_sweep/sd3_eager
+
+effective_args:
+  model: '/data/llamasim/models/sd-3.5-med'
+  prompt: 'A cute dog and a cat in a park'
+  steps: 20
+  guidance_scale: 4.5
+  height: 512
+  width: 512
+  seed: 0
+  max_sequence_length: 256
+  device: 'cuda:0'
+  dtype: 'bfloat16'
+  fusion: 'none'
+  compile_mode: 'default'
+  fullgraph: False
+  warmup_runs: 20
+  disable_progress_bar: True
+  output_prefix: 'sd3_eager_gpu'
+  output_dir: 'exp_results/0521_sweep/sd3_eager'
