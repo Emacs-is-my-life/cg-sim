@@ -514,9 +514,15 @@ class PytorchProfile(TraceLoader):
         self._read_dot_edges(dot_edges, node_map, profile_to_node, profile_to_tensor)
         self._apply_storage_aliasing(node_map, tensor_map)
         self._mark_implicit_inputs(node_map, tensor_map)
-        self._annotate_alias_dispatcher_deps(node_map, tensor_map)
+        # Temporal edges must be added BEFORE annotating alias/dispatcher
+        # custom_deps: annotate iterates `node.parent_nodes` to attach
+        # NodeDoneDeps, and that list needs to include the temporal-edge
+        # parents (e.g. an HtoD memcpy gpu_runtime whose only kineto incoming
+        # edge is a start-gated submit has empty parent_nodes until the
+        # temporal pass adds its data-producer parent).
         if bool(self.args.get("add_temporal_data_control_edges", False)):
             self._add_temporal_data_control_edges(node_map)
+        self._annotate_alias_dispatcher_deps(node_map, tensor_map)
         self._add_terminal_node(node_map)
 
         return Trace(self.id, self.name, self.log, node_map, tensor_map)
@@ -968,9 +974,9 @@ class PytorchProfile(TraceLoader):
             self._read_edges(edge_csv_path, node_map, profile_to_node, profile_to_tensor)
             self._apply_storage_aliasing(node_map, tensor_map)
             self._mark_implicit_inputs(node_map, tensor_map)
-            self._annotate_alias_dispatcher_deps(node_map, tensor_map)
             if bool(self.args.get("add_temporal_data_control_edges", False)):
                 self._add_temporal_data_control_edges(node_map)
+            self._annotate_alias_dispatcher_deps(node_map, tensor_map)
             self._add_terminal_node(node_map)
             trace = Trace(self.id, self.name, self.log, node_map, tensor_map)
         else:
