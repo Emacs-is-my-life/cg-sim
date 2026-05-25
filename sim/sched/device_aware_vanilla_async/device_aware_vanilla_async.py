@@ -162,21 +162,22 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         # loader's storage aliasing has collapsed views / allocators onto
         # their real identities.
         self._remaining_consumers: dict[int, int] = {}
-        # CPU-only consumer count: nodes with role in {cpu_leaf, submit}
-        # that have the tid in their input_tensors. This models the
-        # Python refcount — the bytes become available to the caching
-        # allocator the moment the last CPU op that referenced the
-        # tensor retires, even if downstream GPU consumers are still
-        # pending in the stream chain. Real PyTorch's caching allocator
-        # marks the block "free pending event" at this point and lets
-        # new aten::empty calls reuse it; subsequent kernels serialize
-        # on the GPU stream behind the still-pending old consumer.
+        # CPU-only consumer count: cpu_leaf nodes that have the tid in
+        # their input_tensors. This models the Python refcount — the
+        # bytes become available to the caching allocator the moment the
+        # last CPU op that referenced the tensor retires, even if
+        # downstream GPU consumers are still pending in the stream
+        # chain. Real PyTorch's caching allocator marks the block "free
+        # pending event" at this point and lets new aten::empty calls
+        # reuse it; subsequent kernels serialize on the GPU stream
+        # behind the still-pending old consumer. (`submit` and `wait`
+        # nodes are excluded because the loader strips their
+        # input_tensors via `_is_pointer_only`.)
         self._remaining_cpu_consumers: dict[int, int] = {}
         for node in self.sys.trace.node_map.values():
             for tid in node.input_tensors:
                 self._remaining_consumers[tid] = self._remaining_consumers.get(tid, 0) + 1
-            role = node.args.get("runtime_role") or ""
-            if role in ("cpu_leaf", "submit"):
+            if (node.args.get("runtime_role") or "") == "cpu_leaf":
                 for tid in node.input_tensors:
                     self._remaining_cpu_consumers[tid] = self._remaining_cpu_consumers.get(tid, 0) + 1
         # Tensor ids that have been Python-released (last CPU consumer
@@ -206,6 +207,19 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         # in-flight transfer). Retried every engine tick until all their
         # regions are freed — see _retry_pending_releases.
         self._pending_releases: set[int] = set()
+
+        # Diagnostic: outstanding kernel count (gpu_runtime submitted
+        # but not retired). Track max and a histogram bucketed log.
+        self._diag_outstanding_gpu: int = 0
+        self._diag_max_outstanding_gpu: int = 0
+        self._diag_outstanding_log: list = []  # (sim_t_ms, outstanding)
+        # Hook the terminal node's post-run callback so we dump the
+        # diagnostic at simulation end (the engine returns immediately
+        # at terminal retire, before sched.runtime() runs).
+        for n in self.sys.trace.node_map.values():
+            if isinstance(n, TerminalNode):
+                n.hook_post_run = lambda sys: self._diag_dump_outstanding()
+                break
         # Opt-in per-tensor release set. Tensors in this set are released
         # after their last consumer retires, regardless of tensor_type.
         # The schedule-injection trace transformer populates this with
@@ -696,8 +710,7 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         Skipped for permanent tensors (WEIGHT / INPUT / LEAF) unless
         the tid is in the explicit ``_evictable_tensor_ids`` set.
         """
-        node_role = node.args.get("runtime_role") or ""
-        is_cpu_role = node_role in ("cpu_leaf", "submit")
+        is_cpu_role = (node.args.get("runtime_role") or "") == "cpu_leaf"
         for tid in node.input_tensors:
             # CPU-side decrement (Python refcount analogue)
             if is_cpu_role:
@@ -738,7 +751,8 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         is still pending, release the VRAM region now (Python refcount
         drop) and mark the tid python-released. Pending GPU consumers
         of the tid will have their input residency check bypassed at
-        submit time via custom_deps."""
+        submit time via custom_deps.
+        """
         if tid in self._python_released_tids:
             return
         if self._remaining_consumers.get(tid, 0) <= 0:
@@ -749,7 +763,20 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         if tensor is None:
             return
         ttype = tensor.args.get("tensor_type")
-        if ttype in self._PERMANENT_TYPES and tid not in self._evictable_tensor_ids:
+        # All permanents (WEIGHT / INPUT / LEAF) are skipped, whether
+        # always-resident or LP-managed evictable. For LP-managed
+        # streamed weights in `_evictable_tensor_ids`, the schedule
+        # injector owns the lifecycle: prefetch arrivals load the
+        # weight into VRAM, `evict_after_node` releases it. That
+        # cycle is timed against the LP's planned epochs. Python-
+        # releasing inside an epoch (at last-CPU-consumer-retire,
+        # which is earlier than `evict_after_node`) marks
+        # `xfer_state = ABSENT` for the still-active epoch, parking
+        # subsequent gated consumers on a prefetch that won't fire
+        # until the next epoch — silent coverage_demoted, peak
+        # blow-up. Always-resident permanents (not in the evictable
+        # set) are pinned for the run and never python-released.
+        if ttype in self._PERMANENT_TYPES:
             return
         self._python_released_tids.add(tid)
         self._release_tensor_regions(tid)
@@ -960,6 +987,16 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         Multiple nodes on different devices (e.g. one CPU op and one GPU
         kernel) can be queued in the same tick. Within a single device stop
         at its concurrency cap.
+
+        IMPORTANT: the `committed_per_compute` cap is load-bearing — it
+        prevents back-to-back same-compute commits within one invocation.
+        The engine's drain loop dispatches FIFO from job_waiting and HOL-
+        blocks the first non-runnable entry; if we queue [CPU_A, CPU_B,
+        GPU_X] in this order, CPU_B fails `can_run` (CPU already at cap=1)
+        and HOL breaks before reaching GPU_X — losing parallelism (and on
+        traces where the deadlock check fires, aborting). The cap forces
+        commits to interleave (CPU, GPU, CPU, GPU, …) so the drain reaches
+        both computes.
         """
         submitted_any = False
         committed_per_compute: dict = {}
@@ -1021,6 +1058,7 @@ class DeviceAwareVanillaAsync(BaseScheduler):
                 if node.args.get("dispatcher_outputs"):
                     self._preclaim_dispatcher_outputs(node)
                 self.sys.compute(compute, node)
+                self._diag_on_submit(node)
                 self._release_started_children(node)
                 committed_per_compute[compute] = committed_x + 1
                 submitted_any = True
@@ -1071,11 +1109,58 @@ class DeviceAwareVanillaAsync(BaseScheduler):
                         node.custom_deps.append(NodeDoneDep(parent_id))
 
             self.sys.compute(compute, node)
+            self._diag_on_submit(node)
             self._release_started_children(node)
             committed_per_compute[compute] = committed + 1
             submitted_any = True
 
         return submitted_any
+
+    def _diag_on_submit(self, node: Node) -> None:
+        if (node.args.get("runtime_role") or "") != "gpu_runtime":
+            return
+        self._diag_outstanding_gpu += 1
+        if self._diag_outstanding_gpu > self._diag_max_outstanding_gpu:
+            self._diag_max_outstanding_gpu = self._diag_outstanding_gpu
+        # Sparse log: only when count crosses each 50-step or each 100ms.
+        sim_t = self.sys.engine.timestamp_now
+        if (not self._diag_outstanding_log
+                or sim_t - self._diag_outstanding_log[-1][0] > 1000.0
+                or self._diag_outstanding_gpu - self._diag_outstanding_log[-1][1] >= 50
+                or self._diag_outstanding_log[-1][1] - self._diag_outstanding_gpu >= 50):
+            self._diag_outstanding_log.append((sim_t, self._diag_outstanding_gpu))
+
+    def _diag_on_retire(self, node: Node) -> None:
+        if (node.args.get("runtime_role") or "") != "gpu_runtime":
+            return
+        if self._diag_outstanding_gpu > 0:
+            self._diag_outstanding_gpu -= 1
+        # Final dump at terminal node retire (= sim end).
+        if isinstance(node, TerminalNode):
+            self._diag_dump_outstanding()
+
+    def _diag_dump_outstanding(self) -> None:
+        from collections import Counter
+        print(f"[DAV diag] max outstanding gpu_runtime: {self._diag_max_outstanding_gpu}", flush=True)
+        if not self._diag_outstanding_log:
+            return
+        buckets = Counter()
+        for _, n in self._diag_outstanding_log:
+            if n < 16:    buckets['0-15'] += 1
+            elif n < 64:  buckets['16-63'] += 1
+            elif n < 256: buckets['64-255'] += 1
+            elif n < 1024: buckets['256-1023'] += 1
+            else:          buckets['>=1024'] += 1
+        print(f"[DAV diag] outstanding histogram (sampled):", flush=True)
+        for k, v in buckets.most_common():
+            print(f"    {k}: {v}", flush=True)
+        # Show evolution: every Nth sample
+        n = len(self._diag_outstanding_log)
+        step = max(1, n // 20)
+        print(f"[DAV diag] outstanding timeline (sampled @ ~{step}-step intervals):", flush=True)
+        for i in range(0, n, step):
+            sim_t, count = self._diag_outstanding_log[i]
+            print(f"    sim_t={sim_t/1000:.1f}ms outstanding={count}", flush=True)
 
     def _submit_ready_nodes(self) -> bool:
         """Wrap the core submit loop with the prefetch gate.
@@ -1111,6 +1196,7 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         for job in retired_jobs:
             if not isinstance(job, ComputeJob):
                 continue
+            self._diag_on_retire(job.node)
 
             self._consume_inputs(job.node)
             self._python_release_producer_outputs(job.node)
@@ -1130,14 +1216,27 @@ class DeviceAwareVanillaAsync(BaseScheduler):
                         # next reload is RAM→VRAM (mirroring real
                         # PyTorch's pinned backup pattern). Releasing
                         # RAM too would force SSD→RAM→VRAM and inflate
-                        # sim time.
+                        # sim time. Deferred releases route through
+                        # ``_d2h_pending_vram`` (not ``_pending_releases``)
+                        # so the retry path stays VRAM-only — the latter
+                        # uses the full RAM+VRAM ``_release_tensor_regions``
+                        # which would drop the RAM mirror needed by the
+                        # next reload arrival.
+                        deferred = False
                         for region in list(
                             self._vram.space.get_by_tensor_id(int(tid))
                         ):
                             if region.access_status == DataRegionAccess.IDLE:
                                 self.sys.release(region)
                             else:
-                                self._pending_releases.add(int(tid))
+                                deferred = True
+                        if deferred:
+                            self._d2h_pending_vram.add(int(tid))
+                        # Also flip xfer_state back so the next prefetch
+                        # arrival sees ABSENT and re-issues the H2D.
+                        if not self._vram.space.get_by_tensor_id(int(tid)):
+                            if self._xfer_state.get(int(tid)) in (_LOADED, _RESIDENT):
+                                self._xfer_state[int(tid)] = _ABSENT
 
             # Start-gated edges live on the trace's args side channel,
             # not in `children_nodes`, so this iteration only sees

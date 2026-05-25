@@ -859,6 +859,22 @@ class PytorchProfile(TraceLoader):
             # spurious VRAM→RAM transfers that would otherwise fire
             # on alias / dispatcher / pointer-metadata nodes via
             # `_ensure_inputs_resident`.
+            #
+            # Tested (May 2026): subtracting any non-zero amount per
+            # metadata op (tried -1us, -2us, full zero) breaks
+            # sd3_med_eager with VRAM OOM at the 24GB cap. The
+            # mechanism: shrinking metadata ops lets CPU race ahead
+            # of GPU; Option B's producer-retire gate keeps
+            # intermediates resident; sd3 has enough concurrent
+            # intermediates (~1400) that the slack accumulates past
+            # the cap. The profile's recorded durations on metadata
+            # ops act as implicit backpressure on diffusion-eager
+            # workloads. Without a caching-allocator-reuse model
+            # (sim/core change), this backpressure is load-bearing
+            # — even -1us is too aggressive. Leaving the recorded
+            # duration as-is keeps all 8 model-variant sweep cases
+            # passing at the cost of a 1.5-2.7× eager timing gap on
+            # CPU-coupled workloads.
 
     @staticmethod
     def _loader_is_dispatcher(node: Node, tensor_map: dict[int, Tensor]) -> bool:
