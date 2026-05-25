@@ -1,19 +1,40 @@
-"""Pool-first MILP weight-streaming scheduler with peak-VRAM objective.
+"""Pool-first MILP — peak-VRAM objective, *hybrid* residency allowed.
 
-Inverse of ``ct_milp_lateness``: instead of minimizing stall subject to a
-peak cap, this variant minimizes peak VRAM subject to a *hard* zero-stall
-constraint. PCIe load in every timeline window must fit inside the
-window's wall-clock duration; no slack is allowed.
+Like ``ct_milp_peak`` but **drops the `c + e = 1` coupling**, so a tid
+can simultaneously be c=1 (cold at layout) and e_{t,k}=1 (evict +
+refetch at gap k). Dead-zone residency is governed by
+`(1 − e_{t,k})` per feasible gap, independent of c_t. This unlocks
+the hybrid pattern foreclosed by the non-hybrid variants:
+
+  c=1, e=0      cold from layout, never evicted (resident the whole run)
+  c=1, e=1      cold from layout, evict mid-run, refetch before next use
+  c=0, e=0      JIT prefetch, then stays resident across this gap
+  c=0, e=1      JIT prefetch + per-iter evict-refetch cycle
+
+The win: tids with sparse uses (e.g. early-and-late patterns) can
+reclaim VRAM during long dead zones even when c-infeasibility forces
+them cold at layout. The non-hybrid variants pin such tids to
+full-run residency, wasting VRAM in the middle.
+
+⚠ Injector compatibility caveat. The `inject_schedule` pass'
+`coverage_repair` is all-or-nothing: once any prefetch fires for a
+tid, every gpu consumer is expected to be gated by an async arrival.
+Cold-start residency does NOT count as a gate. So consumers BEFORE
+a mid-run evict get demoted back to cold by the injector, which
+inflates sim VRAM beyond the LP's plan (silent-patch overhead).
+Until the injector recognizes cold-start residency as a gate for
+`[layout, first_evict_node]`, hybrid LP plans may sim with
+peak > LP modeled. This variant emits the plan unconditionally —
+verify in sim before treating as safe.
 
 For each cuda-resident WEIGHT/LEAF/INPUT trace tensor (one entry per
 physical storage thanks to the loader's `(device, storage_id)` dedup),
 decide:
 
   c_t ∈ {0, 1}:     1 = cold (resident from layout)
-                    0 = streamed (JIT prefetch before first consumer +
-                                  per-feasible-gap evict+refetch)
+                    0 = JIT prefetch before first consumer
   e_{t,k} ∈ {0, 1}: 1 = evict after consumer k and refetch before k+1
-                    coupled to (1 − c_t) on feasible gaps
+                    INDEPENDENT of c_t (hybrid mode)
 
 Objective: minimize P + ε·(streamed_bytes + refetched_bytes)
   - P ≥ 0 — modeled peak VRAM (bytes)
@@ -40,9 +61,16 @@ LP is always feasible.
 Peak VRAM model (sampled at every gpu compute consumer's T):
   Σ_{t: alive(t, T)} size_t  +  forced_const  ≤  P
   alive(t, T) classifies T into one of pre-arc / arc_0 / dead-zone /
-  arc_{k+1} / post regions of t's consumer pattern, contributing either
-  "size unconditional" (in arc) or "size · c_t" (in dead zone / pre /
-  post — alive only if cold).
+  arc_{k+1} / post regions of t's consumer pattern, contributing:
+    pre-arc (before first prefetch arrival):      size · c_t
+    arc_0 / consumer / arc_{k+1}:                 size · 1 (always)
+    dead-zone of feasible gap k (HYBRID):         size · (1 − e_{t,k})
+    dead-zone of infeasible gap (no evict fits):  size · 1
+    post (after last consumer):                   size · c_t
+  Under hybrid, the dead-zone coefficient `(1 − e_{t,k})` captures
+  *any* mid-run eviction — whether triggered from a cold-start
+  (c=1, e=1) or a JIT-stream (c=0, e=1) — and lets the LP free VRAM
+  in long gaps regardless of how the tid arrived in VRAM initially.
 
 Caveat: peak is sampled at ~256 of typically ~10k gpu events. The LP
 minimizes the *modeled* peak; sim's actual peak may exceed it. Treat
@@ -403,7 +431,7 @@ def _solve_two_phase_highspy(
         n_one = int(np.sum(bvals > 0.99))
         n_frac = int(np.sum((bvals >= 0.01) & (bvals <= 0.99)))
         print(
-            f"[ct_milp_peak:audit] phase 1 LP relaxation: "
+            f"[ct_milp_peak_hybrid:audit] phase 1 LP relaxation: "
             f"binaries ≈0: {n_zero}, ≈1: {n_one}, fractional: {n_frac}"
         )
 
@@ -476,11 +504,20 @@ def _solve_milp(
                       Lower-bound rows: M ≥ G_total (via lower bound) and
                       M ≥ H_total = Σ δ_t·(1−c_t) + Σ δ_t·e_{t,k}.
     """
-    # ---- 1. Feasibility filter ----
+    # ---- 1. Feasibility filter (hybrid + soft slack: minimal) ----
+    #
+    # Under soft cumulative-by-G_cum, a tid with no async issuer
+    # (c-infeasible) and no feasible gap can still be streamed via a
+    # sync prefetch at the consumer — paid for as δ_t of cumulative
+    # overshoot, which raises M. So the LP *can* consider every tid
+    # if the user's makespan_target allows the stall.
+    #
+    # Only exclude tids with empty consumer lists (no possible
+    # prefetch destination) — those are structural.
     feasible_tids: list[int] = []
     forced_cold: set[int] = set()
     for tid, pt in pool.items():
-        if not pt.c_feasibility and not any(pt.gap_feasibility):
+        if not pt.consumers:
             forced_cold.add(tid)
             continue
         feasible_tids.append(tid)
@@ -491,7 +528,7 @@ def _solve_milp(
         c_feas_false = [t for t in feasible_tids if not pool[t].c_feasibility]
         c_feas_false_bytes = sum(pool[t].size_bytes for t in c_feas_false)
         print(
-            f"[ct_milp_peak:audit] pool size={len(pool)} tensors "
+            f"[ct_milp_peak_hybrid:audit] pool size={len(pool)} tensors "
             f"forced_cold={len(forced_cold)} ({forced_bytes/1e6:.1f}MB) "
             f"feasible_lp_vars={nv} c_feas_false_bound_cold={len(c_feas_false)} "
             f"({c_feas_false_bytes/1e6:.1f}MB)"
@@ -584,30 +621,47 @@ def _solve_milp(
 
     if audit:
         print(
-            f"[ct_milp_peak:audit] cumulative-by-G_cum: "
+            f"[ct_milp_peak_hybrid:audit] cumulative-by-G_cum: "
             f"deadline_events={len(sorted_deadline_events)} of "
             f"{len(gpu_event_dur)} gpu events; G_total={g_total_ns/1e6:.1f}ms"
         )
 
     # ---- 3. Variable bounds + integrality ----
+    #
+    # Hybrid + soft-slack: c bounds are (0,1) for ALL tids, even when
+    # c-feasibility (cum-time issuer slack) is False. Letting the LP
+    # pick c=0 for c-infeasible tids costs cumulative-budget overshoot
+    # at the first-consumer deadline — captured by the relaxed
+    # cumulative-by-G_cum rows, which raise M to cover the stall.
+    # The user's makespan_target_s budget decides how much of this
+    # stall-for-peak trade is allowed.
+    #
+    # The forced-cold set (c-infeasible AND no feasible gap) is still
+    # excluded from the LP — those tids cannot stream regardless of
+    # slack (no gap to refetch into).
     bounds_list: list[tuple[float, float | None]] = []
     for tid in feasible_tids:
-        pt = pool[tid]
-        if not pt.c_feasibility:
-            bounds_list.append((1.0, 1.0))
-        else:
-            bounds_list.append((0.0, 1.0))
+        bounds_list.append((0.0, 1.0))
     bounds_list.extend([(0.0, 1.0)] * n_e)
     bounds_list.append((0.0, None))                          # P
     # M bounds: lower = G_total (gpu compute can't go faster than itself),
     # upper = makespan_target_ns when supplied, else unbounded. With the
     # H2D lower-bound row below this gives M ≥ max(G_total, H_total) —
     # the 2-machine flow-shop perfect-overlap makespan bound.
-    bounds_list.append(
-        (float(g_total_ns), float(makespan_target_ns))
+    # M's role under hybrid+soft semantics:
+    #   - lower bound G_total: gpu compute can't go faster than itself.
+    #   - upper bound makespan_target_ns: total runtime budget. When
+    #     None, pin upper bound to G_total → strict zero-stall (no
+    #     slack on cumulative caps, identical to old hard-cap form).
+    #   - The cumulative-by-G_cum rows give back (M − G_total) ns of
+    #     extra queue budget per deadline. Higher M ⇒ more slack ⇒
+    #     more streaming admitted ⇒ lower peak.
+    m_upper = (
+        float(makespan_target_ns)
         if makespan_target_ns is not None
-        else (float(g_total_ns), None)
-    )                                                        # M
+        else float(g_total_ns)
+    )
+    bounds_list.append((float(g_total_ns), m_upper))         # M
     # H_used[d]: continuous ≥ 0, monotonically increasing in d. Cap rows
     # below enforce H_used[d] ≤ g_cum_start[d].
     bounds_list.extend([(0.0, None)] * len(sorted_deadline_events))
@@ -628,6 +682,11 @@ def _solve_milp(
     # equal-peak plans (often heavier streaming than necessary).
     c_obj = np.zeros(total_vars, dtype=np.float64)
     c_obj[P_IDX] = 1.0
+    # Tiny positive coef on M: among equal-peak plans, prefer the
+    # smallest M (most honest reporting of required runtime). Much
+    # smaller than the byte tiebreaker so it never beats peak or
+    # streaming choices — only breaks ties on M itself.
+    c_obj[M_IDX] = 1.0e-12
     for tid in feasible_tids:
         size = pool[tid].size_bytes
         c_obj[c_var_idx[tid]] = -float(size) * EPSILON_PER_BYTE
@@ -635,42 +694,32 @@ def _solve_milp(
         size = pool[tid].size_bytes
         c_obj[col] = float(size) * EPSILON_PER_BYTE
 
-    # ---- 5. Symmetric coupling: c + e = 1 per feasible gap ----
+    # ---- 5. Coupling: NONE (HYBRID mode) ----
+    # The non-hybrid variants enforce `c + e_{t,k} = 1` per feasible
+    # gap, foreclosing c=1, e=1. The hybrid LP drops that coupling
+    # entirely: c and every e_{t,k} are free binaries, restricted only
+    # by their {0,1} bounds. The dead-zone peak coefficient (section 7
+    # below) changes from `size · c` to `size · (1 − e_{t,k})` to
+    # correctly track residency under any (c, e) combination.
+    #
+    # No row is emitted here.
     rows: list[int] = []
     cols: list[int] = []
     vals: list[float] = []
     ub_list: list[float] = []
     row = 0
 
-    for tid in feasible_tids:
-        pt = pool[tid]
-        for k, feas in enumerate(pt.gap_feasibility):
-            if not feas:
-                continue
-            ci = c_var_idx[tid]
-            ei = e_var_idx[(tid, k)]
-            rows.extend([row, row])
-            cols.extend([ci, ei])
-            vals.extend([1.0, 1.0])
-            ub_list.append(1.0)
-            row += 1
-            rows.extend([row, row])
-            cols.extend([ci, ei])
-            vals.extend([-1.0, -1.0])
-            ub_list.append(-1.0)
-            row += 1
-
     # ---- 6. Sample grid ----
     gpu_consumers = _build_gpu_consumer_timeline(trace)
     if not gpu_consumers:
         raise RuntimeError(
-            "[ct_milp_peak] no gpu consumer events in trace; "
+            "[ct_milp_peak_hybrid] no gpu consumer events in trace; "
             "cannot build LP sample grid."
         )
     samples = _select_sample_points(gpu_consumers, max_samples=max_peak_samples)
     if audit:
         print(
-            f"[ct_milp_peak:audit] gpu_consumer_events={len(gpu_consumers)} "
+            f"[ct_milp_peak_hybrid:audit] gpu_consumer_events={len(gpu_consumers)} "
             f"sampled_points={len(samples)}"
         )
 
@@ -717,10 +766,12 @@ def _solve_milp(
             arc_kp1_start = pt.consumers[k_in + 1][1] - tau
             if t_l >= arc_kp1_start:
                 const_addons += size
-            elif pt.gap_feasibility[k_in]:
-                var_coefs[c_var_idx[tid]] = (
-                    var_coefs.get(c_var_idx[tid], 0.0) + size
-                )
+            elif pt.gap_feasibility[k_in] and (tid, k_in) in e_var_idx:
+                # HYBRID: dead-zone residency = size · (1 − e_{t,k_in})
+                # Encode as constant `size` plus −size on the e variable.
+                const_addons += size
+                e_col = e_var_idx[(tid, k_in)]
+                var_coefs[e_col] = var_coefs.get(e_col, 0.0) - size
             else:
                 const_addons += size
 
@@ -736,21 +787,14 @@ def _solve_milp(
         ub_list.append(-float(const_addons))
         row += 1
 
-    # ---- 7a. Global cold-floor cut ----
-    # Σ_t size_t · c_t  +  forced_cold_bytes  +  extras  ≤  P
-    # Tightens the LP relaxation: cold tids are alive everywhere, so
-    # P must dominate their sum. Without this, fractional c_t can
-    # leak into per-sample rows ambiguously.
-    rows.append(row)
-    cols.append(P_IDX)
-    vals.append(-1.0)
-    for tid in feasible_tids:
-        size = pool[tid].size_bytes
-        rows.append(row)
-        cols.append(c_var_idx[tid])
-        vals.append(float(size))
-    ub_list.append(-(float(forced_cold_bytes) + float(extra_static_bytes)))
-    row += 1
+    # ---- 7a. Cold-floor cut (DROPPED in hybrid mode) ----
+    # In the non-hybrid variants the cut says `Σ size·c + const ≤ P`
+    # because cold tids are alive at every sample. Under hybrid, a
+    # cold tid (c=1) can be evicted mid-run (e=1), so its contribution
+    # to P at dead-zone samples is `size · (1 − e)`, not `size`. The
+    # cut would over-constrain — it'd require P ≥ Σ size · c even when
+    # some cold tids are evicted in some gaps. Drop it. The per-sample
+    # peak rows still enforce P at every binding moment.
 
     # ---- 7b. Makespan lower-bound row: M ≥ H_total ----
     #
@@ -795,7 +839,7 @@ def _solve_milp(
             if makespan_target_ns is not None else "no cap"
         )
         print(
-            f"[ct_milp_peak:audit] makespan: G_total={g_total_ns/1e6:.1f}ms "
+            f"[ct_milp_peak_hybrid:audit] makespan: G_total={g_total_ns/1e6:.1f}ms "
             f"target={cap_str}"
         )
 
@@ -879,11 +923,29 @@ def _solve_milp(
         ub_list.append(-float(const_terms))
         row += 1
 
-        # Cap row: H_used[d] ≤ g_cum_start[d]
+        # Relaxed cap row: H_used[d] − M ≤ g_cum_start[d] − G_total
+        #
+        # Equivalent to H_used[d] ≤ g_cum_start[d] + (M − G_total),
+        # i.e., extra (M − G_total) ns of queue budget per deadline.
+        # M ≥ G_total via its lower bound, so the slack is ≥ 0.
+        # M ≤ makespan_target_ns (when set) caps the total slack.
+        #
+        # Strict-zero semantics: with M's upper bound pinned to
+        # G_total (when makespan_target_s is None), this reduces to
+        # H_used[d] ≤ g_cum_start[d] — same as the old hard cap.
+        #
+        # With a higher target, the LP can accept up to
+        # (makespan_target − G_total) ns of cumulative-budget
+        # overshoot. The overshoot translates to sim makespan
+        # extension: makespan = G_total + max_d max(0, H_used[d] −
+        # g_cum_start[d]). One row per d.
         rows.append(row)
         cols.append(h_used_idx[d])
         vals.append(1.0)
-        ub_list.append(float(g_cum_start[d]))
+        rows.append(row)
+        cols.append(M_IDX)
+        vals.append(-1.0)
+        ub_list.append(float(g_cum_start[d]) - float(g_total_ns))
         row += 1
 
         prev_h_idx = h_used_idx[d]
@@ -897,7 +959,7 @@ def _solve_milp(
         )
         if n_forced_at_0:
             print(
-                f"[ct_milp_peak:audit] {n_forced_at_0} deadlines at "
+                f"[ct_milp_peak_hybrid:audit] {n_forced_at_0} deadlines at "
                 f"gpu event 0 (G_cum=0) — these tids forced cold by "
                 f"cumulative-by-G_cum cap."
             )
@@ -930,7 +992,7 @@ def _solve_milp(
         if not res_success:
             if audit:
                 print(
-                    f"[ct_milp_peak:solver] two-phase highspy failed: "
+                    f"[ct_milp_peak_hybrid:solver] two-phase highspy failed: "
                     f"{res_message!r} — falling back to scipy linprog."
                 )
             res_x = None
@@ -956,7 +1018,7 @@ def _solve_milp(
         if not res.success and integrality_arr is not None and not lp_relaxation:
             if audit:
                 print(
-                    f"[ct_milp_peak:solver] scipy MILP failed: "
+                    f"[ct_milp_peak_hybrid:solver] scipy MILP failed: "
                     f"status={getattr(res, 'message', '')!r} — "
                     f"falling back to LP relaxation."
                 )
@@ -970,7 +1032,7 @@ def _solve_milp(
     if audit:
         tag = "highspy-two-phase" if used_two_phase else "scipy-linprog"
         print(
-            f"[ct_milp_peak:solver] backend={tag} success={res_success} "
+            f"[ct_milp_peak_hybrid:solver] backend={tag} success={res_success} "
             f"fell_back={fell_back} status={res_message!r}"
         )
 
@@ -1094,7 +1156,7 @@ def _emit_neutral(
     # global_g_cum[i] = sim time at start of event i (assuming zero-stall
     # gpu queue packing).
 
-    # Per-graph sub-list for the issuer search (in-graph only).
+    # Per-graph sub-list for the issuer search.
     nodes_by_graph_trace: dict[int, list[tuple[int, int]]] = {}
     for start_ns, nid, _d in gpu_events_sorted:
         node = trace.node_map.get(nid)
@@ -1304,18 +1366,20 @@ def solve_neutral(
     sidecars: Any = None,                 # accepted but ignored
     **_legacy_kwargs: Any,
 ) -> NeutralSchedule:
-    """Build a pool-first peak-VRAM MILP schedule with hard zero-stall.
+    """Build a pool-first peak-VRAM MILP schedule (hybrid + soft slack).
 
     Inputs:
       ``trace``               — Trace with deduped-by-storage_id cgsim Tensors.
       ``hw``                  — HwParams (h2d/d2h bandwidth, latencies).
-      ``makespan_target_s``   — Optional hard upper bound on modeled
-                                makespan (seconds). M is bounded below by
-                                max(G_total, H_total); supplying this
-                                caps the LP so plans whose total serial
-                                PCIe time exceeds the target are rejected.
-                                None ⇒ unbounded (LP picks the smallest
-                                peak with zero LP-stall, runtime free).
+      ``makespan_target_s``   — Total LP-modeled runtime budget in seconds.
+                                The cumulative-by-G_cum caps are softened
+                                by (M − G_total) of slack per deadline,
+                                where M ≤ makespan_target_ns. Higher
+                                target ⇒ more streaming admitted ⇒ lower
+                                peak. None ⇒ M pinned to G_total ⇒
+                                strict zero LP-stall (no streaming
+                                relaxation; identical to the previous
+                                hard-cap form). Must be ≥ G_total.
       ``max_peak_samples``    — How many gpu-consumer points to sample
                                 for peak rows. ~256 is a sweet spot for
                                 sd3-med scale (10k events).
@@ -1328,17 +1392,22 @@ def solve_neutral(
     Returns:
       A NeutralSchedule with cgsim_tid pre-resolved on every entry.
 
-    Note: peak rows sample ~256 of typically ~10k gpu events, so
-    ``milp_peak_mb`` is a LOWER bound on sim's actual peak. Verify in
-    sim before treating as ground truth. The makespan bound is also
-    a *lower* bound (M ≥ max(G,H), the perfect-overlap floor); sim's
-    actual runtime can run ~1.1–1.3× higher due to per-event sync
-    overhead. Set targets with headroom.
+    Notes:
+      * Peak rows sample ~256 of typically ~10k gpu events;
+        ``milp_peak_mb`` is a lower bound on sim's actual peak.
+      * The LP's makespan is the perfect-overlap floor under EDF.
+        Sim uses water-fill (fair-share), so actual sim runtime is
+        typically 1.1–1.3× the LP makespan. Set the target with
+        headroom for the regime you want.
+      * The LP's stall slack assumes EDF queue order. Under sim's
+        water-fill, dense overlapping prefetches can cascade stall
+        further than the LP modeled. Verify the (peak, runtime) pair
+        in sim.
     """
     pool = _build_pool(trace, hw)
     if not pool:
         raise RuntimeError(
-            "[ct_milp_peak] pool is empty — no cuda WEIGHT/LEAF/INPUT "
+            "[ct_milp_peak_hybrid] pool is empty — no cuda WEIGHT/LEAF/INPUT "
             "tensors with gpu consumers found in trace."
         )
 
@@ -1348,7 +1417,7 @@ def solve_neutral(
         makespan_target_ns = int(round(float(makespan_target_s) * 1e9))
         if makespan_target_ns < g_total_ns:
             raise RuntimeError(
-                f"[ct_milp_peak] makespan_target_s={makespan_target_s:.3f}s "
+                f"[ct_milp_peak_hybrid] makespan_target_s={makespan_target_s:.3f}s "
                 f"({makespan_target_ns/1e6:.1f}ms) is below the gpu compute "
                 f"floor G_total={g_total_ns/1e6:.1f}ms. No streaming plan "
                 f"can run faster than gpu kernels run sequentially. Raise "
@@ -1369,7 +1438,7 @@ def solve_neutral(
         extra_static_bytes += int(t.size_bytes)
     if audit and extra_static_bytes:
         print(
-            f"[ct_milp_peak:audit] no-consumer cuda layout overhead "
+            f"[ct_milp_peak_hybrid:audit] no-consumer cuda layout overhead "
             f"= {extra_static_bytes/1e6:.1f}MB"
         )
 
@@ -1403,7 +1472,7 @@ def solve_neutral(
     )
 
     neutral.meta = {
-        "io_model": "ct_milp_peak",
+        "io_model": "ct_milp_peak_hybrid",
         "graph_order": neutral.graph_order,
         "milp_peak_mb": round(result.peak_bytes / 1e6, 2),
         "pcie_used_mb": round(pcie_h2d_bytes / 1e6, 2),

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""CLI: pool-first lateness MILP weight-streaming scheduler.
+"""CLI: pool-first peak-VRAM MILP weight-streaming scheduler.
 
-Same I/O shape as ``ct_milp_multistream.main`` (takes a bundle path,
-optional --hw, optional --peak-target-mb), but the LP works against the
-runtime trace directly — no compile-side sidecar identity layer.
+Same I/O shape as ``ct_milp_lateness.main`` but with the peak-target /
+safety-margin flags removed — this variant minimizes peak directly
+under a hard zero-stall constraint, so no cap target is needed.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from graph_modifiers.common import (
     write_neutral_schedule,
     write_schedule_json,
 )
-from graph_modifiers.schedulers.ct_milp_lateness.scheduler import (
+from graph_modifiers.schedulers.ct_milp_peak_hybrid.scheduler import (
     print_summary,
     solve_neutral,
 )
@@ -39,67 +39,46 @@ def main() -> None:
     p.add_argument("--hw", required=True)
     p.add_argument("--output", "-o", default=None)
     p.add_argument("--time-limit-s", type=float, default=120.0)
-    p.add_argument("--peak-target-mb", type=float, default=None)
-    p.add_argument("--safety-margin-frac", type=float, default=0.05)
     p.add_argument("--max-peak-samples", type=int, default=256)
+    p.add_argument(
+        "--makespan-target-s",
+        type=float,
+        default=None,
+        help=(
+            "Hard upper bound on modeled makespan in seconds. M is bounded "
+            "below by max(G_total, H_total) so this caps how much serial "
+            "PCIe time the plan can use. Must be ≥ G_total (gpu compute "
+            "floor); the LP raises if too tight. Omit ⇒ no cap."
+        ),
+    )
     p.add_argument("--lp-relaxation", action="store_true")
-    p.add_argument(
-        "--serialize-emit",
-        action="store_true",
-        help=(
-            "Post-process the emitted prefetches: reassign each "
-            "prefetch's issue_node_id so sim's PCIe queue executes "
-            "them in strict FIFO (EDF) order. Eliminates water-fill "
-            "ambiguity at the cost of potentially earlier dst-page "
-            "claims. Useful when the LP's plans claim zero stall but "
-            "sim shows hidden stall from concurrent prefetches."
-        ),
-    )
-    p.add_argument(
-        "--serialize-drop-stalled",
-        action="store_true",
-        help=(
-            "When used with --serialize-emit, drop prefetches that "
-            "cannot fit in the FIFO PCIe queue before their consumer "
-            "(would stall). The corresponding tids run cold instead. "
-            "Trades streaming budget for honest, water-fill-free "
-            "peak/runtime accounting."
-        ),
-    )
     p.add_argument("--audit", action="store_true")
     args = p.parse_args()
 
     trace = load_trace_from_bundle(args.bundle)
     hw = load_hw_params(args.hw)
 
-    peak_target_bytes = (
-        int(round(args.peak_target_mb * 1e6))
-        if args.peak_target_mb is not None else None
-    )
     neutral = solve_neutral(
         trace,
         hw=hw,
-        peak_target_bytes=peak_target_bytes,
-        safety_margin_frac=float(args.safety_margin_frac),
+        makespan_target_s=(
+            float(args.makespan_target_s)
+            if args.makespan_target_s is not None else None
+        ),
         max_peak_samples=int(args.max_peak_samples),
         time_limit_s=float(args.time_limit_s),
         lp_relaxation=bool(args.lp_relaxation),
-        serialize_emit=bool(args.serialize_emit),
-        serialize_drop_stalled=bool(args.serialize_drop_stalled),
         audit=bool(args.audit),
     )
 
     out_dir = (
         Path(args.output) if args.output
-        else Path(args.bundle) / "ct_milp_lateness_output"
+        else Path(args.bundle) / "ct_milp_peak_hybrid_output"
     )
     neutral_path = out_dir / "schedule.json"
     write_neutral_schedule(neutral_path, neutral, trace=trace)
     print(f"→ neutral schedule saved: {neutral_path}")
 
-    # Also emit the pytorch-format schedule for downstream tooling that
-    # consumes ``jit_sim_prune_schedule.json``. Reuse the existing
-    # builder; it accepts our cgsim_tid-resolved NeutralSchedule.
     sidecars = load_multi_graph_sidecars(args.bundle)
     if sidecars.launch_maps:
         tl = build_unified_timeline(

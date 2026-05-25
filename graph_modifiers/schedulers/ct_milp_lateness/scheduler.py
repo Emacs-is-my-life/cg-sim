@@ -1070,6 +1070,160 @@ def _solve_milp(
 
 
 # ---------------------------------------------------------------------------
+# Optional emit-side serialization pass
+# ---------------------------------------------------------------------------
+
+
+def _serialize_prefetches_pass(
+    prefetches: list[NeutralPrefetch],
+    trace: Trace,
+    hw: HwParams,
+    audit: bool = False,
+    drop_stalled: bool = False,
+) -> tuple[list[NeutralPrefetch], dict]:
+    """Reassign each prefetch's issue_node_id so sim's PCIe queue
+    executes them STRICTLY SERIALLY in EDF order (FIFO from sim's
+    perspective). Eliminates water-fill ambiguity: sim's transfer
+    model degenerates to single-server because at any moment only
+    one prefetch is active.
+
+    Algorithm (single-pass greedy EDF):
+      1. Compute G_cum (compacted gpu wall-clock) at each gpu node.
+      2. Sort prefetches by consumer's G_cum (deadline order).
+      3. Walk a virtual single-server PCIe queue:
+           start_i  = max(queue_free, deadline_i − τ_i)
+           if start_i + τ_i > deadline_i:  # would stall, leave it
+               keep current issuer
+           else:
+               find latest gpu node whose G_cum ≤ start_i;
+               rewrite prefetch.issue_node_id to point at it
+           queue_free = max(start_i + τ_i, queue_free)
+
+    The reassigned issuer fires earlier in sim's timeline, so the
+    prefetch enters the PCIe queue earlier; because we walk in
+    deadline order, no two prefetches' [start, end] intervals
+    overlap on the virtual queue → in sim, water-fill never sees
+    more than one active prefetch in this set, each runs at full
+    bandwidth.
+
+    Diagnostics returned: counts of reassigned, stalled (no fit),
+    and unchanged prefetches.
+    """
+    if not prefetches:
+        return prefetches, {"reassigned": 0, "stalled": 0, "unchanged": 0}
+
+    bw_h2d_bps = max(effective_h2d_bw(hw), 1e-9)
+
+    # Build G_cum on all gpu trace nodes.
+    gpu_events: list[tuple[int, int, int]] = []  # (start, end, nid)
+    for nid, node in trace.node_map.items():
+        rk = str((node.args or {}).get("resource_kind") or "")
+        if rk not in _GPU_RESOURCE_KINDS:
+            continue
+        s = int((node.args or {}).get("start_ns") or 0)
+        e = int((node.args or {}).get("end_ns") or s)
+        if s <= 0:
+            continue
+        gpu_events.append((s, e, int(nid)))
+    gpu_events.sort(key=lambda x: x[0])
+
+    g_cum_at_nid: dict[int, int] = {}
+    cum_ns = 0
+    for s, e, nid in gpu_events:
+        g_cum_at_nid[nid] = cum_ns
+        cum_ns += max(0, e - s)
+
+    # Sorted list of (g_cum, nid) for issuer lookup by G_cum value.
+    sorted_pairs = sorted(g_cum_at_nid.items(), key=lambda kv: kv[1])
+    sorted_g_cum_values = [v for _, v in sorted_pairs]
+    sorted_g_cum_nids = [k for k, _ in sorted_pairs]
+
+    def _find_issuer_at_g_cum(target_g_cum: int) -> int | None:
+        """Latest nid with g_cum ≤ target_g_cum, or None."""
+        if target_g_cum < 0:
+            return None
+        import bisect
+        idx = bisect.bisect_right(sorted_g_cum_values, target_g_cum) - 1
+        if idx < 0:
+            return None
+        return sorted_g_cum_nids[idx]
+
+    # τ_h2d per prefetch: (transfer_end − transfer_start) is exactly
+    # τ_h2d the emit computed. Re-derive to be robust.
+    def _tau(p: NeutralPrefetch) -> int:
+        t = int(p.transfer_end_ns) - int(p.transfer_start_ns)
+        return max(1, t)
+
+    def _deadline_g_cum(p: NeutralPrefetch) -> int:
+        return g_cum_at_nid.get(int(p.wait_node_id), 0)
+
+    # Walk in deadline order.
+    indexed = list(enumerate(prefetches))
+    indexed.sort(key=lambda ip: _deadline_g_cum(ip[1]))
+
+    drop_indices: set[int] = set()
+    new_list = list(prefetches)
+    queue_free_g_cum = 0
+    n_reassigned = 0
+    n_stalled = 0
+    n_unchanged = 0
+    n_dropped = 0
+    from dataclasses import replace
+
+    for orig_idx, pf in indexed:
+        tau = _tau(pf)
+        deadline = _deadline_g_cum(pf)
+        latest_start = deadline - tau
+        start = max(queue_free_g_cum, latest_start)
+        end = start + tau
+
+        if end > deadline:
+            # Strict FIFO can't deliver this prefetch in time.
+            if drop_stalled:
+                # Drop it. Caller is responsible for either converting
+                # the tid back to cold-start or accepting that the
+                # tid will run cold in sim (no prefetch arrival).
+                drop_indices.add(orig_idx)
+                n_dropped += 1
+                # Don't advance queue_free — this slot is gone.
+            else:
+                # Leave the existing (LP-planned) issue_node alone;
+                # the prefetch will stall in sim. Advance queue.
+                queue_free_g_cum = end
+                n_stalled += 1
+            continue
+
+        new_issuer = _find_issuer_at_g_cum(start)
+        if new_issuer is None or int(new_issuer) == int(pf.issue_node_id):
+            n_unchanged += 1
+        else:
+            new_list[orig_idx] = replace(pf, issue_node_id=int(new_issuer))
+            n_reassigned += 1
+        queue_free_g_cum = end
+
+    if drop_indices:
+        new_list = [p for i, p in enumerate(new_list) if i not in drop_indices]
+
+    diag = {
+        "reassigned": n_reassigned,
+        "stalled": n_stalled,
+        "dropped": n_dropped,
+        "unchanged": n_unchanged,
+        "n_prefetches_in": len(prefetches),
+        "n_prefetches_out": len(new_list),
+        "queue_total_g_cum_ms": queue_free_g_cum / 1e6,
+    }
+    if audit:
+        print(
+            f"[ct_milp_lateness:serialize] reassigned={n_reassigned} "
+            f"stalled={n_stalled} dropped={n_dropped} unchanged={n_unchanged} "
+            f"queue_total={queue_free_g_cum/1e6:.1f}ms "
+            f"({len(prefetches)} → {len(new_list)} prefetches)"
+        )
+    return new_list, diag
+
+
+# ---------------------------------------------------------------------------
 # Emit: NeutralSchedule with cgsim_tid pre-resolved
 # ---------------------------------------------------------------------------
 
@@ -1334,6 +1488,8 @@ def solve_neutral(
     max_peak_samples: int = 256,
     time_limit_s: float | None = 240.0,
     lp_relaxation: bool = False,
+    serialize_emit: bool = False,
+    serialize_drop_stalled: bool = False,
     audit: bool = False,
     sidecars: Any = None,                 # accepted but ignored
     **_legacy_kwargs: Any,
@@ -1403,6 +1559,19 @@ def solve_neutral(
 
     neutral = _emit_neutral(pool, result, trace, hw)
 
+    # Optional emit-side serialization (reassign prefetch issuers so
+    # sim's PCIe queue executes them in strict FIFO order, matching
+    # the LP's single-server assumption).
+    serialize_diag: dict | None = None
+    if serialize_emit and neutral.prefetches:
+        new_prefetches, serialize_diag = _serialize_prefetches_pass(
+            neutral.prefetches, trace, hw, audit=audit,
+            drop_stalled=bool(serialize_drop_stalled),
+        )
+        # Rebuild neutral with the rewritten prefetch list.
+        from dataclasses import replace as _dc_replace
+        neutral = _dc_replace(neutral, prefetches=new_prefetches)
+
     n_cold = len(neutral.cold_starts)
     n_pf = len(neutral.prefetches)
     n_ev = len(neutral.evicts)
@@ -1434,6 +1603,9 @@ def solve_neutral(
         "n_cold_starts": n_cold,
         "n_prefetches": n_pf,
         "n_evicts": n_ev,
+        "serialize_emit": bool(serialize_emit),
+        "serialize_drop_stalled": bool(serialize_drop_stalled),
+        "serialize_diagnostics": serialize_diag,
         "diagnostics": result.diagnostics,
     }
     return neutral
