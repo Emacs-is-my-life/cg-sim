@@ -188,7 +188,7 @@ Trace.
 commit layout decisions at compile/layout stage (slot sizes, page
 indices, prefetch plans). An *externally-attached* hook that mutates
 `tensor.num_pages` mid-run does **not** re-derive any of that —
-FlexInfer still reserves the original slot, and the resulting stall
+LlamaCppFlexInfer still reserves the original slot, and the resulting stall
 numbers will be subtly wrong rather than visibly broken. For
 state-coupled experiments, attach hooks from inside a custom
 scheduler's `__init__` or `compile()` so the *same* scheduler that
@@ -215,7 +215,7 @@ Generic soft-failure safety net. **Every** abort path in the simulator
 funnels through `Engine._log_abort(args)`:
 
 - engine-internal deadlocks and invalid-job submissions
-- scheduler-issued `sys.abort(...)` (Vanilla, FlexInfer, your scheduler)
+- scheduler-issued `sys.abort(...)` (LlamaCppVanilla, LlamaCppFlexInfer, your scheduler)
 - job assertion failures (`transfer_assertion.py`, `compute_assertion.py`)
 - mutation invariant breaks (`claim_mutation.py`)
 - any future caller of `sys.abort()` or `_log_abort()` you add — covered
@@ -441,10 +441,10 @@ re-import cost.
 
 Example:
 ```python
-# 1. Edit sim/sched/flexinfer/flexinfer.py on disk.
+# 1. Edit sim/sched/llamacpp_flexinfer/flexinfer.py on disk.
 # 2. From the agent loop, after simulation_finished:
 restart_simulation(reload=True)
-# 3. The next start_simulation runs against the freshly-imported FlexInfer.
+# 3. The next start_simulation runs against the freshly-imported LlamaCppFlexInfer.
 ```
 
 ## Environment knobs
@@ -468,9 +468,9 @@ trace loaders; the file layout below changes accordingly.
 
 Copy the simplest existing scheduler as a starting point and rename:
 ```bash
-cp -r sim/sched/vanilla sim/sched/myscheduler
+cp -r sim/sched/llamacpp_vanilla sim/sched/myscheduler
 # In sim/sched/myscheduler/__init__.py: re-export your renamed class.
-# In sim/sched/myscheduler/myscheduler.py: rename `class Vanilla(...)` →
+# In sim/sched/myscheduler/myscheduler.py: rename `class LlamaCppVanilla(...)` →
 #   `class MyScheduler(BaseScheduler)`.
 ```
 Point an input YAML at it:
@@ -588,8 +588,8 @@ or change `result_path` in the YAML between runs.
 
 ## 8. A/B against a known-good scheduler
 
-The two reference implementations are `Vanilla` (no offload) and
-`FlexInfer` (memory-saving). Switch input YAMLs mid-session:
+The two reference implementations are `LlamaCppVanilla` (no offload) and
+`LlamaCppFlexInfer` (memory-saving). Switch input YAMLs mid-session:
 ```
 restart_simulation(input_path="examples/run/llamacpp_llama-3-8B_vanilla.yaml")
 ```

@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# FlexInfer memory sweep. Follows the AGENTS.md output convention:
+# LlamaCppFlexInfer memory sweep. Follows the AGENTS.md output convention:
 #   output/<experiment-setup>/sim_results/<run-id>.json
 #
 # For Python-driven sweeps with summary.csv + analysis tree, prefer:
@@ -24,7 +24,7 @@ for ((mb=START_MB; mb<=END_MB; mb+=STEP_MB)); do
   kb=$((mb * 1024))
   result="${RESULTS_DIR}/${mb}MB.json"
 
-  echo "Running FlexInfer with Memory: ${mb} MB → ${result}"
+  echo "Running LlamaCppFlexInfer with Memory: ${mb} MB → ${result}"
   python3 main.py \
     -i "$INPUT_CFG" \
     logger.args.result_path="${result}" \

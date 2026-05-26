@@ -77,7 +77,7 @@ async def main() -> int:
     env = {**os.environ, "CG_SIM_BREAKPOINTS": "BREAK_BEFORE_COMPILE_STAGE"}
     # Launch with an initial Hydra override on the CLI — Test #1 verifies
     # this flows through to the first construction. Picked
-    # prefetch_window=11 (distinct from YAML's 5 and FlexInfer's hardcoded
+    # prefetch_window=11 (distinct from YAML's 5 and LlamaCppFlexInfer's hardcoded
     # default 3) so a stale value can't accidentally match.
     server = StdioServerParameters(
         command=sys.executable,
@@ -216,8 +216,8 @@ async def main() -> int:
             sched_type = (_unwrap(await session.call_tool("execute", {
                 "code": "print(type(engine.sched).__name__)"
             })))["output"].strip()
-            _check(sched_type == "Vanilla",
-                   f"scheduler is Vanilla after input_path swap (got {sched_type!r})")
+            _check(sched_type == "LlamaCppVanilla",
+                   f"scheduler is LlamaCppVanilla after input_path swap (got {sched_type!r})")
             num_total_pages = await _exec_int(session, "hw['ram'].space.num_total_pages")
             _check(num_total_pages * 4 == target_kb_3,
                    f"memory override applies under new YAML (got {num_total_pages * 4})")

@@ -4,8 +4,8 @@
 Each scheduler is described by a JSON file listing overrides — e.g.
 
     [
-      {"label": "vanilla",   "overrides": ["scheduler.type=Vanilla"]},
-      {"label": "flexinfer", "overrides": ["scheduler.type=FlexInfer",
+      {"label": "vanilla",   "overrides": ["scheduler.type=LlamaCppVanilla"]},
+      {"label": "flexinfer", "overrides": ["scheduler.type=LlamaCppFlexInfer",
                                             "scheduler.args.prefetch_window=5"]}
     ]
 

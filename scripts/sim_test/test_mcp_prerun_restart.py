@@ -12,10 +12,10 @@ The test starts main_agent.py with the default flexinfer YAML, then as
 its very first MCP tool call issues `restart_simulation` pointing at the
 vanilla YAML. After fix:
   - response carries `input_path=<vanilla.yaml>`.
-  - the active simulator is a fresh Vanilla one (probed via
+  - the active simulator is a fresh LlamaCppVanilla one (probed via
     `type(engine.sched).__name__`).
 
-Before fix: the active simulator is still the initial FlexInfer one.
+Before fix: the active simulator is still the initial LlamaCppFlexInfer one.
 
 Run from repo root:  python scripts/sim_test/test_mcp_prerun_restart.py
 """
@@ -59,8 +59,8 @@ def _check(condition: bool, label: str, detail: str = "") -> None:
 
 
 async def main() -> int:
-    # Default startup input is FlexInfer. The agent immediately requests
-    # a switch to Vanilla via restart_simulation, before any other call.
+    # Default startup input is LlamaCppFlexInfer. The agent immediately requests
+    # a switch to LlamaCppVanilla via restart_simulation, before any other call.
     env = {**os.environ}
     env.pop("CG_SIM_BREAKPOINTS", None)  # Don't pre-enable anything;
                                           # we'll toggle explicitly.
@@ -97,16 +97,16 @@ async def main() -> int:
                    "start_simulation parks at break_before_compile_stage",
                    f"bp={r.get('breakpoint')}")
 
-            # The strongest probe: is the bound scheduler Vanilla
-            # (matches ALT) or FlexInfer (the default — bug case)?
+            # The strongest probe: is the bound scheduler LlamaCppVanilla
+            # (matches ALT) or LlamaCppFlexInfer (the default — bug case)?
             r = _unwrap(await session.call_tool(
                 "execute", {"code": "print(type(engine.sched).__name__)"}))
             sched_class = r.get("output", "").strip()
             _check(
-                sched_class == "Vanilla",
-                "bound scheduler matches the ALT YAML's `Vanilla`",
+                sched_class == "LlamaCppVanilla",
+                "bound scheduler matches the ALT YAML's `LlamaCppVanilla`",
                 f"got type(engine.sched).__name__={sched_class!r} "
-                f"(expected 'Vanilla'; 'FlexInfer' means the pre-first-run "
+                f"(expected 'LlamaCppVanilla'; 'LlamaCppFlexInfer' means the pre-first-run "
                 f"restart was silently ignored)",
             )
 

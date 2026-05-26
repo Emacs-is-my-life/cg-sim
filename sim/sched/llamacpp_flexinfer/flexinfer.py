@@ -31,7 +31,7 @@ class FlexInferStatus(Enum):
     MEMORY_ABSENT = auto()
 
 
-class FlexInfer(BaseScheduler):
+class LlamaCppFlexInfer(BaseScheduler):
     """
     Implementation of, FlexInfer: Breaking Memory Constraint via Flexible and Efficient Offloading for On-Device LLM Inference
     Published in EuroMLSys '25
@@ -43,7 +43,7 @@ class FlexInfer(BaseScheduler):
         if "prefetch_window" in args:
             self.prefetch_window = int(args["prefetch_window"])
             if self.prefetch_window < 1:
-                raise Exception(f"[FlexInfer] Prefetch window cannot be: {self.prefetch_window}")
+                raise Exception(f"[LlamaCppFlexInfer] Prefetch window cannot be: {self.prefetch_window}")
 
         """
         Assumption: Expect one of each hardware:
@@ -100,7 +100,7 @@ class FlexInfer(BaseScheduler):
         minimum_size = others_size_num_pages + reserve_pessimistic
 
         if memory_size < minimum_size:
-            print("[FlexInfer] Failed due to memory shortage.")
+            print("[LlamaCppFlexInfer] Failed due to memory shortage.")
             args = {
                 "from": self.name,
                 "msg": f"Memory size is too small to run FlexInfer policy. {4 * minimum_size} KB required, have {4 * memory_size} KB."
@@ -110,16 +110,16 @@ class FlexInfer(BaseScheduler):
         args = {"from": self.name, "msg": ""}
         if memory_size >= cost_sufficient:
             self.mode = FlexInferMode.MEMORY_SUFFICIENT
-            args["msg"] = "FlexInfer Scheduler operating in MEMORY_SUFFICIENT mode."
+            args["msg"] = "LlamaCppFlexInfer Scheduler operating in MEMORY_SUFFICIENT mode."
         elif memory_size >= cost_intermediate_2:
             self.mode = FlexInferMode.MEMORY_INTERMEDIATE_2
-            args["msg"] = "FlexInfer Scheduler operating in MEMORY_INTERMEDIATE_2 mode."
+            args["msg"] = "LlamaCppFlexInfer Scheduler operating in MEMORY_INTERMEDIATE_2 mode."
         elif memory_size >= cost_intermediate_1:
             self.mode = FlexInferMode.MEMORY_INTERMEDIATE_1
-            args["msg"] = "FlexInfer Scheduler operating in MEMORY_INTERMEDIATE_1 mode."
+            args["msg"] = "LlamaCppFlexInfer Scheduler operating in MEMORY_INTERMEDIATE_1 mode."
         else:
             self.mode = FlexInferMode.MEMROY_LIMITED
-            args["msg"] = "FlexInfer Scheduler operating in MEMORY_LIMITED mode."
+            args["msg"] = "LlamaCppFlexInfer Scheduler operating in MEMORY_LIMITED mode."
 
         self.log.record(Log.engine(self.id, "SCHEDULER_MESSAGE", 0, args))
 

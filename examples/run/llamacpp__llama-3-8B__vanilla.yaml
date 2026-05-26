@@ -62,6 +62,6 @@ hardware:
 
 # Scheduler configuration
 scheduler:
-  type: "Vanilla"
+  type: "LlamaCppVanilla"
   args:
     foo: "bar"

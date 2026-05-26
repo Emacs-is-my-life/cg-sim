@@ -43,9 +43,8 @@ $ python main.py -i examples/run/llamacpp_llama-3-8B_flexinfer.yaml +debug=on # 
 ```
 
 Currently shipped configs under `examples/run/`:
-- `llamacpp_llama-3-8B_example-cpu.yaml` — llama.cpp CPU trace, `ExampleCPU` scheduler
-- `llamacpp_llama-3-8B_vanilla.yaml` — llama.cpp CPU trace, `Vanilla` scheduler
-- `llamacpp_llama-3-8B_flexinfer.yaml` — llama.cpp CPU trace, `FlexInfer` scheduler
+- `llamacpp_llama-3-8B_vanilla.yaml` — llama.cpp CPU trace, `LlamaCppVanilla` scheduler
+- `llamacpp_llama-3-8B_flexinfer.yaml` — llama.cpp CPU trace, `LlamaCppFlexInfer` scheduler
 - `pytorch_eager_llama-3-8B_vanilla.yaml` — PyTorch eager GPU trace (Llama-3 8B), `DeviceAwareVanillaAsync`
 - `pytorch_eager_sdxl-turbo_vanilla.yaml` — PyTorch eager GPU trace (SDXL-turbo), `DeviceAwareVanillaAsync`
 - `pytorch_lazy_llama-3-8B_vanilla.yaml` — PyTorch lazy (Inductor) GPU trace (Llama-3 8B), `DeviceAwareVanillaAsync`
@@ -133,7 +132,7 @@ server command at `python main_agent.py` in this repo.
 Once registered, describe what you want in plain English; the agent
 picks the right MCP tool calls. Example prompts:
 
-- *"Sweep the FlexInfer scheduler on the llama-3 8B (llama.cpp)
+- *"Sweep the LlamaCppFlexInfer scheduler on the llama-3 8B (llama.cpp)
   trace across 4 GB, 6 GB, 8 GB VRAM. Report peak memory and
   exposed-transfer stall per run."*
 - *"At `break_after_compile_stage`, find node `Qcur-16` and break
@@ -142,7 +141,7 @@ picks the right MCP tool calls. Example prompts:
 - *"My new scheduler in `sim/sched/myscheduler/` aborts at runtime
   with 'Deadlock detected' — walk the abort stack and tell me
   which dependency is unmet."*
-- *"A/B `Vanilla` against `FlexInfer` on the llama-3 8B (llama.cpp)
+- *"A/B `LlamaCppVanilla` against `LlamaCppFlexInfer` on the llama-3 8B (llama.cpp)
   trace with the same hardware config. Summarize the wall-time
   speedup and where it comes from."*
 
@@ -323,8 +322,9 @@ Implement your own hardware model in `sim/hw/<hardware-type>/<hardware-name>/`.
 ## Scheduler
 - `sim/sched/`: Base directory for scheduler, orchestrating hardwares for trace execution
   - `sim/sched/common/`: Common component and logic for schedulers
-  - `sim/sched/vanilla/`: No-offload policy, which keeps all tensors in memory, gives up if its impossible.
-  - `sim/sched/flexinfer/`: Scheduler implementing FlexInfer(https://dl.acm.org/doi/10.1145/3721146.3721961) policy for memory saving
+  - `sim/sched/llamacpp_vanilla/`: No-offload policy, which keeps all tensors in memory, gives up if its impossible.
+  - `sim/sched/llamacpp_flexinfer/`: Scheduler implementing FlexInfer(https://dl.acm.org/doi/10.1145/3721146.3721961) policy for memory saving
+  - `sim/sched/stub/`: No-op scheduler — spins up a simulation for inspection but aborts at runtime.
   - And more to come...
   
 Implement your own scheduler logic in `sim/sched/<scheduler-name>/`.

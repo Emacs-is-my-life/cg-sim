@@ -14,9 +14,9 @@ if TYPE_CHECKING:
     from sim.core.system import System
 
 
-class Vanilla(BaseScheduler):
+class LlamaCppVanilla(BaseScheduler):
     """
-    Vanilla scheduler
+    LlamaCppVanilla scheduler
     Only runs when memory is adequate
     """
 
@@ -45,7 +45,7 @@ class Vanilla(BaseScheduler):
         return
 
     def compile(self, trace: Trace) -> None:
-        """Vanilla Scheduler won't do compilation."""
+        """LlamaCppVanilla Scheduler won't do compilation."""
         return
 
     def layout(self, init_storage: BaseStorage) -> bool:

@@ -48,7 +48,7 @@ def _check(condition: bool, label: str) -> None:
 
 # Monkey-patches TransferJob.is_runnable to always return False — this
 # triggers the LAYOUT-phase deadlock check (layout's only abort site for
-# the FlexInfer example), which routes through Engine._log_abort and
+# the LlamaCppFlexInfer example), which routes through Engine._log_abort and
 # fires break_on_abort.
 _FORCE_DEADLOCK = (
     "from sim.core.job.transfer_job import TransferJob;"
