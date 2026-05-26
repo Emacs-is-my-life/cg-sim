@@ -89,6 +89,15 @@ class HFAccelerateKnobs:
         the real HF accelerate profile shows 2657
         ``cudaStreamSynchronize`` per 2405 ``cudaMemcpyAsync`` —
         effectively synchronous H2D from the host's perspective.
+    h2d_after_prev_gpu : bool
+        When True with ``lookahead=0`` and ``sync_calls=True``, issue
+        each H2D only after the immediately previous GPU node retires.
+        This approximates default-stream ``Tensor.to(device)`` behavior:
+        the Python hook is reached before the next kernel launch, but
+        the copy itself cannot complete ahead of older default-stream
+        GPU work. Without this, cg-sim's separate transfer lane can
+        load many future Llama layers while earlier kernels are still
+        running, inflating VRAM.
     emit_d2h_evict : bool
         When True, emits a ``d2h_xfer_arrivals`` entry for each streamed
         tid_run that fires a VRAM→RAM ``TransferJob`` after the
@@ -109,6 +118,7 @@ class HFAccelerateKnobs:
     keep_substrings: tuple[str, ...] = field(default_factory=tuple)
     include_buffers: bool = False
     sync_calls: bool = True
+    h2d_after_prev_gpu: bool = False
     emit_d2h_evict: bool = False
     # Optional path to a `module_hierarchy.json` describing the model's
     # nn.Module tree with class names. When `--mode group` (block_level
@@ -141,88 +151,80 @@ def _is_gpu_node(node: Any) -> bool:
     return rk in _GPU_ROLES
 
 
-def _build_cpu_by_corr_id(trace: Trace) -> dict[int, int]:
-    """Index CPU dispatch nodes by their kineto ``correlation_id``.
+def _build_prev_gpu_node(trace: Trace) -> dict[int, int]:
+    """Map each GPU node id to the preceding GPU node in temporal order."""
+    gpu_nodes: list[tuple[int, int]] = []
+    for nid, node in trace.node_map.items():
+        if not _is_gpu_node(node):
+            continue
+        a = node.args or {}
+        start_ns = int(a.get("start_ns") or 0)
+        gpu_nodes.append((start_ns, int(nid)))
+    gpu_nodes.sort()
+    out: dict[int, int] = {}
+    prev: int | None = None
+    for _start_ns, nid in gpu_nodes:
+        if prev is not None:
+            out[nid] = prev
+        prev = nid
+    return out
 
-    Used to bridge gpu_stream nodes back to the CPU dispatcher that
-    submitted them. The bundle's gpu_stream nodes carry no
-    ``module_path`` of their own, and the loader's
-    ``_add_temporal_data_control_edges`` no longer wires CPU→GPU as a
-    parent_nodes edge (it expresses tensor flow, and many GPU kernels
-    don't consume a tensor produced by the CPU op that launches them).
-    Pairing on ``correlation_id`` is the kineto-provided link that
-    actually identifies "this CPU op submitted this GPU kernel."
 
-    Multiple CPU nodes can share one correlation_id (typically the
-    leaf-most aten dispatch *and* its enclosing cudaLaunchKernel /
-    cudaMemcpyAsync). We prefer the one with ``runtime_role=="submit"``
-    (the actual cuda runtime call) since that's what cg-sim treats as
-    the "dispatcher" elsewhere — and its retire moment is the natural
-    issuer for sync prefetches.
+def _build_gpu_to_cpu_id(trace: Trace) -> dict[int, int]:
+    """Index GPU stream nodes → their submitting CPU dispatcher.
+
+    Uses the loader's ``trace.args["start_gated_edges"]`` (built from
+    kineto's `submit` edges in ``runtime_edges.csv``) — these are the
+    exact kineto-supplied CPU→GPU submit pairings (cudaLaunchKernel /
+    cudaMemcpyAsync to its kernel). The bundle's manifest reports
+    ``submit_edge_provenance = "ac2g_endpoint_exact"`` with one edge
+    per GPU kernel, so this index is 1:1 and unambiguous (unlike
+    ``correlation_id`` which can be shared by aten leaves and their
+    enclosing runtime call, leading to wrong-path matches).
+
+    Keyed by gpu_node_id for direct lookup; the value is the CPU
+    dispatcher's node_id. Callers reach the dispatcher's
+    ``module_path`` (or walk its CPU parent chain) for module
+    attribution.
     """
     out: dict[int, int] = {}
-    out_is_submit: dict[int, bool] = {}
-    for nid, n in trace.node_map.items():
-        a = n.args or {}
-        rk = a.get("resource_kind")
-        if rk not in ("cpu_thread", "cpu_leaf"):
-            continue
-        cid = a.get("correlation_id")
-        if cid is None:
-            continue
-        try:
-            cid_int = int(cid)
-        except (TypeError, ValueError):
-            continue
-        is_submit = str(a.get("runtime_role") or "") == "submit"
-        prior_is_submit = out_is_submit.get(cid_int, False)
-        if cid_int not in out:
-            out[cid_int] = int(nid)
-            out_is_submit[cid_int] = is_submit
-        elif is_submit and not prior_is_submit:
-            out[cid_int] = int(nid)
-            out_is_submit[cid_int] = True
+    sge = trace.args.get("start_gated_edges") or []
+    for parent_id, child_id in sge:
+        out[int(child_id)] = int(parent_id)
     return out
 
 
 def _node_module_path(
     trace: Trace,
     node: Any,
-    cpu_by_corr: dict[int, int] | None = None,
+    gpu_to_cpu: dict[int, int] | None = None,
 ) -> str:
     """Return the module_path annotation for a node.
 
     GPU stream nodes carry no ``module_path`` of their own — the
-    attribution lives on the CPU dispatcher (cudaLaunchKernel / aten
-    dispatch) that submitted the kernel. After the loader fix that
-    excludes alias/in-place nodes from temporal data-control edges,
-    ``parent_nodes`` of a gpu_stream node points at preceding
+    attribution lives on the CPU dispatcher (cudaLaunchKernel /
+    cudaMemcpyAsync) that submitted the kernel. After the loader
+    fix that excludes alias/in-place nodes from temporal data-control
+    edges, ``parent_nodes`` of a gpu_stream node points at preceding
     gpu_stream nodes, not the CPU dispatcher — so we look up the
-    matching CPU node via kineto's ``correlation_id`` index and read
-    its own ``module_path`` (walking that CPU's parents if needed
-    when the dispatcher itself sits below a tagged forward).
+    submitting CPU via the loader's exact kineto submit-edge map
+    (``trace.args["start_gated_edges"]`` → built into ``gpu_to_cpu``)
+    and read its own ``module_path``. If the dispatcher itself has no
+    tag (cudaLaunchKernel without a deeper forward context), walk its
+    cpu parent chain until we find one.
     """
     own_mp = (node.args.get("module") or {}).get("module_path") if node.args else None
     if own_mp:
         return str(own_mp)
-    # Bridge gpu_stream → cpu via correlation_id.
     a = node.args or {}
-    if a.get("resource_kind") == "gpu_stream" and cpu_by_corr:
-        cid = a.get("correlation_id")
-        try:
-            cid_int = int(cid) if cid is not None else None
-        except (TypeError, ValueError):
-            cid_int = None
-        if cid_int is not None and cid_int in cpu_by_corr:
-            cpu_id = cpu_by_corr[cid_int]
+    if a.get("resource_kind") == "gpu_stream" and gpu_to_cpu:
+        cpu_id = gpu_to_cpu.get(int(node.id))
+        if cpu_id is not None:
             cpu = trace.node_map.get(cpu_id)
             if cpu is not None:
                 cpu_mp = (cpu.args.get("module") or {}).get("module_path") if cpu.args else None
                 if cpu_mp:
                     return str(cpu_mp)
-                # Walk the dispatcher's parents until we find a tagged
-                # forward (cudaLaunchKernel itself often carries no
-                # module_path; its aten parent does).
                 cur = cpu
                 hops = 0
                 while cur is not None and hops < 12:
@@ -577,7 +579,7 @@ def _build_unit_states(
     unit_set: set[str],
     granularity: str,
     block_info: BlockInfo | None = None,
-    cpu_by_corr: dict[int, int] | None = None,
+    gpu_to_cpu: dict[int, int] | None = None,
 ) -> tuple[dict[str, _UnitState], dict[int, str], dict[int, list[int]], int]:
     """Walk the trace once, returning per-unit state, weight→unit,
     weight→consumer-node list, and a count of ambiguous weight tensors.
@@ -591,7 +593,7 @@ def _build_unit_states(
         # In bundles where gpu_stream nodes lack module_path, fall
         # back to the parent cpu_thread / cpu_leaf dispatcher's
         # annotation (cudaLaunchKernel or the dispatching aten op).
-        mp = _node_module_path(trace, node, cpu_by_corr)
+        mp = _node_module_path(trace, node, gpu_to_cpu)
         s_ns = int(a.get("start_ns") or 0)
         e_ns = int(a.get("end_ns") or s_ns)
         for tid in node.input_tensors or []:
@@ -702,7 +704,7 @@ def _tid_runs_by_module_burst(
     weight_to_unit: dict[int, str],
     granularity: str,
     block_info: BlockInfo | None = None,
-    cpu_by_corr: dict[int, int] | None = None,
+    gpu_to_cpu: dict[int, int] | None = None,
 ) -> list[_TidRun]:
     """Build tid_runs from CPU module-context transitions, NOT a gap
     heuristic.
@@ -747,21 +749,15 @@ def _tid_runs_by_module_burst(
     # CPU dispatcher (cudaLaunchKernel); the post-alias-fix loader
     # wires them only to preceding gpu_stream nodes. Prefer the
     # correlation_id pairing (kineto-supplied, version-invariant) when
-    # a `cpu_by_corr` index is provided; fall back to walking
+    # a `gpu_to_cpu` index is provided; fall back to walking
     # parent_nodes for the legacy layout.
     cpu_to_gpu: dict[int, list[int]] = defaultdict(list)
     for nid, node in trace.node_map.items():
         if not _is_gpu_node(node):
             continue
         cpu_id: int | None = None
-        if cpu_by_corr is not None:
-            cid = (node.args or {}).get("correlation_id")
-            try:
-                cid_int = int(cid) if cid is not None else None
-            except (TypeError, ValueError):
-                cid_int = None
-            if cid_int is not None:
-                cpu_id = cpu_by_corr.get(cid_int)
+        if gpu_to_cpu is not None:
+            cpu_id = gpu_to_cpu.get(int(nid))
         if cpu_id is not None:
             cpu_to_gpu[cpu_id].append(int(nid))
         else:
@@ -873,30 +869,25 @@ def _tid_runs_by_module_burst(
 def _find_cpu_dispatcher(
     trace: Trace,
     gpu_node_id: int,
-    cpu_by_corr: dict[int, int] | None = None,
+    gpu_to_cpu: dict[int, int] | None = None,
 ) -> int | None:
     """Find a CPU dispatcher (cuLaunchKernel) that submits a GPU node.
 
     Used as a synchronous-prefetch issuer when no prior GPU window
     exists: the dispatcher retires almost immediately (CPU launch is
     brief), the prefetch then fires, and the GPU consumer waits on
-    the transfer's arrival. Prefer the kineto ``correlation_id`` index
-    over ``parent_nodes`` because the post-alias-fix loader no longer
-    wires gpu_stream nodes back to their CPU dispatcher via parents.
+    the transfer's arrival. Prefer the loader's exact submit-edge
+    map (``start_gated_edges``) over ``parent_nodes`` because the
+    post-alias-fix loader no longer wires gpu_stream nodes back to
+    their CPU dispatcher via parents.
     """
     node = trace.node_map.get(int(gpu_node_id))
     if node is None:
         return None
-    if cpu_by_corr is not None:
-        cid = (node.args or {}).get("correlation_id")
-        try:
-            cid_int = int(cid) if cid is not None else None
-        except (TypeError, ValueError):
-            cid_int = None
-        if cid_int is not None:
-            mapped = cpu_by_corr.get(cid_int)
-            if mapped is not None:
-                return int(mapped)
+    if gpu_to_cpu is not None:
+        mapped = gpu_to_cpu.get(int(gpu_node_id))
+        if mapped is not None:
+            return int(mapped)
     for parent_id in node.parent_nodes or []:
         parent = trace.node_map.get(int(parent_id))
         if parent is None:
@@ -962,14 +953,19 @@ def solve(trace: Trace, knobs: HFAccelerateKnobs) -> dict[str, Any]:
 
     # Index CPU dispatchers by kineto correlation_id so gpu_stream
     # nodes can find their submitting CPU op (and its module_path).
-    cpu_by_corr = _build_cpu_by_corr_id(trace)
+    gpu_to_cpu = _build_gpu_to_cpu_id(trace)
+    prev_gpu_by_node = (
+        _build_prev_gpu_node(trace)
+        if knobs.h2d_after_prev_gpu and knobs.sync_calls
+        else {}
+    )
 
     (
         unit_states, weight_to_unit, weight_consumer_nodes,
         ambiguous, shared_tids,
     ) = _build_unit_states(
         trace, unit_set, knobs.granularity, block_info=block_info,
-        cpu_by_corr=cpu_by_corr,
+        gpu_to_cpu=gpu_to_cpu,
     )
 
     # Require `with_modules=True` capture. Real HF Accelerate's
@@ -994,7 +990,7 @@ def solve(trace: Trace, knobs: HFAccelerateKnobs) -> dict[str, Any]:
         )
     tid_runs = _tid_runs_by_module_burst(
         trace, weight_to_unit, knobs.granularity, block_info,
-        cpu_by_corr=cpu_by_corr,
+        gpu_to_cpu=gpu_to_cpu,
     )
     if not tid_runs:
         raise RuntimeError(
@@ -1080,12 +1076,20 @@ def solve(trace: Trace, knobs: HFAccelerateKnobs) -> dict[str, Any]:
             # Synchronous: prefetch fires when the consumer's CPU
             # dispatcher retires (i.e. just before the consumer needs
             # to run). Full H2D cost lands on the critical path.
-            disp = _find_cpu_dispatcher(trace, r.first_node, cpu_by_corr)
-            issuer_node_id = disp if disp is not None else r.first_node
+            if knobs.h2d_after_prev_gpu and knobs.sync_calls:
+                prev_gpu = prev_gpu_by_node.get(int(r.first_node))
+                if prev_gpu is not None:
+                    issuer_node_id = prev_gpu
+                else:
+                    disp = _find_cpu_dispatcher(trace, r.first_node, gpu_to_cpu)
+                    issuer_node_id = disp if disp is not None else r.first_node
+            else:
+                disp = _find_cpu_dispatcher(trace, r.first_node, gpu_to_cpu)
+                issuer_node_id = disp if disp is not None else r.first_node
         else:
             pos = bisect_left(end_times, r.first_start_ns)
             if pos == 0:
-                disp = _find_cpu_dispatcher(trace, r.first_node, cpu_by_corr)
+                disp = _find_cpu_dispatcher(trace, r.first_node, gpu_to_cpu)
                 issuer_node_id = disp if disp is not None else r.first_node
             else:
                 target = max(0, pos - lookahead)
@@ -1108,7 +1112,7 @@ def solve(trace: Trace, knobs: HFAccelerateKnobs) -> dict[str, Any]:
                 # prefetch still fires early in module M-1's window.
                 gpu_issuer = issuer_run.last_node
                 if knobs.sync_calls:
-                    disp_issuer = _find_cpu_dispatcher(trace, gpu_issuer, cpu_by_corr)
+                    disp_issuer = _find_cpu_dispatcher(trace, gpu_issuer, gpu_to_cpu)
                     issuer_node_id = (
                         disp_issuer if disp_issuer is not None else gpu_issuer
                     )
@@ -1116,7 +1120,7 @@ def solve(trace: Trace, knobs: HFAccelerateKnobs) -> dict[str, Any]:
                     issuer_node_id = gpu_issuer
                 if issuer_run.last_end_ns >= r.first_start_ns:
                     n_ordering_violations += 1
-                    disp = _find_cpu_dispatcher(trace, r.first_node, cpu_by_corr)
+                    disp = _find_cpu_dispatcher(trace, r.first_node, gpu_to_cpu)
                     issuer_node_id = disp if disp is not None else r.first_node
 
         # consumer_node_id selects whose ready-to-fire moment the
@@ -1127,7 +1131,7 @@ def solve(trace: Trace, knobs: HFAccelerateKnobs) -> dict[str, Any]:
         # cudaStreamSynchronize. Fallback: the GPU consumer itself
         # (sync_calls=False, or when no cpu dispatcher is found).
         if knobs.sync_calls:
-            disp_consumer = _find_cpu_dispatcher(trace, r.first_node, cpu_by_corr)
+            disp_consumer = _find_cpu_dispatcher(trace, r.first_node, gpu_to_cpu)
             consumer_node_id = (
                 disp_consumer if disp_consumer is not None else r.first_node
             )
@@ -1242,6 +1246,7 @@ def solve(trace: Trace, knobs: HFAccelerateKnobs) -> dict[str, Any]:
             "keep_substrings": list(knobs.keep_substrings),
             "include_buffers": bool(knobs.include_buffers),
             "sync_calls": bool(knobs.sync_calls),
+            "h2d_after_prev_gpu": bool(knobs.h2d_after_prev_gpu),
             "emit_d2h_evict": bool(knobs.emit_d2h_evict),
             "omit_last_unit_d2h": bool(knobs.omit_last_unit_d2h),
             "last_unit_resident": last_unit_name,

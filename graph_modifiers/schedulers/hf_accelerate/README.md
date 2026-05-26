@@ -11,13 +11,19 @@ properties of the HF API the scheduler models, not user knobs.
 |---|---|---|---|---|---|
 | `sequential` | `pipe.enable_sequential_cpu_offload()` | leaf nn.Module | 0 (sync) | no (cpu copy preserved by AlignDevicesHook) | no |
 | `module` | `accelerate.cpu_offload(model)` | leaf nn.Module | 0 (sync) | no | no |
+| `llama_module` | llama harness `cpu_offload` on top-level Llama children | leaf nn.Module | 0 (default-stream sync) | no | no |
 | `model` | `pipe.enable_model_cpu_offload()` | top-level component | 1 (prev_module_hook) | yes (per-param `module.to("cpu")`) | no (`maybe_free_model_hooks` D2Hs last too) |
 | `module_hook` | chained `accelerate.cpu_offload_with_hook(..., prev_module_hook=)` | top-level component | 1 (prev_module_hook) | yes | yes (no successor hook for last component) |
 | `group` | `diffusers.apply_group_offloading(block_level, use_stream=True, non_blocking=True)` | ModuleList/Sequential block | 1 (separate stream) | no (`use_stream=True` offload is a pointer swap) | no |
 
 `sequential` and `module` are functionally identical except for
 `offload_buffers` (sequential = True, module = False — accelerate's
-defaults).
+defaults). `llama_module` is separate because the llama sweep harness
+does not call a Diffusers pipeline helper: it applies
+`accelerate.cpu_offload` directly to the top-level children of
+`LlamaForCausalLM`, passes `offload_buffers=True`, and needs
+default-stream H2D serialization to avoid preloading future decoder
+layers while older kernels are still queued.
 
 ## Inputs
 
@@ -48,6 +54,11 @@ python3 -m graph_modifiers.schedulers.hf_accelerate.sequential \
 python3 -m graph_modifiers.schedulers.hf_accelerate.module \
   /path/to/eager/bundle/llama_bundle \
   --output /path/to/module_schedule.json
+
+# llama harness --offload-mode module
+python3 -m graph_modifiers.schedulers.hf_accelerate.llama_module \
+  /path/to/eager/bundle/llama_bundle \
+  --output /path/to/llama_module_schedule.json
 
 # enable_model_cpu_offload-equivalent (depth:1, D2H on offload)
 python3 -m graph_modifiers.schedulers.hf_accelerate.model \
@@ -91,13 +102,11 @@ because some harnesses use different HF APIs for the same `--mode`
 label:
 
 - SDXL / SD3 (diffusers pipelines): `--mode {sequential, module,
-  model, module-hook, group}` map 1:1 to the schedulers above.
-- llama (`run_llama_accelerate_cpu_offload.py`): `--mode {model,
-  module, sequential}` all call `accelerate.cpu_offload` underneath
-  (no `enable_model_cpu_offload` exists for plain HF text models), so
-  they all map to the `module` scheduler. `--mode module-hook`
-  uses the chained-`cpu_offload_with_hook` path; `--mode group` uses
-  `apply_group_offloading`.
+  model, module-hook, group}` map 1:1 to the generic schedulers above.
+- llama (`run_llama_accelerate_cpu_offload.py`): the current sweep only
+  profiles `--mode module`, and that maps to `llama_module`. Older
+  llama `model` / `sequential` harness labels were also custom direct
+  `cpu_offload` wrappers, not Diffusers `enable_*_cpu_offload` APIs.
 
 ## Applying the schedule to a sim
 
