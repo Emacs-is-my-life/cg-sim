@@ -261,6 +261,24 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         self._arrivals_by_issuer: dict[int, list[dict[str, Any]]] = defaultdict(list)
         # consumer_node_id -> set of cgsim_tids that must be LOADED before dispatch.
         self._gate_by_consumer: dict[int, set[int]] = defaultdict(set)
+        # tid -> set of consumer node_ids still **unsubmitted** for it.
+        # Initialised from `_gate_by_consumer`, decremented at
+        # consumer-submit time (`_drop_pending_consumer`). Eviction
+        # via ``_release_vram_only`` defers while non-empty so we
+        # don't strand an unsubmitted consumer on an absent tid.
+        self._pending_consumers_by_tid: dict[int, set[int]] = defaultdict(set)
+        # consumer_id -> set of tids already credited as gate-clear,
+        # independent of current xfer_state. Populated when an arrival
+        # fires while the tid is already LOADED (the load has been
+        # observed) and when an in-flight load this arrival was
+        # piggybacking on retires. A later eviction dropping state to
+        # ABSENT won't strand a pre-satisfied consumer.
+        self._pre_satisfied_gate: dict[int, set[int]] = defaultdict(set)
+        # tid -> list of (consumer_id, tid) pairs whose arrival fired
+        # while a load was already in flight (state LOADING) and so
+        # registered to inherit the load. When the corresponding
+        # TransferJob retires we move them into ``_pre_satisfied_gate``.
+        self._loading_awaiters: dict[int, list[int]] = defaultdict(list)
 
         # D2H (VRAM -> RAM) arrivals: issuer_node_id -> list of tid lists.
         # Populated by injectors that emit `d2h_xfer_arrivals` (e.g.
@@ -744,7 +762,15 @@ class DeviceAwareVanillaAsync(BaseScheduler):
             # region is already gone, and it retries the deferred case.
             if tid in self._python_released_tids:
                 self._python_released_tids.discard(tid)
-            self._release_tensor_regions(tid)
+            # Streamed weights / leaves (permanent type in evictable
+            # set) need their RAM mirror preserved across the entire
+            # run — every later run's prefetch sources from it. Only
+            # release VRAM here; ``_release_tensor_regions`` would
+            # drop RAM too, breaking subsequent reloads.
+            if ttype in self._PERMANENT_TYPES and tid in self._evictable_tensor_ids:
+                self._release_vram_only(tid)
+            else:
+                self._release_tensor_regions(tid)
 
     def _maybe_python_release(self, tid: int) -> None:
         """Last CPU consumer of `tid` just retired. If some GPU consumer
@@ -850,10 +876,28 @@ class DeviceAwareVanillaAsync(BaseScheduler):
             if self._xfer_state.get(tensor_id) in (_LOADED, _RESIDENT):
                 self._xfer_state[tensor_id] = _ABSENT
 
+    def _drop_pending_consumer(self, node: Node) -> None:
+        """Mark this node as submitted in the per-tid pending-consumer
+        index. Once a consumer is submitted, the gate has been
+        satisfied and a later state-change to ABSENT won't strand it
+        (compute_assertion is checked at submit, not throughout the
+        node's runtime). So the eviction path can release VRAM as
+        soon as no remaining consumer is *unsubmitted*.
+        """
+        for tid in node.input_tensors:
+            pending = self._pending_consumers_by_tid.get(tid)
+            if pending and node.id in pending:
+                pending.discard(node.id)
+                if not pending:
+                    del self._pending_consumers_by_tid[tid]
+
     def _release_vram_only(self, tensor_id: int) -> None:
         """Release only the VRAM region(s) for the tensor, preserving
         any RAM mirror. Used by the D2H eviction path so the next H2D
-        prefetch can still pull from RAM.
+        prefetch can still pull from RAM. Out-of-order arrival firing
+        is handled by ``_pre_satisfied_gate`` — consumers that saw the
+        tid LOADED at their arrival's fire moment are credited and
+        won't strand even when state later flips to ABSENT here.
         """
         deferred = False
         for region in list(self._vram.space.get_by_tensor_id(tensor_id)):
@@ -1058,6 +1102,7 @@ class DeviceAwareVanillaAsync(BaseScheduler):
                 if node.args.get("dispatcher_outputs"):
                     self._preclaim_dispatcher_outputs(node)
                 self.sys.compute(compute, node)
+                self._drop_pending_consumer(node)
                 self._diag_on_submit(node)
                 self._release_started_children(node)
                 committed_per_compute[compute] = committed_x + 1
@@ -1109,6 +1154,7 @@ class DeviceAwareVanillaAsync(BaseScheduler):
                         node.custom_deps.append(NodeDoneDep(parent_id))
 
             self.sys.compute(compute, node)
+            self._drop_pending_consumer(node)
             self._diag_on_submit(node)
             self._release_started_children(node)
             committed_per_compute[compute] = committed + 1
@@ -1283,6 +1329,8 @@ class DeviceAwareVanillaAsync(BaseScheduler):
                 "cgsim_tids": tids,
             })
             self._gate_by_consumer[consumer].update(tids)
+            for t in tids:
+                self._pending_consumers_by_tid[t].add(consumer)
 
         # D2H (VRAM -> RAM) arrivals: fire a VRAM->RAM TransferJob when
         # the issuer node retires. The issuer is the streamed tid's last
@@ -1316,6 +1364,14 @@ class DeviceAwareVanillaAsync(BaseScheduler):
                 for tid in tids:
                     if self._xfer_state.get(tid) == _LOADING:
                         self._xfer_state[tid] = _LOADED
+                    # Drain awaiters registered for this tid: they
+                    # piggybacked on this in-flight load and are now
+                    # credited as gate-clear regardless of later
+                    # evictions.
+                    awaiters = self._loading_awaiters.pop(tid, None)
+                    if awaiters:
+                        for cid in awaiters:
+                            self._pre_satisfied_gate[cid].add(tid)
                 continue
             # D2H retire: release ONLY the VRAM region for each tid so
             # peak accounting drops the moment the bytes finish moving
@@ -1338,10 +1394,30 @@ class DeviceAwareVanillaAsync(BaseScheduler):
             if not arrivals:
                 continue
             for a in arrivals:
+                consumer_id = int(a["consumer_node_id"])
+                tids = a["cgsim_tids"]
+                # Per-tid pre-satisfaction bookkeeping. The arrival's
+                # contract is "ensure this consumer has its tids
+                # loaded when it's ready to dispatch." Three cases:
+                #   - LOADED/RESIDENT: data already there — credit
+                #     consumer immediately so a later eviction won't
+                #     strand it.
+                #   - LOADING: a peer arrival is loading it. Register
+                #     this consumer to inherit the load when the
+                #     in-flight TransferJob retires.
+                #   - ABSENT: a fresh prefetch will be issued below.
+                #     Register so when that prefetch's TransferJob
+                #     retires this consumer is credited.
+                for tid in tids:
+                    st = self._xfer_state.get(tid, _ABSENT)
+                    if st in (_LOADED, _RESIDENT):
+                        self._pre_satisfied_gate[consumer_id].add(tid)
+                    else:
+                        self._loading_awaiters[tid].append(consumer_id)
                 if self._h2d_streams > 0:
-                    self._prefetch_queue.append(("h2d", a["cgsim_tids"]))
+                    self._prefetch_queue.append(("h2d", tids))
                 else:
-                    self._issue_prefetch(a["cgsim_tids"])
+                    self._issue_prefetch(tids)
 
     def _fire_d2h_for_retired(self, retired_jobs: list[BaseJob]) -> None:
         """Schedule VRAM->RAM transfers for any d2h_xfer_arrivals
@@ -1424,9 +1500,6 @@ class DeviceAwareVanillaAsync(BaseScheduler):
             src = src_regions[0]
             dst = self._claim_region(self._vram, tensor)
             if dst is None:
-                # VRAM full — don't change state; consumer will re-gate
-                # next tick. The submit loop may retire other nodes
-                # that free VRAM in the meantime.
                 continue
             batch.append((src, dst))
             self._xfer_state[tid] = _LOADING
@@ -1441,7 +1514,10 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         needed = self._gate_by_consumer.get(node_id)
         if not needed:
             return True
+        pre = self._pre_satisfied_gate.get(node_id) or ()
         for tid in needed:
+            if tid in pre:
+                continue
             st = self._xfer_state.get(tid, _ABSENT)
             if st not in (_RESIDENT, _LOADED):
                 return False
@@ -1457,10 +1533,19 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         #   claim them for prefetch destinations).
         self._handle_transfer_retires(retired_jobs)
         self._retire_completed_nodes(retired_jobs)
+        # Retry deferred releases BEFORE firing new prefetches. A
+        # pending VRAM-only eviction (from the prior run's
+        # evict_after_node, deferred because the region was being read
+        # at the moment of the trigger node's retire) needs to flip
+        # `xfer_state` back to ABSENT before the next run's prefetch
+        # arrival fires. Otherwise `_issue_prefetch` sees state LOADED,
+        # silently skips, returns False, and the popped arrival is
+        # lost — leaving the next consumer permanently parked on a
+        # gate that nothing will satisfy.
+        self._retry_pending_releases()
         self._fire_prefetches_for_retired(retired_jobs)
         self._fire_d2h_for_retired(retired_jobs)
         self._drain_prefetch_queue()
-        self._retry_pending_releases()
 
         # Iterate: retiring view-like ops in place unblocks children that
         # may themselves be ready to schedule (or be view-like). Keep going
@@ -1480,6 +1565,31 @@ class DeviceAwareVanillaAsync(BaseScheduler):
                     {"tid": t, "state": self._xfer_state.get(t, "?")}
                     for t in gate
                 ]
+                # Identify the prefetch arrival keyed to this consumer:
+                # which issuer was supposed to fire it, has that issuer
+                # already retired, and is the arrival still pending in
+                # the per-issuer index? Distinguishes "issuer never ran"
+                # (upstream blocker) from "issuer ran but prefetch was
+                # silently dropped" (the bug class to chase).
+                arrival_diag = []
+                for tid in gate:
+                    if self._xfer_state.get(tid) != _ABSENT:
+                        continue
+                    # Find any issuer whose pending arrivals include this tid.
+                    for issuer_id, arrs in self._arrivals_by_issuer.items():
+                        for a in arrs:
+                            if tid in a["cgsim_tids"]:
+                                issuer_node = self.sys.trace.node_map.get(issuer_id)
+                                issuer_status = (
+                                    str(issuer_node.status) if issuer_node else "?"
+                                )
+                                arrival_diag.append({
+                                    "tid": tid,
+                                    "issuer_id": issuer_id,
+                                    "issuer_status": issuer_status,
+                                    "consumer_id": a["consumer_node_id"],
+                                })
+                                break
                 self.sys.abort({
                     "from": self.name,
                     "error": "SCHEDULER_DEADLOCK",
@@ -1493,6 +1603,9 @@ class DeviceAwareVanillaAsync(BaseScheduler):
                         "args": blocked.args,
                     },
                     "xfer_gate": gate_status,
+                    "pending_arrivals": arrival_diag,
+                    "active_prefetch_jobs": self._active_prefetch_jobs,
+                    "prefetch_queue_len": len(self._prefetch_queue),
                 })
 
         return
