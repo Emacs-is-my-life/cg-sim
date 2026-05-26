@@ -9,6 +9,7 @@ trace:
     skip_zero_byte_tensors: true
     zero_wait_nodes: true
     add_temporal_data_control_edges: true
+    cpu_node_probe_effect_compensate: true
 hardware:
   compute:
     - name: "cpu"

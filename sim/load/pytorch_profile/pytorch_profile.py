@@ -961,10 +961,12 @@ class PytorchProfile(TraceLoader):
         return
 
     def _load_probe_effect_table(self, trace_dir: Path) -> dict[str, int]:
-        """Optional per-trace calibration of kineto-induced duration inflation.
+        """Per-trace calibration of kineto-induced duration inflation.
 
-        Looks for `probe_effect_table.csv` in the trace directory (sibling
-        of the bundle dir). CSV schema:
+        Only invoked when the sim-config arg
+        `cpu_node_probe_effect_compensate` is truthy. Looks for
+        `probe_effect_table.csv` in the trace directory (sibling of the
+        bundle dir). CSV schema:
             op_name,probe_effect_ns[,note]
 
         Missing file → returns empty dict (no correction applied).
@@ -986,9 +988,15 @@ class PytorchProfile(TraceLoader):
     def load(self) -> Trace:
         bundle_dir, manifest = self._bundle_paths()
 
-        # Per-op probe-effect calibration (optional). Lives one level up from
-        # the bundle (i.e. in the trace directory). Applied in `_node_from_row`.
-        self._probe_effect_ns: dict[str, int] = self._load_probe_effect_table(bundle_dir.parent)
+        # Per-op probe-effect calibration (opt-in via the
+        # `cpu_node_probe_effect_compensate` sim-config arg; default off).
+        # Table lives one level up from the bundle (i.e. in the trace
+        # directory). Applied in `_node_from_row`.
+        self._probe_effect_ns: dict[str, int] = (
+            self._load_probe_effect_table(bundle_dir.parent)
+            if bool(self.args.get("cpu_node_probe_effect_compensate", False))
+            else {}
+        )
         self._probe_clamp_count: int = 0
 
         # Accumulator for start-gated edges (kineto submit edges from
