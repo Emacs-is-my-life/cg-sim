@@ -1,11 +1,11 @@
 logger:
   args:
-    result_path: "output/pytorch-eager__sdxl-turbo__diffusers/sim_results/result.json"
+    result_path: "output/pytorch-lazy__sd3__vanilla/sim_results/result.json"
     log_level: 1
 trace:
   type: "PytorchProfile"
   args:
-    bundle_manifest: "../trace/pytorch-eager__sdxl-turbo__RTX4090/llama_bundle/manifest.json"
+    bundle_manifest: "../trace/pytorch-lazy__sd3__RTX4090/llama_bundle/manifest.json"
     skip_zero_byte_tensors: true
     zero_wait_nodes: true
     add_temporal_data_control_edges: true
@@ -62,11 +62,9 @@ hardware:
           - [512, 4500000]
           - [1024, 5000000]
 scheduler:
-  type: "DiffusersGroupOffload"
+  type: "DeviceAwareVanillaAsync"
   args:
     cpu_compute: "cpu"
     cuda_compute: "gpu0"
     cuda_device: "cuda:0"
-    offload_type: "block_level"
-    use_stream: true
-    num_blocks_per_group: 1
+    h2d_streams: 1

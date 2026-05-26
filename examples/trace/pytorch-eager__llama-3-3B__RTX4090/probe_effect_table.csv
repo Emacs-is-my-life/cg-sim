@@ -1,0 +1,7 @@
+op_name,probe_effect_ns,trace_median_ns,occurrences,microbench_probed_ns,note
+aten::view,4546,5871,4698,1325,"trace_median - microbench_probed_ns (RTX4090, kineto record_shapes=True)"
+aten::as_strided,5240,6763,14139,1523,"trace_median - microbench_probed_ns (RTX4090, kineto record_shapes=True)"
+aten::_unsafe_view,3190,5270,3810,2080,"trace_median - microbench_probed_ns (RTX4090, kineto record_shapes=True)"
+aten::empty,6351,9307,3392,2956,"trace_median - microbench_probed_ns (RTX4090, kineto record_shapes=True)"
+aten::empty_strided,10282,13245,2176,2963,"trace_median - microbench_probed_ns (RTX4090, kineto record_shapes=True)"
+aten::to,4691,5370,902,679,"trace_median - microbench_probed_ns (RTX4090, kineto record_shapes=True)"

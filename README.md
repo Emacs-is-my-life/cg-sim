@@ -263,6 +263,40 @@ directory.
 - `link_utilization.py <log.json> <memory_hw> [window_us] [--out [DIR]]`
   — bandwidth-side view: busy fraction, achieved aggregate rate,
   per-source breakdown for the offload link.
+
+## Calibrating PyTorch traces against profiler probe effect
+
+When a PyTorch trace is recorded with kineto attached, every
+`cpu_leaf` op's `duration_ns` is inflated by per-op observer overhead
+plus workload-context effects (cache pollution, allocator pressure,
+profiler buffer contention). Replaying such a trace inflates cg-sim
+e2e wall time, most severely in eager mode where most cpu_leafs sit
+on the simulator's critical path. The full thesis and evidence are in
+`docs/eager-lazy-probing-effect.md` and
+`docs/sim_real-run_comparison.md`.
+
+Two scripts under `scripts/tool/` produce the calibration data the
+loader uses to compensate:
+
+- `scripts/tool/kineto_probe_microbench.py` — **runs on the PyTorch
+  profiling host**, NOT the cg-sim simulation host. Measures per-call
+  wall time for the top cpu_leaf ops with profiler off vs on. Writes
+  `overhead_results.txt` next to itself. Copy that file back to the
+  cg-sim repo (same directory) if running on a different machine.
+
+- `scripts/tool/generate_probe_effect_tables.py` — **runs on the
+  cg-sim host**. Reads `overhead_results.txt` and each trace's
+  `runtime_nodes.csv`, computes
+  `probe_effect_ns = trace_median(duration_ns) − microbench_probed_ns`
+  per op_name, and writes `probe_effect_table.csv` to each trace
+  directory (sibling of `llama_bundle/`).
+
+When the `PytorchProfile` loader sees `probe_effect_table.csv` next
+to a bundle, it subtracts `probe_effect_ns` from each matching
+cpu_leaf's `duration_ns` at load time (clamped to ≥ 0). Missing file
+= no correction, fully backward-compatible. To re-calibrate after
+re-recording a trace or upgrading PyTorch/kineto, re-run the two
+scripts above.
 # Codebase Overview
 ## Simulator core
 - `sim/core/`: Base directory for simulator core

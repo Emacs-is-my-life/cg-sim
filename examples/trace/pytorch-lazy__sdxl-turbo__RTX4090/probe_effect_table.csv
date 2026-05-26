@@ -1,0 +1,7 @@
+op_name,probe_effect_ns,trace_median_ns,occurrences,microbench_probed_ns,note
+aten::view,4076,5400,248,1325,"trace_median - microbench_probed_ns (RTX4090, kineto record_shapes=True)"
+aten::as_strided,3998,5520,2954,1523,"trace_median - microbench_probed_ns (RTX4090, kineto record_shapes=True)"
+aten::_unsafe_view,0,0,0,2080,op absent in this trace
+aten::empty,4818,7774,3388,2956,"trace_median - microbench_probed_ns (RTX4090, kineto record_shapes=True)"
+aten::empty_strided,7066,10029,584,2963,"trace_median - microbench_probed_ns (RTX4090, kineto record_shapes=True)"
+aten::to,4050,4729,62,679,"trace_median - microbench_probed_ns (RTX4090, kineto record_shapes=True)"
