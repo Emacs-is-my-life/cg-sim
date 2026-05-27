@@ -10,6 +10,7 @@ from sim.core.log import Log
 from sim.core.debug import Debugger
 from sim.core.engine import Engine
 from sim.core.trace.custom_dep import TensorAtHWDep
+from sim.hw.storage.common import BaseStorage
 
 
 def _cg_sim_metadata() -> dict:
@@ -140,14 +141,23 @@ class Simulator:
                 storage_hw = StorageClass(sim_id.get_id(), name, log, s_cfg["args"])
                 hw[storage_hw.name] = storage_hw
 
-            # Place initial tensors into the Storage device
-            if not hw:
+            # Place initial tensors into the Storage device.
+            # Explicitly find the first BaseStorage rather than relying on
+            # `hw` insertion order — Memory/Compute haven't been added yet
+            # so `next(iter(hw))` would happen to work today, but a future
+            # reorder of construction (or a hw-construction step that
+            # registers something into `hw` before this point) would
+            # silently misroute initial tensors.
+            init_storage = None
+            for hw_obj in hw.values():
+                if isinstance(hw_obj, BaseStorage):
+                    init_storage = hw_obj
+                    break
+            if init_storage is None:
                 raise Exception("[Engine] There is no storage device available!")
-            else:
-                # Place tensors in the very first storage device
-                init_storage = hw[next(iter(hw))]
-                trace_loader.placement(trace, init_storage)
-                init_storage.initial_placement = True
+
+            trace_loader.placement(trace, init_storage)
+            init_storage.initial_placement = True
 
             # Memory
             for m_cfg in cfg["hardware"]["memory"]:

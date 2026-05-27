@@ -18,22 +18,24 @@ def assertion(job: ComputeJob, sys: System) -> bool:
         if not hw.can_run(job):
             return False
 
-        if node.hw & NodeHW.CPU:
-            if isinstance(hw, BaseCPU):
-                continue
-        elif node.hw & NodeHW.GPU:
-            if isinstance(hw, BaseGPU):
-                continue
-        elif node.hw & NodeHW.NPU:
-            if isinstance(hw, BaseNPU):
-                continue
-        else:
-            args = {
-                "from": "Engine",
-                "msg": f"Job dispatched to a wrong hardware: {hw.name}."
-            }
-            sys.abort(args)
-            return False
+        # The type mask (`node.hw`) and the dispatched hw must BOTH match
+        # in a single branch. A previous `if/elif/elif/else` form had a
+        # fall-through hole: if `node.hw & NodeHW.CPU` was set but `hw`
+        # wasn't a `BaseCPU`, the chain exited without aborting, silently
+        # accepting a wrong-hw placement.
+        if (node.hw & NodeHW.CPU) and isinstance(hw, BaseCPU):
+            continue
+        if (node.hw & NodeHW.GPU) and isinstance(hw, BaseGPU):
+            continue
+        if (node.hw & NodeHW.NPU) and isinstance(hw, BaseNPU):
+            continue
+
+        args = {
+            "from": "Engine",
+            "msg": f"Job dispatched to a wrong hardware: {hw.name}."
+        }
+        sys.abort(args)
+        return False
 
     if node.custom_deps:
         # Compute Node with Custom Dependencies

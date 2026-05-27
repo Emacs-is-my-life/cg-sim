@@ -72,6 +72,8 @@ def assertion(job: TransferJob, sys: System) -> bool:
                     "job_type": "TransferJob",
                     "msg": f"0 pages data region is not allowed."
                 }
+                sys.abort(args)
+                return False
             continue
         elif src_region.num_pages > dest_region.num_pages:
             args = {

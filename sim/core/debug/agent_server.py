@@ -335,23 +335,40 @@ def _bound_or_error(session: "AgentSession") -> dict[str, Any] | None:
 # hot-reload. The LOAD_*_CLASS functions in `sim/core/init/` do live
 # `importlib.import_module` lookups against these, so after invalidation
 # the next call re-executes the package's `__init__.py` (which walks
-# subpackages via pkgutil) and the user-edited leaf files. Base classes
-# under `*.common.*` are *spared* — they must keep their identity
-# because framework code (e.g. `sim/core/engine/engine.py`) holds them
-# in `isinstance` checks and as superclasses.
+# subpackages via pkgutil) and the user-edited leaf files.
 _HOT_RELOAD_ROOTS = ("sim.sched", "sim.hw", "sim.load")
+
+# Framework base-class subtrees spared from hot reload. They must keep
+# their identity because framework code (e.g. `sim/core/engine/engine.py`)
+# holds them in `isinstance` checks and as superclasses.
+#
+# This is an explicit allowlist of *exact* package paths, not a substring
+# match on the segment `common`. A previous implementation
+# (`"common" not in module_name.split(".")`) accidentally spared any
+# user-edited module whose own directory was named `common` — e.g.
+# `sim.sched.<myimpl>.common.utils` — even though such a module is user
+# code, not a framework base class.
+_HOT_RELOAD_SPARED_PREFIXES = (
+    "sim.sched.common",
+    "sim.hw.compute.common",
+    "sim.hw.memory.common",
+    "sim.hw.storage.common",
+)
 
 
 def _is_reloadable(module_name: str) -> bool:
-    """True if `module_name` is in a user-editable subtree and not a base class."""
+    """True if `module_name` is in a user-editable subtree and not a framework base class."""
     in_root = any(
         module_name == r or module_name.startswith(r + ".")
         for r in _HOT_RELOAD_ROOTS
     )
     if not in_root:
         return False
-    # Spare base classes / ABCs so isinstance checks stay valid across reload.
-    return "common" not in module_name.split(".")
+    spared = any(
+        module_name == s or module_name.startswith(s + ".")
+        for s in _HOT_RELOAD_SPARED_PREFIXES
+    )
+    return not spared
 
 
 def _hot_reload_user_modules() -> list[str]:

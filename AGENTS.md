@@ -759,3 +759,896 @@ between experiments. `tmp/` is for scratch: throwaway MCP-driven
 runs, exploratory dumps, intermediate files you'll delete in the
 same session. Both are in `.gitignore`. When in doubt, put it in
 `output/` — disambiguating later is harder than overcleaning now.
+
+# Simulator internals reference
+
+The sections above cover the *operational* surface (MCP tools,
+breakpoints, output layout). The sections below cover the
+*internals* — what the engine actually does each tick, what
+contracts a Scheduler / Hardware model / TraceLoader is expected
+to honor, and the non-obvious behaviors that bite first-time
+contributors. Read these before writing a new Scheduler or Hardware
+class; the MCP debugging surface is great for *finding* bugs but
+will not tell you which invariants you've violated.
+
+## Module dependency layers
+
+Bottom-up, so that importing higher layers cannot create cycles:
+
+```
+log/, hw/common/data_region.py                 (no sim.* deps)
+  └─ sim_object.py, trace/, hw/common/base_hardware.py
+       └─ hw/memory/common/, hw/storage/common/
+            └─ job/{assertion,mutation,logging}/, hw/compute/common/
+                 └─ engine/, simple hardware (sim/hw/<type>/<impl>/)
+                      └─ system.py, debug/
+                           └─ sched/common/, sched/<impl>/, load/<impl>/
+                                └─ core/init/, simulator.py
+                                     └─ main.py, main_agent.py
+```
+
+Two patterns to note:
+- **Aggregator `__init__.py`s.** `sim/sched/__init__.py`,
+  `sim/hw/<type>/__init__.py`, and `sim/load/__init__.py` all do
+  `pkgutil.iter_modules(__path__)` + `import_module` to auto-discover
+  subpackages and re-export anything in `module.__all__`. **A new
+  scheduler / loader / hardware impl is picked up automatically
+  once it's importable and lists its class in its own `__all__`** —
+  no central registry to edit.
+- **Live-lookup loaders.** `sim/core/init/{compute,memory,storage,
+  trace,scheduler}.py` each define a single `LOAD_*_CLASS(name)`
+  that calls `importlib.import_module("sim.X")` then `getattr`.
+  Intentionally re-imports every call so `restart_simulation(reload=True)`
+  picks up source edits without restarting the agent process.
+
+## Discrete-event engine: how time moves
+
+cg-sim is **event-driven**, not tick-driven. The clock (`engine.timestamp_now`)
+**only advances** in two places, both inside `engine.py:_runtime_forward`:
+
+1. `self.time_elapsed = job.timestamp_ETA - self.timestamp_now`
+2. `self.timestamp_now = job.timestamp_ETA`
+
+Both jump straight to the next-earliest-ETA job's finish time. There
+is no `time += 1` loop; idle gaps where nothing happens are skipped
+without cost. `compile` and `layout` advance time by exactly 10 µs each
+at the end of their stage as a visual marker in the Chrome-trace log;
+they otherwise model zero wall time.
+
+The corollary: **the entire runtime loop is purely reactive**. Each
+iteration responds to one or more job retirements at the same instant.
+Schedulers never get a "time step" callback — they get a `runtime(retired_jobs)`
+callback after some jobs have just finished, with `retired_jobs`
+possibly empty (e.g. on the first tick when `job_running` is empty
+but `job_waiting` has entries that need to be drained first).
+
+## The three stages, in order
+
+`engine.run()` (`engine.py:89`) walks three stages and calls back
+into the Scheduler at each. After each stage the corresponding
+`BREAK_AFTER_*_STAGE` debugger flag, if set, fires.
+
+### Compile (`engine.py:149`)
+Just `sched.compile(trace)`. Free pass for the scheduler to mutate
+the trace (insert deps, attach hooks, tag NodeHW, build internal
+state). No job submission expected. Time advances by 10 µs at the
+end as a marker.
+
+### Layout (`engine.py:176`)
+**Logging is disabled for the entire layout phase** (`self.log.on = False`).
+Layout transfer Begin/End events therefore *do not appear* in the
+Chrome-trace JSON. Their effects on `MemorySpace.peak_num_used_pages`
+*do* land in the final `SIMULATION_RESULT` because mutation is
+independent of logging. If you need layout events visible, set
+`log.on = True` from a debug hook or inside the scheduler's `layout()`.
+
+The phase iterates:
+
+```
+finished = False
+while not finished:
+    finished = sched.layout(init_storage)   # returns True when done
+    drain job_waiting → job_running         # every job set to ETA = now
+    retire all                              # zero wall-time
+```
+
+Layout invariants:
+
+- **Only `TransferJob` may be submitted.** Anything else triggers
+  the abort `"Scheduler can only submit TransferJob in layout phase."`
+  (`engine.py:163`).
+- **Every submitted job must be immediately runnable.** The drain loop
+  HOL-blocks (just like runtime) but with no in-flight jobs to wait
+  for, head-of-line block → `"Deadlock detected."` abort.
+- **All retires happen at the same `timestamp_now`** because
+  `timestamp_ETA = now` is set explicitly for every dispatched job.
+  Layout transfers are *instantaneous* in simulated time — you
+  cannot use the layout phase to charge SSD load time against the
+  wall-clock budget. Charge it in runtime instead.
+- **`init_storage` is hardcoded to the first storage** in `Simulator.__init__`
+  (`simulator.py:148`: `init_storage = hw[next(iter(hw))]`). The
+  insertion order is the YAML order. Multi-storage configs always
+  initial-place onto `hardware.storage[0]`.
+
+Because `sched.layout` is iterated, you can return `False` to be
+called again — useful for multi-phase placement, e.g. DAV's
+SSD → DRAM → VRAM staging where the SSD's `can_run` allows only one
+concurrent job (`device_aware_vanilla_async.py:492`).
+
+### Runtime (`engine.py:271`)
+One iteration of the loop = **one observable simulated instant**.
+The exact order of operations is load-bearing and not obvious from
+a casual read:
+
+```
+loop:
+  1. Log per-hw counters/states (driven by Log.level).
+  2. _runtime_forward():
+     - Peek the top of `job_running` and the top of `job_fixed_latency`,
+       advance timestamp_now to the earlier of the two ETAs.
+     - If both are inf (nothing initialized), return [] (waiting on
+       newly-dispatched jobs to get an ETA later in this tick).
+     - Drain `job_running` cohort at timestamp_now. A TransferJob
+       with fixed_latency_micros > 0 is *not* retired here: its
+       work_done is pinned to work_total, its ETA is set to
+       `now + fixed_latency_micros`, and it moves to a separate
+       `job_fixed_latency` heap. Non-TransferJobs (and zero-fl
+       transfers) retire normally.
+     - Drain `job_fixed_latency` cohort at timestamp_now. Each pop
+       is a real retire — the latency window is up.
+  3. For each retired job (in order):
+     - ComputeJob: call node.hook_post_run(sys), if set.
+     - Fire BREAK_AT_JOB_RETIRED if armed on the job/node.
+     - **If the retired job's node is a TerminalNode → return from _runtime.**
+       (Co-retired jobs *after* the terminal in the cohort are
+       skipped — their hooks and break-retired flags do not fire.)
+  4. Evaluate debug.break_lambda(engine, sys) if set. Auto-clears
+     on exception.
+  5. For each job in job_running: update_progress(time_elapsed).
+  6. sched.runtime(retired_jobs).                ← scheduler reacts
+  7. Drain job_waiting head-first into job_running (FIFO):
+     - If head is_runnable(sys) → pre-run hook, dispatch, fire
+       BREAK_AT_JOB_DISPATCHED.
+     - If head NOT runnable and job_running is *empty* → abort
+       "Deadlock detected."
+     - If head NOT runnable and job_running has work → **break out
+       of the drain loop**. Other waiting jobs do not get a chance.
+  8. update_running_jobs(): recompute every running job's ETA
+     against current bandwidth contention (water-filling for
+     transfers, max_work_rate for compute).
+  9. heapify(job_running).
+```
+
+Two consequences worth flagging:
+
+**Job submission ordering matters** (see *FIFO HOL blocking* below).
+
+**`sched.runtime` runs *after* progress update**, so if you compare
+`job.work_done` between consecutive `runtime` calls you can see
+exactly how much work each job did in the just-elapsed interval.
+
+## Job lifecycle and timestamps
+
+`BaseJob` (`job/job.py:15`) carries four lifecycle timestamps; each
+field is set exactly once and then is permanent:
+
+| Field | Set by | Meaning |
+|---|---|---|
+| `timestamp_queued` | `engine.submit` | Enters `job_waiting` |
+| `timestamp_at_head` | `engine._runtime`, first time head | Reached front of queue (= `now` then) |
+| `timestamp_begin` | `BaseJob.begin` | Dispatched to `job_running` |
+| `timestamp_end` | `BaseJob.end` | Retired |
+
+`timestamp_at_head − timestamp_queued` = queue wait. `timestamp_begin − timestamp_at_head`
+= head-of-line stall (zero unless the head sat unrunnable for a
+tick). `timestamp_end − timestamp_begin` = effective execution time.
+Schedulers that want to budget stall vs. execution should read these
+fields; the `prefetch_quality.py` analysis script (see README) does
+this decomposition by transfer type.
+
+`timestamp_ETA` is the heap key, recomputed every tick by
+`update_running_jobs`. A job for which no ETA has been computed yet
+sits in the heap with `timestamp_ETA = float("inf")`; `_runtime_forward`
+detects this and bails (returns empty `retired_jobs`).
+
+The two synchronous job types — `ClaimJob` and `ReleaseJob` — **never go
+through `engine.submit`**. `System.claim` and `System.release`
+construct, assert, mutate, log, and discard them inline; they never
+appear in `job_waiting` or `job_running`. `BaseJob.__lt__`'s
+heap-tie-break by `self.id` (a random UUID) means **same-ETA cohort
+retire order is non-deterministic between runs** — relevant for
+anything bit-reproducible.
+
+## The four Job subclasses
+
+Each subclass plugs three callbacks (assertion / mutation / logging)
+via the matching file in `sim/core/job/{assertion,mutation,logging}/`.
+The pattern: `is_runnable` → `begin_mut` → `begin_log` → (engine
+ticks update `work_done`) → `end_mut` → `end_log`.
+
+| Job | Synchronous? | `work_total` | Use |
+|---|---|---|---|
+| `ComputeJob` | No (queued) | `node.compute_time_micros` (AU·µs) | Run a Node on a compute hw |
+| `TransferJob` | No (queued) | sum of `4 * min(src,dest).num_pages` KB across batch | Batch copy between two hardwares |
+| `ClaimJob` | **Yes** (sys.claim) | 0 | Allocate a `DataRegion` |
+| `ReleaseJob` | **Yes** (sys.release) | 0 | Free a `DataRegion` |
+
+`TransferJob`'s **batch must be src-hw → dest-hw single-pair**: every
+`(src_region, dest_region)` in the batch must have `src.hw == batch[0][0].hw`
+and `dest.hw == batch[0][1].hw`, else the assertion aborts. To
+issue cross-hardware transfers in one scheduler call, group by hw
+pair and submit one job per pair (DAV does this in
+`_submit_transfer_batches`).
+
+`TransferJob.fixed_latency_micros` is taken from whichever of
+`hw_from` / `hw_to` is a `BaseStorage` with a non-zero
+`fixed_latency_micros` (defaults to 0, set in `SimpleSSD.__init__`).
+It models per-op overhead (think NAND command setup). The engine
+implements it as a two-phase retire backed by **two separate heaps**:
+`job_running` (bandwidth phase) and `job_fixed_latency` (latency
+phase). When the bw phase ends, the job migrates between the heaps
+rather than being re-pushed; it's invisible to the water-filling
+bandwidth allocator (`update_transfer_jobs`) and to `update_progress`
+during the latency window, but it still occupies the hw's
+`job_running` list, so `can_run` continues to return False for
+additional jobs on that hw.
+
+## Why FIFO HOL blocking matters for schedulers
+
+`job_waiting` is a `collections.deque`; `engine._runtime` drains it
+strictly head-first. If `job_waiting[0]` is not runnable this tick,
+the drain loop **breaks immediately** without trying any subsequent
+job (`engine.py:362-393`). The drain resumes next tick.
+
+This means **the order in which a scheduler calls `sys.compute(...)` /
+`sys.transfer(...)` directly determines the order in which jobs are
+considered for dispatch**, and a poorly-placed transfer at the head
+can stall otherwise-runnable computes sitting behind it for an entire
+simulated instant.
+
+Practical patterns:
+
+- If you submit a `TransferJob` and a `ComputeJob` that depends on
+  the transfer in the same `runtime()` call, submit the *transfer
+  first* — the compute will sit in the queue with `is_runnable=False`
+  (its input tensor isn't on the compute's memory yet) and you'd
+  HOL-block the entire pipeline.
+- If you submit several `ComputeJob`s for different compute devices
+  (CPU + GPU), submit them **interleaved**, not all-CPU-first then
+  all-GPU. SimpleCPU only admits one job (`can_run` returns
+  `len(job_running) == 0`); if you queue [CPU_A, CPU_B, GPU_X],
+  CPU_B fails `can_run`, HOL breaks, and GPU_X never dispatches
+  this tick. DAV solves this with a `committed_per_compute` counter
+  that caps commits to one-per-hw per tick
+  (`device_aware_vanilla_async.py:_submit_ready_nodes_core`).
+- Head-of-line block + empty `job_running` = `"Deadlock detected."`
+  abort. So a scheduler that runs out of dispatched work AND has an
+  unrunnable head ends the run. The abort message includes the head
+  job's identity in `abort_args["job"]`.
+
+The flip side: **the FIFO never reorders**. You cannot push a job
+to the back of the queue once submitted. If you need a different
+order, build your own dispatcher in the scheduler and submit one
+job at a time.
+
+## Bandwidth model: weighted water-filling
+
+`engine/update_transfer.py:update_transfer_jobs` runs every tick to
+re-allocate bandwidth across all running `TransferJob`s. The
+algorithm:
+
+1. Start every active job at bandwidth 0.
+2. Sum the *capacities* (`hw.max_work_rate()`) of each hw touched
+   by any active transfer.
+3. Find the smallest bandwidth increment that would saturate some
+   hw. Increment every active job's bandwidth by that delta.
+4. Freeze every job that touches any newly-saturated hw.
+5. Repeat with the remaining active jobs until no further growth
+   is possible.
+
+Two consequences:
+
+- Jobs share bandwidth **equally** unless they're freed up by a
+  shared bottleneck. A 1-byte transfer and a 1-GB transfer get the
+  same bandwidth on the same link until one of them is done.
+- `hw.max_work_rate()` is **queried fresh every tick**. A custom
+  hw model can return different capacities for different running-job
+  shapes — `SimpleSSD` does this, returning bandwidth interpolated
+  from an IO-size curve (`simple_ssd.py:_get_bandwidth_KBps`).
+  Compute hardware can do the same for clock-throttling models, etc.
+
+Compute jobs bypass water-filling — `update.py:update_running_jobs`
+just asks each compute hw for `max_work_rate()` and assigns it to
+the job directly. SimpleCPU/SimpleGPU return a fixed `modifier` so
+each running ComputeJob gets full rate (GPU's `max_concurrent_jobs > 1`
+effectively models infinite parallelism with constant per-job
+throughput).
+
+## The DataRegion state machine (= cache coherence model)
+
+This is the trickiest piece. `DataRegion` (`hw/common/data_region.py`)
+is the unit of memory occupancy and the unit of cache coherence.
+Each region tracks:
+
+- `tensor_id` — which logical tensor it currently holds.
+- `is_latest` — is this copy of the tensor up-to-date?
+- `is_ready` — are the bytes actually present (post-init, not
+  mid-transfer)?
+- `access_status` — `IDLE | BEING_READ | BEING_WRITTEN`.
+- `access_count` — number of jobs currently reading.
+
+Lifecycle:
+
+```
+fresh region (post-claim):  is_ready=False, is_latest=False, IDLE
+loaded from storage:        is_ready=True,  is_latest=True,  IDLE
+being read by a transfer:   ............... is_latest=...,   BEING_READ (count++)
+being written (compute/xfer dest): is_ready=False, is_latest=True, BEING_WRITTEN
+                                            ^^ flipped to True only on the chosen
+                                               output region by compute_mutation
+```
+
+**Global invalidation on write.** When a `ComputeJob` begins, for
+each "real output" tensor (in `output_tensors` but not also in
+`input_tensors`), `compute_mutation.invalidate(sys, tid)` walks
+**every memory and storage in `sys.hw`** and sets every region for
+that tensor's `is_latest = False` (`job/mutation/utils.py:invalidate`).
+Then the *chosen* output region (on the compute's local memory) is
+re-marked `is_latest = True`. So after a compute, exactly one region
+across the entire system carries the latest copy of each written
+tensor. Other devices holding that tensor see `is_latest = False`
+and the engine's transfer assertion will refuse to source from them.
+
+**Transfers inherit `is_latest`.** When a transfer begins, the dest
+region's `is_latest` is set to the *src* region's current
+`is_latest` (`transfer_mutation.py:26`). Copying from a stale source
+produces a stale destination. Schedulers must not pick stale sources
+unless they're sure no fresher copy exists.
+
+**`access_status` is the locking primitive.** A region with
+`access_status == BEING_WRITTEN` cannot be read or written by anyone
+else (assertion fails). `BEING_READ` allows additional readers (the
+count tracks them) but no writers. `IDLE` allows either. Every
+mutation pair must balance: every `access_count++` has a matching
+`access_count--`, and the region returns to `IDLE` when count drops
+to 0. Bugs here typically present as "deadlock detected" with a
+stuck job whose `is_runnable` check fails on a region that should
+have been freed.
+
+The `compute_assertion.py` data-dependency check (`compute_assertion.py:54-87`)
+requires every input tensor to have **at least one** region on
+`hw.memory` that is simultaneously `is_ready`, `is_latest`, and
+`access_status ∈ {IDLE, BEING_READ}`. Outputs need a region that is
+`IDLE`. A scheduler that doesn't claim outputs ahead of time will
+HOL-block waiting for one to appear.
+
+## Custom dependencies: an all-or-nothing escape hatch
+
+A Node with `node.custom_deps != []` opts out of the engine's
+built-in control + data dependency check **entirely** —
+`compute_assertion.py:38` runs only the custom predicates, skipping
+the parent-DONE check, the input-residency check, and the output-IDLE
+check. The hardware admission check (`hw.can_run` + NodeHW match)
+still runs.
+
+This is powerful but easy to get wrong. The DAV scheduler uses it
+for alias / dispatcher / python-released nodes; the typical pattern
+is to add a `NodeDoneDep` per parent so the control check is
+re-implemented without the data check:
+
+```python
+for parent_id in node.parent_nodes:
+    node.custom_deps.append(NodeDoneDep(parent_id))
+```
+
+This effectively says "no data residency requirement, just wait for
+parents to be DONE." If you forget to add the parent deps, the node
+becomes immediately runnable regardless of graph ordering — usually
+producing wrong results before a visible crash.
+
+**Side effect to know about:** `compute_mutation.begin_mutation`
+still iterates `node.input_tensors` and `node.output_tensors`
+unconditionally. If a custom_deps node has inputs/outputs that
+aren't actually resident, `begin_mutation` just doesn't find them
+and `job.input_regions`/`output_regions` stay empty — but no crash.
+`end_mutation` then iterates those (empty) lists and does nothing.
+This is intentional: alias nodes have data tensors that physically
+exist on a different memory, and engine-level region bookkeeping
+shouldn't touch them. But it means a Node with `custom_deps` set
+*also* needs its `output_tensors` cleaned out of cross-device
+tensors (DAV moves them to `node.args["dispatcher_outputs"]` and
+pre-claims them in the scheduler).
+
+Shipped `CustomDep` subclasses (`trace/custom_dep.py`):
+`NodeDoneDep`, `TensorAtHWDep` (via `args["custom_dep_tag"]` on hw),
+`MinTimestampDep`, `LambdaDep`. Subclass `CustomDep` for anything
+reusable; `LambdaDep` is the escape-hatch for one-offs (not
+serializable to logs in a useful way).
+
+## The `System` API (scheduler → engine boundary)
+
+`System` (`sim/core/system.py`) is the only interface a scheduler
+should use to talk to the engine. Six calls plus two signals:
+
+| Call | Sync? | Returns | Notes |
+|---|---|---|---|
+| `compute(hw, node, args=None)` | submits ComputeJob | `uuid.UUID` (job id) | Sets `node.status = WAITING`. Engine will dispatch later. |
+| `transfer(batch, args=None)` | submits TransferJob | `uuid.UUID` | `batch: list[tuple[DataRegion, DataRegion]]`, all src.hw same, all dest.hw same. |
+| `claim(hw, tensor, page_idx_start=-1)` | **synchronous** | `DataRegion \| None` | Asserts + mutates inline. Returns None on failure (with abort already signalled). |
+| `find(hw, tensor)` | synchronous | `list[DataRegion]` | All regions on `hw` holding `tensor` (or `tensor_id` int). |
+| `release(region)` | **synchronous** | `None` | Asserts (region must be IDLE) + mutates inline. Aborts on busy region. |
+| `end_stage()` | signals engine | — | Drops `EngineSignal.END_STAGE` (largely unused in current schedulers). |
+| `abort(args)` | signals engine | — | Logs the abort and sets `signal_abort = True`. Tear-down happens on next engine tick. |
+
+**`abort` does not raise**. It logs and signals; the caller's code
+keeps running until it returns. Schedulers calling `sys.abort()` from
+inside `runtime` should typically `return` immediately afterward to
+avoid building more state on a doomed run.
+
+`sys.claim` and `sys.release` happen "for free" in simulated time —
+they neither advance the clock nor enter the engine queue. They
+are how a scheduler manipulates the memory layout in the middle of
+runtime without spending budget on it. The Chrome-trace log shows
+them as instant events (`event_instant`, `ph: "i"`).
+
+## Hardware admission protocol
+
+Every `BaseHardware` implements two methods that the engine calls:
+
+- `can_run(job)` — return True iff this hw can accept another job
+  *right now*. Used in assertion phase to gate dispatch.
+- `max_work_rate()` — return the per-µs rate this hw can deliver
+  *given the current `job_running` list*. Compute hw: AU/µs.
+  Memory/storage hw: KB/µs. Returns 0 when idle.
+
+Both are called every tick (`can_run` in `is_runnable`,
+`max_work_rate` in `update_running_jobs`). They should be cheap.
+
+The `job_running` list on a hardware is **separate from** the
+engine's `job_running` heap. `BaseHardware.run(job)` appends to
+`hw.job_running`; `BaseHardware.retire(job)` removes by id (O(n)
+rebuild — fine for small lists). The engine's heap is the
+scheduling structure; the per-hw list is the admission state. Jobs
+running on multiple hardwares (e.g. TransferJob spans src and dest)
+appear in both hardwares' lists.
+
+## Trace structure conventions
+
+A `Trace` (`sim/core/trace/trace.py`) is `{node_map, tensor_map, args}`.
+Loaders are free to attach arbitrary data to `trace.args` — it's the
+side-channel for scheduler-specific hints that don't fit the Node /
+Tensor schema. Examples already in use:
+
+- `trace.args["start_gated_edges"]` — `[(parent_id, child_id), ...]`
+  (PytorchProfile)
+- `trace.args["xfer_arrivals"]`, `d2h_xfer_arrivals`,
+  `evict_after_node`, `evictable_tensor_ids` — populated by
+  `graph_modifiers.inject_schedule` for WS-style experiments
+
+`Trace.__init__` runs `map_check` which:
+- Verifies every tensor referenced by a node's `input_tensors` /
+  `output_tensors` exists in `tensor_map`.
+- **Requires the last node in `node_map` (insertion order) to be a
+  `TerminalNode`.** Without one, the simulation has no exit condition.
+
+`Node.compute_time_micros` is the entire computational budget for
+the node — there's no separate `cost(input_size, hw_speed)` formula.
+A trace loader either records measured durations (llamacpp records,
+PyTorch profiler kineto records) or hand-models them.
+
+## Initialization order in `Simulator.__init__`
+
+(`sim/core/simulator.py:99`) Order matters because each step
+depends on prior steps' state:
+
+```
+1. Hydra config parse
+2. Log (start daemon writer thread)
+3. Debugger (welcome_prompt() in human mode if cfg["debug"])
+4. Trace loader class + Trace.load()
+5. Storage hardware (one or more)
+6. trace_loader.placement(trace, hw[hardware.storage[0]])
+       ↑ ALWAYS placed on the first storage in YAML order;
+         that storage gets initial_placement=True.
+7. Memory hardware
+8. Compute hardware (consumes hw[c_cfg["args"]["memory"]] by name)
+9. Validate custom_dep_tag uniqueness + TensorAtHWDep references
+10. System(trace, hw)
+11. Engine(...)  (scheduler = None initially)
+12. Scheduler  (engine.sched = sched after construction)
+13. SIM_CONFIG dump (resolved Hydra config + id_map + git metadata)
+```
+
+The Scheduler is constructed **last** and receives `System` (with
+the trace, hw, engine all wired). It can read `sys.hw` and walk
+`sys.trace` in its `__init__`. It cannot submit jobs in `__init__`
+— the engine hasn't started yet, so anything submitted would land
+in `job_waiting` before stages begin (technically fine, but
+unconventional; use `compile` or `layout`).
+
+If any step raises, `Simulator.__init__`'s `try/except` calls
+`log.stop()` and re-raises. The agent-mode driver
+(`main_agent.py:_construct`) catches that, prints the traceback to
+stderr, and transitions the session to `CONSTRUCT_FAILED`.
+
+## Surprises and gotchas (read these once)
+
+These are the things that don't match a first-pass reading of the
+code, listed so a new contributor doesn't relearn them by losing a
+day to each.
+
+1. **Layout disables logging.** Transfer events fired during
+   `engine._layout` are not in the Chrome-trace JSON. Peak-memory
+   stats *are* still accumulated. If you need layout events
+   visible for an analysis, the loader's `placement()` runs before
+   `log.start()` so storage-region claims won't log either; you'd
+   need to defer the placement to the layout stage and re-enable
+   `log.on` from inside the scheduler.
+
+2. **TerminalNode return short-circuits the retire cohort**
+   (`engine.py:301-302`). The `return` happens inside the for-loop
+   iterating `retired_jobs`. If multiple jobs co-retire at the same
+   instant as the TerminalNode and the TerminalNode comes first in
+   the list, the cohort's `hook_post_run` and `BREAK_AT_JOB_RETIRED`
+   handlers are skipped for everything after it. In practice
+   TerminalNode usually retires alone (compute_time_micros=0,
+   parents must be DONE), but if you set TerminalNode's compute time
+   non-zero, be aware.
+
+3. **Heap tie-break is by `uuid.uuid4()`** (`job/job.py:47`). Two
+   jobs with the same ETA retire in non-deterministic order between
+   runs. Sweeps measuring small differences should expect noise on
+   the order of single-tick reorderings.
+
+4. **`engine.submit` is FIFO, no priority, no reordering.** Once a
+   job is in `job_waiting`, the only way it changes position is by
+   moving to `job_running` (head only). A scheduler that needs
+   priority semantics must implement its own ready queue and submit
+   one job at a time. See *FIFO HOL blocking* above.
+
+5. **`claim` / `release` are synchronous and bypass the queue.**
+   They run inside the scheduler's call frame; they cannot be
+   batched. The Chrome-trace log shows them as instant events with
+   `ph: "i"`. They never appear in `job_waiting`/`job_running`.
+
+6. **Hot reload spares framework base classes.** Editing a base
+   class (`sim/sched/common/base_scheduler.py`,
+   `sim/hw/<type>/common/base_*.py`) doesn't take effect on
+   `restart_simulation(reload=True)`. The spared subtrees are
+   listed explicitly in `agent_server.py:_HOT_RELOAD_SPARED_PREFIXES`:
+   `sim.sched.common`, `sim.hw.{compute,memory,storage}.common`.
+   Restart the agent process for base-class edits.
+
+7. **Initial-placement storage is the first `BaseStorage` in
+   YAML order**, not the first hw of any type
+   (`simulator.py:148-160`). All initial tensors land on
+   `hardware.storage[0]`. Multi-storage configs cannot direct
+   different tensors to different storages at load time — the
+   scheduler must move them in the layout stage.
+
+8. **`debug.args` is per-Debugger, not per-run.** Construction
+   rebuilds the Debugger, so it's empty on every fresh run. Use
+   `debug.record(...)` to land structured records in the log file
+   if you want post-run persistence.
+
+9. **TransferJob fixed-latency lives in a second heap.** A transfer
+   whose source or destination is a `BaseStorage` with non-zero
+   `fixed_latency_micros` retires in two phases: the bandwidth phase
+   runs in `engine.job_running` (normal water-filling), then the job
+   migrates to `engine.job_fixed_latency` for the latency window
+   before final retire. The migrated job is invisible to
+   `update_progress` and the bandwidth allocator during the window,
+   so neither sees a "phantom" bandwidth consumer. If you walk job
+   state during runtime, remember `job_fixed_latency` is a third
+   queue alongside `job_waiting` and `job_running`.
+
+10. **Logging level is a config knob and a perf knob.**
+    `Level.COUNTER` and `Level.STATE` events fire **every runtime
+    tick** for every hw with a running job (`engine.py:274-281`).
+    A long-running trace at `log_level=3` (STATE) writes hundreds
+    of MB of trace JSON. Default is `EVENT` (1).
+
+## TransferJob fixed-latency: how the two phases retire
+
+`Engine._runtime_forward` (`engine.py:239`) splits a TransferJob's
+lifecycle into two heaps. While the bandwidth phase runs, the job
+lives in `engine.job_running` alongside other running jobs and is
+subject to the water-filling allocator. When bw work completes, the
+job migrates to a separate heap, `engine.job_fixed_latency`, with
+its `timestamp_ETA` rewritten to `now + fixed_latency_micros` and
+its `work_done` pinned to `work_total`. It stays there until the
+latency window elapses, then drains and retires normally:
+
+```python
+while self.job_running and (self.job_running[0].timestamp_ETA == self.timestamp_now):
+    job = heapq.heappop(self.job_running)
+    if isinstance(job, TransferJob) and job.fixed_latency_micros > 0.0:
+        job.work_done = job.work_total
+        job.timestamp_ETA = self.timestamp_now + job.fixed_latency_micros
+        heapq.heappush(self.job_fixed_latency, job)
+    else:
+        job.end(self.log, self.sys, self.timestamp_now)
+        retired_jobs.append(job)
+
+while self.job_fixed_latency and (self.job_fixed_latency[0].timestamp_ETA == self.timestamp_now):
+    job = heapq.heappop(self.job_fixed_latency)
+    job.end(self.log, self.sys, self.timestamp_now)
+    retired_jobs.append(job)
+```
+
+The "next event time" is the min of the two heap tops. The
+fixed-latency phase therefore costs zero bandwidth (the job is
+invisible to `update_transfer_jobs` while it's in
+`job_fixed_latency`) but the underlying hw's `job_running` list
+still contains the job, so `can_run` keeps returning False for
+additional jobs on that hw until the latency window finishes and
+`BaseJob.end → end_mutation` removes it.
+
+Verified on 2026-05-27 with an MCP breakpoint test: a 1-page (4 KB)
+SSD→RAM transfer at the SimpleSSD `read_io_curve_KBps` setting
+`[4, 80000]` (= 0.08 KB/µs) retires in exactly 100 µs — 50 µs bw +
+50 µs `fixed_latency_micros`.
+
+The deadlock check in `_runtime` correctly considers both queues:
+head-of-line blocking with `job_running` empty *and*
+`job_fixed_latency` empty is a real deadlock; with either non-empty
+the engine waits for the next event instead.
+
+## Writing a new Scheduler (internals-side recipe)
+
+The *operational* workflow (scaffolding, debugging, A/B against
+known-good) is in *Workflow: Writing a new Scheduler* above. Here's
+the contract-side recipe — what the engine actually expects from
+your three methods.
+
+### `__init__(self, obj_id, name, log, sys, args)`
+
+- Call `super().__init__(obj_id, name, log, sys, args)`. Don't
+  shadow `self.args` or `self.sys`.
+- Walk `sys.hw.values()`. By convention, you'll want references to
+  one or more `BaseCompute`, `BaseMemory`, `BaseStorage` instances.
+  Convention is "use `isinstance(hw, BaseCompute)`" rather than
+  string-matching on hw type.
+- You can read `sys.trace.node_map`, `tensor_map`, `args` here.
+- You **cannot submit jobs** here (the engine hasn't started). If
+  you need to set up state from the trace, do it here; if you need
+  to submit jobs, do it in `compile` or `layout`.
+
+### `compile(self, trace)`
+
+- One call, before layout. Mutate the trace as you like: insert
+  control edges (`add_parent_node` / `add_child_node`), attach
+  hooks (`node.hook_pre_run`, `node.hook_post_run`), tag NodeHW,
+  pre-compute scheduler-private state.
+- **Do not submit jobs from compile.** The engine doesn't drive
+  retirement here; submitted jobs would sit in `job_waiting`
+  unprocessed until runtime, at which point any FIFO assumptions
+  break.
+
+### `layout(self, init_storage) -> bool`
+
+- Iterated by the engine. Return `True` when initial placement is
+  complete; return `False` to be called again after the current
+  batch of submitted transfers retires.
+- **Only `TransferJob` may be submitted.** Use `sys.transfer(batch)`.
+  Mix of `sys.claim` and `sys.transfer` is fine — claims are
+  synchronous, transfers queue.
+- Every submitted transfer must be immediately runnable
+  (src is_ready+is_latest+IDLE-or-BEING_READ, dest IDLE). The
+  layout drain loop has no retry; if a job is not runnable, it
+  aborts with "Deadlock detected."
+- All retires happen at the same `timestamp_now` — transfers are
+  instantaneous in layout. Don't try to model SSD wall-clock cost
+  here; do it in runtime.
+- Multi-phase layouts (claim home regions → SSD→DRAM → DRAM→VRAM)
+  use a phase counter inside `self` and return False between phases.
+  Engine drains, then comes back for the next phase. DAV is the
+  canonical example.
+
+### `runtime(self, retired_jobs)`
+
+- Called once per engine tick, after the tick's jobs have retired.
+- `retired_jobs` includes both ComputeJob and TransferJob retires
+  from this tick. Walk it to update per-job-id state, refcounts,
+  prefetch trackers, etc.
+- Submit new work: `sys.compute(...)`, `sys.transfer(...)`,
+  `sys.claim/release(...)` synchronously. Order of submission
+  becomes the FIFO order in `job_waiting` — see *FIFO HOL blocking*.
+- The engine WILL re-call you next tick. Don't try to drain everything
+  in one tick; submit what's runnable now and let the engine pace.
+- If you detect an unrecoverable condition, call
+  `sys.abort({"from": self.name, "msg": "<reason>", ...})` and
+  `return`. The engine will tear down gracefully and the agent
+  lands at `break_on_abort` with your dict in `abort_args`.
+
+### Patterns to copy
+
+- **DAG walking with refcounts**: `pending_parent_count`, `ready_node_ids`,
+  decrement on retire, enqueue when count hits zero. See
+  `device_aware_vanilla_async.py:143-150` and the retire loop.
+- **Prefetch slots with frozen layout**: pin some tensors, allocate
+  slots for the rest, walk the prefetch pointer ahead of the
+  compute pointer. See `llamacpp_flexinfer/flexinfer.py:layout` and
+  the `dyn_slots` array.
+- **Multi-phase layout for SSD-constrained traces**: phase counter
+  in `self`, return False between phases. See
+  `device_aware_vanilla_async.py:_layout_phase`.
+- **Side-channel info from the loader**: pull from
+  `sys.trace.args["<key>"]`. Don't invent a new field on Trace;
+  the args dict is the supported extension point.
+
+### Anti-patterns to avoid
+
+- **Don't mutate Node parents/children inside `runtime`.** The
+  engine reads `node.parent_nodes` for the control-dependency check.
+  Mid-run mutation produces "deadlock detected" aborts that look
+  like a graph error but are actually a scheduler bug. If you need
+  per-tick gating beyond the static graph, use `custom_deps`.
+- **Don't submit a transfer and a compute that depends on it
+  back-to-back without checking the head.** The compute will
+  HOL-block the queue if the transfer is still in flight. Either
+  submit the compute on a *later* tick (after the transfer retires
+  and shows up in `retired_jobs`), or attach a `custom_deps` predicate
+  that gates on the tensor's residency.
+- **Don't issue >1 ComputeJob to the same single-slot device per
+  tick.** SimpleCPU/SimpleSSD admit one. The second job HOL-blocks
+  everything queued after it. Interleave or cap commits per device
+  per tick.
+- **Don't re-claim a region without releasing the old one.** Memory
+  occupancy is tracked region-by-region; the old region holds onto
+  pages until `sys.release` is called. Peak-memory metrics will
+  blow up.
+- **Don't trust `node.compute_time_micros` blindly.** It may be 0
+  (alias/dispatcher nodes after loader rewrites; TerminalNode), it
+  may carry per-node probe-effect compensation (PytorchProfile
+  loader), it may be hand-modeled. Treat it as the authoritative
+  budget but don't *also* try to charge transfer cost into it.
+
+## Writing a new Hardware model
+
+Concrete hardware lives in `sim/hw/<type>/<impl>/`. `<type>` is one
+of `compute`, `memory`, `storage`. Each impl is a Python package
+with at least an `__init__.py` (re-exports the class via `__all__`)
+and the source file.
+
+```
+sim/hw/compute/my_gpu/
+  __init__.py     # __all__ = ["MyGPU"]; from .my_gpu import MyGPU
+  my_gpu.py
+```
+
+Subclass the right base — `BaseCPU` / `BaseGPU` / `BaseNPU` /
+`BaseMemory` / `BaseStorage`. The framework calls only two methods:
+
+```python
+def can_run(self, job: BaseJob) -> bool: ...
+def max_work_rate(self) -> float: ...
+```
+
+Other methods you may want to override:
+
+- `log_counters()` / `log_states()` — what shows up under the
+  Counter / State tracks in the Chrome-trace JSON.
+- `__init__` — pull args from the YAML's `hardware.<type>[i].args`
+  dict. Compute hw also receives a `memory: BaseMemory` (the
+  Simulator wires it from `args["memory"]`).
+
+Once your `__all__` is set, the pkgutil aggregator picks it up
+automatically; reference it from a YAML as
+`hardware.compute[0].type: "MyGPU"`. No central registry to update.
+
+### Common patterns
+
+- **Concurrency cap**: read `args["max_concurrent_jobs"]` (cap N
+  concurrent jobs). `SimpleGPU` and `SimpleVRAM` do this.
+- **IO-size curve**: `read_io_curve_KBps` / `write_io_curve_KBps`
+  for storage. `SimpleSSD._get_bandwidth_KBps` interpolates.
+- **Tagged hardware for `TensorAtHWDep`**: set
+  `args["custom_dep_tag"]: "<unique-string>"` in the YAML; the tag
+  must be unique across all hw (Simulator validates this). Then a
+  `TensorAtHWDep("...", tag)` on a Node gates on this hw.
+
+### What the engine assumes
+
+- `BaseHardware.run(job)` is called by mutation; you do not call it.
+- `BaseHardware.retire(job)` is called by mutation; you do not call it.
+- `BaseHardware.job_running` is the admission state. Read it from
+  `can_run` and `max_work_rate`. Do not mutate it directly.
+- `args` is preserved on the instance for cross-cutting framework
+  reads (`custom_dep_tag`, etc.).
+
+## Writing a new Trace Loader
+
+Concrete loaders live in `sim/load/<impl>/`. Like hardware, just a
+Python package with `__all__` set.
+
+Subclass `TraceLoader` and implement two methods:
+
+```python
+def load(self) -> Trace: ...
+def placement(self, trace: Trace, storage: BaseStorage) -> None: ...
+```
+
+`load()` parses your source files (whatever path/CSV/DOT/binary
+format you have) and builds `node_map` + `tensor_map`. Return a
+`Trace(self.id, self.name, self.log, node_map, tensor_map, args=...)`.
+
+`placement()` runs after `load()` and is handed the *first* storage
+device. Convention: claim a `StorageRegion` for every tensor that
+exists at startup (`WEIGHT`, `INPUT`, `LEAF`, `KVCACHE`); set
+`is_ready=True, is_latest=True` on each. Intermediates are not
+placed — they're produced at runtime.
+
+### What to set on each Node
+
+| Field | Required? | Notes |
+|---|---|---|
+| `id` | yes | Unique int. Conventional to use `len(node_map)` at insert. |
+| `name` | yes | Free-form. Schedulers may regex-match. |
+| `compute_time_micros` | yes | Pure execution time. Use `0.0` for "free" nodes (aliases, terminal). |
+| `parent_nodes` / `children_nodes` | yes | Control deps. Use `add_parent_node`/`add_child_node`. |
+| `input_tensors` / `output_tensors` | yes | Data deps. Use `add_input_tensor` / `add_output_tensor`. |
+| `hw` | optional | `NodeHW.CPU | NodeHW.GPU | NodeHW.NPU` by default. Beware the wrong-hw check has a hole (see gotchas). |
+| `custom_deps` | optional | For exotic dependencies. List of `CustomDep`. |
+| `hook_pre_run` / `hook_post_run` | optional | Callables for trace-time mutation. |
+| `args["step"]` | convention | Per-step index for multi-step (decoding) traces. |
+| `args` (other) | free-form | Loader/scheduler-specific hints. |
+
+### What to set on each Tensor
+
+| Field | Required? | Notes |
+|---|---|---|
+| `id` | yes | Unique int. |
+| `name` | yes | Free-form. |
+| `size_bytes` | yes | Used to compute `num_pages` (4 KB pages, 64 B aligned). |
+| `args["tensor_type"]` | convention | One of `WEIGHT`, `INPUT`, `LEAF`, `KVCACHE`, `INTERMEDIATE`. |
+| `args["device"]` | (PyTorch traces) | `"cpu"` or `"cuda:N"` — DAV scheduler routes by this. |
+| `args` (other) | free-form | Loader/scheduler-specific hints. |
+
+### Loader-side preprocessing patterns to know
+
+- **Lifetime-aware storage aliasing** (PytorchProfile): tensors
+  sharing `storage_id` with overlapping lifetimes are merged into a
+  single cgsim tensor; sequential reincarnations stay separate (so
+  peak-memory accounting reflects the caching allocator's slot
+  reuse). See `pytorch_profile.py:_apply_storage_aliasing`.
+- **Alias/dispatcher node annotation**: nodes that are pure views
+  or cross-device dispatchers get `custom_deps=[NodeDoneDep(p) for
+  p in parents]` so the engine bypasses inappropriate residency
+  checks. See `pytorch_profile.py:_annotate_alias_dispatcher_deps`.
+- **Start-gated edges**: kineto `submit` edges from a `submit`-role
+  node into a `gpu_runtime` kernel are pulled out of the control
+  graph and stashed in `trace.args["start_gated_edges"]`. The
+  scheduler enforces them as "parent must have STARTED" rather than
+  DONE. See `pytorch_profile.py:_is_start_gated_edge`.
+- **Implicit-input detection**: if a tensor has no real producer in
+  the trace (or all producers are aliases/views), retype it as
+  `INPUT` so it gets initial-placed at layout. See
+  `pytorch_profile.py:_mark_implicit_inputs`.
+
+The takeaway: loaders are not just "convert file format X to cg-sim
+format" — they're also the right place to encode workload-domain
+knowledge (cache-allocator behavior, async-launch semantics, view
+aliasing) that the engine and scheduler shouldn't have to rediscover.
+
+## Quick "where does X live" map
+
+When tracking down behavior, these are the files to read first:
+
+- **"Why didn't my scheduler dispatch?"** → `compute_assertion.py`
+  (or `transfer_assertion.py`). The `is_runnable` decision.
+- **"Why is `is_latest` False?"** → `compute_mutation.py:invalidate`.
+  Some other compute wrote the same tensor.
+- **"Why did the engine abort?"** → `engine.py:_log_abort`. Single
+  choke point. Walk `abort_stack` to find the real caller.
+- **"Why is the ETA weird?"** → `engine/update.py` (compute) and
+  `engine/update_transfer.py` (water-filling). The latter is
+  particularly subtle.
+- **"What does the scheduler get at each stage?"** → `debug/debug.py:break_*_stage`.
+  Each `_Symbol` declares what binds into the breakpoint REPL.
+- **"What does the MCP server expose?"** → `debug/agent_server.py`.
+  Tools forward to `Debugger.agent_*` methods.
+- **"How is the YAML wired?"** → `sim/core/simulator.py`. Reads
+  `cfg["logger"]`, `cfg["trace"]`, `cfg["hardware"]["storage"]`,
+  `cfg["hardware"]["memory"]`, `cfg["hardware"]["compute"]`,
+  `cfg["scheduler"]`. `+debug=on` adds `cfg["debug"]`.
