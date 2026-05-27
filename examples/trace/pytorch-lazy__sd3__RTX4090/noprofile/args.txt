@@ -1,0 +1,20 @@
+cmdline:
+  /home/royce/anaconda3/envs/ptvenv/bin/python /data/pytorch-source/scripts/run_sd3_gpu.py --model /data/llamasim/models/sd-3.5-med --fusion inductor --output-prefix sd3_inductor_gpu --steps 20 --warmup-runs 20 --seed 0 --device cuda:0 --dtype bfloat16 --guidance-scale 4.5 --height 512 --width 512 --max-sequence-length 256 --disable-progress-bar --output-dir exp_results/0521_sweep/sd3_inductor/noprofile
+
+effective_args:
+  model: '/data/llamasim/models/sd-3.5-med'
+  prompt: 'A cute dog and a cat in a park'
+  steps: 20
+  guidance_scale: 4.5
+  height: 512
+  width: 512
+  seed: 0
+  max_sequence_length: 256
+  device: 'cuda:0'
+  dtype: 'bfloat16'
+  fusion: 'inductor'
+  compile_mode: 'default'
+  fullgraph: False
+  warmup_runs: 20
+  disable_progress_bar: True
+  output_prefix: 'sd3_inductor_gpu'

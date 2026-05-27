@@ -1,0 +1,43 @@
+2026-05-22 12:58:12.057659: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-05-22 12:58:12.067886: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1779422292.076622 3215376 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1779422292.079062 3215376 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1779422292.086443 3215376 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1779422292.086449 3215376 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1779422292.086451 3215376 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1779422292.086451 3215376 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+2026-05-22 12:58:12.088256: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s]
+Loading checkpoint shards:  50%|█████     | 1/2 [00:00<00:00,  5.22it/s]
+Loading checkpoint shards: 100%|██████████| 2/2 [00:00<00:00,  5.99it/s]
+Loading checkpoint shards: 100%|██████████| 2/2 [00:00<00:00,  5.86it/s]
+device: cuda:0
+dtype: bfloat16
+fusion: none
+seed: 0
+enable_eos_stop: False
+max_new_tokens: 15
+batch_size: 1
+warmup_runs: 1
+text_path: exp_results/0521_sweep/llama3b_eager/noprofile/llama3b_eager_gpu_tokens15_output.txt
+sequence_shape: (1, 20)
+generated_text_preview: The quick brown fox jumps over the lazy dog.
+This is a well-known pangram, a
+GPU memory: 6136.0 MB allocated, 6149.2 MB peak
+load_seconds: 4.301791
+warmup_seconds: 0.408695
+inference_seconds: 0.159667
+decode_seconds: 0.000183
+save_seconds: 0.000105
+e2e_seconds: 4.870448
+
+# exit_code: 0
+# elapsed_seconds: 6.456

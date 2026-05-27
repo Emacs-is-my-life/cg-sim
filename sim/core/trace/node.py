@@ -1,0 +1,116 @@
+from __future__ import annotations
+from enum import Enum, IntFlag, auto
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from sim.core.system import System
+    from .custom_dep import CustomDep
+
+
+class NodeStatus(Enum):
+    """Execution status of a Node"""
+    TODO = auto()      # Not scheduled yet
+    WAITING = auto()   # Node is in the job queue
+    RUNNING = auto()   # Node is being processed now
+    DONE = auto()      # Finished execution
+
+
+class NodeHW(IntFlag):
+    CPU = auto()
+    GPU = auto()
+    NPU = auto()
+
+
+class Node:
+    """
+    Node represents an atomic unit of workload, in a compute graph.
+    Only actual computation nodes! (GGML_OP_NONE nodes (leaf node) in llama.cpp aren't real Node in our definition.)
+    """
+
+    def __init__(self, node_id: int, node_name: str,  compute_time_micros: float, args: dict[str, Any] | None = None):
+        """Initialize a Node, with it's computation characteristics"""
+        self.id: int = node_id
+        self.name: str = node_name
+        self.hw: NodeHW = NodeHW.CPU | NodeHW.GPU | NodeHW.NPU   # Runs on anywhere by default
+        self.custom_deps: list[CustomDep] = []
+        self.compute_time_micros: float = compute_time_micros
+        self.status: NodeStatus = NodeStatus.TODO
+        self.args: dict[str, Any] = args if args is not None else {}
+
+        """
+        tensor_input:  To check if tensors are in memory for execution of this node
+        tensor_output: Same as above
+        """
+        self.input_tensors: list[int] = []  # Data Dependency
+        self.output_tensors: list[int] = []
+
+        """
+        node_parents:  Required to check if previous jobs are finished
+        node_children: For easier traversal of compute graph
+
+        These will be initialized through Node.add_parent(Node) method.
+        """
+        self.parent_nodes: list[int] = []   # Control Dependency
+        self.children_nodes: list[int] = []
+
+        # Debugging breakpoints. These will transfer to Job object.
+        self.BREAK_AT_JOB_SUBMITTED: bool = False
+        self.BREAK_AT_JOB_HEAD: bool = False
+        self.BREAK_AT_JOB_DISPATCHED: bool = False
+        self.BREAK_AT_JOB_RETIRED: bool = False
+
+        # Hooks for pre/post run arbitrary code execution.
+        # These hook function will be invokded from engine, at runtime stage
+        self.hook_pre_run: Callable[[System], None] | None = None
+        self.hook_post_run: Callable[[System], None] | None = None
+        return
+
+    def add_parent_node(self, node_id: int):
+        """
+        Adds a parent Node, for building a Compute Graph
+        To fully add a (common) Node as a parent
+        """
+
+        # Check deuplicates
+        for p_node_id in self.parent_nodes:
+            if node_id == p_node_id:
+                return
+
+        self.parent_nodes.append(node_id)
+        return
+
+    def add_child_node(self, node_id: int):
+        for c_node_id in self.children_nodes:
+            if node_id == c_node_id:
+                return
+
+        self.children_nodes.append(node_id)
+        return
+
+    def add_input_tensor(self, tensor_id: int):
+        """Adds an input Tensor, for Tensor placement check before computation"""
+
+        # Check duplicates
+        for i_tensor_id in self.input_tensors:
+            if tensor_id == i_tensor_id:
+                return
+
+        self.input_tensors.append(tensor_id)
+        return
+
+    def add_output_tensor(self, tensor_id: int):
+        # Check duplicates
+        for o_tensor_id in self.output_tensors:
+            if tensor_id == o_tensor_id:
+                return
+
+        self.output_tensors.append(tensor_id)
+        return
+
+
+class TerminalNode(Node):
+    """Node that marks the end of simulation"""
+    def __init__(self, obj_id: int, name: str, compute_time_micros: float = 0, args: dict[str, Any] | None = None):
+        super().__init__(obj_id, name, compute_time_micros, args)
+        return

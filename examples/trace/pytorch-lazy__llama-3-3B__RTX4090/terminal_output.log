@@ -1,0 +1,73 @@
+
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s]
+Loading checkpoint shards: 100%|██████████| 2/2 [00:00<00:00, 17.23it/s]
+Loading checkpoint shards: 100%|██████████| 2/2 [00:00<00:00, 17.21it/s]
+/data/pytorch-source/torch/utils/_config_module.py:540: FutureWarning: torch._dynamo.config.skip_code_recursive_on_recompile_limit_hit is deprecated and does not do anything. It will be removed in a future version of PyTorch.
+  config[key] = copy.deepcopy(getattr(self, key))
+/data/pytorch-source/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+[W521 23:25:52.454767836 execution_trace_observer.cpp:976] Enabling Execution Trace Observer
+[W521 23:25:53.042576539 execution_trace_observer.cpp:988] Disabling Execution Trace Observer
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg       CPU Mem  Self CPU Mem      CUDA Mem  Self CUDA Mem    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+## Call CompiledFxGraph f3oth6slwutyk6lopenwljmjxuvq...        14.86%      87.338ms        94.51%     555.275ms      37.018ms       0.000us         0.00%     125.000ms       8.333ms           0 B      -6.56 KB      63.72 MB      34.19 MB            15  
+                                               aten::mm        12.67%      74.470ms        15.83%      93.021ms      31.479us     117.458ms        93.73%     117.512ms      39.767us           0 B           0 B           0 B           0 B          2955  
+                                         cuLaunchKernel         4.15%      24.378ms         4.15%      24.378ms       5.243us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          4650  
+                                            aten::empty         3.70%      21.732ms         3.70%      21.732ms       8.516us       0.000us         0.00%       0.000us       0.000us      13.44 KB      13.44 KB      29.53 MB      29.53 MB          2552  
+                                        aten::transpose         2.82%      16.565ms         5.19%      30.471ms      18.137us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          1680  
+                                       aten::as_strided         2.42%      14.224ms         2.42%      14.224ms       8.392us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          1695  
+          aten::_scaled_dot_product_efficient_attention         2.24%      13.164ms        13.08%      76.841ms     182.954us       0.000us         0.00%       2.631ms       6.265us       6.56 KB           0 B      29.53 MB           0 B           420  
+                     aten::_efficient_attention_forward         2.23%      13.131ms         5.65%      33.206ms      79.062us       2.631ms         2.10%       2.631ms       6.265us       6.56 KB           0 B      29.53 MB           0 B           420  
+                              aten::_local_scalar_dense         2.19%      12.866ms         2.19%      12.866ms       7.590us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          1695  
+triton_poi_fused__scaled_dot_product_efficient_atten...         1.95%      11.475ms         2.57%      15.118ms      17.998us     939.594us         0.75%     939.594us       1.119us           0 B           0 B           0 B           0 B           840  
+                                             aten::item         1.65%       9.722ms         3.84%      22.588ms      13.326us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          1695  
+                                      Pregraph bytecode         1.42%       8.328ms         3.78%      22.213ms       1.481ms       0.000us         0.00%       0.000us       0.000us       6.80 KB           0 B           0 B           0 B            15  
+                                       cuLaunchKernelEx         1.32%       7.739ms         1.32%       7.739ms       4.606us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          1680  
+triton_poi_fused__scaled_dot_product_efficient_atten...         1.30%       7.631ms         1.70%       9.982ms      23.767us     583.559us         0.47%     583.559us       1.389us           0 B           0 B           0 B           0 B           420  
+               triton_poi_fused__unsafe_view_mul_silu_6         1.09%       6.394ms         1.44%       8.447ms      20.111us     560.332us         0.45%     560.332us       1.334us           0 B           0 B           0 B           0 B           420  
+                                       cudaLaunchKernel         0.93%       5.473ms         0.93%       5.473ms       4.337us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          1262  
+triton_poi_fused__to_copy__unsafe_view_add_arange_bm...         0.93%       5.455ms         1.35%       7.903ms      18.816us     513.533us         0.41%     513.533us       1.223us           0 B           0 B           0 B           0 B           420  
+                                               aten::to         0.83%       4.905ms         1.06%       6.252ms       7.161us       0.000us         0.00%       0.352us       0.000us           0 B           0 B         512 B           0 B           873  
+triton_poi_fused__scaled_dot_product_efficient_atten...         0.73%       4.307ms         1.03%       6.052ms      14.408us     458.942us         0.37%     458.942us       1.093us           0 B           0 B           0 B           0 B           420  
+triton_red_fused__to_copy__unsafe_view_add_mean_mul_...         0.65%       3.835ms         0.85%       4.976ms      25.517us     396.739us         0.32%     396.739us       2.035us           0 B           0 B           0 B           0 B           195  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 587.553ms
+Self CUDA time total: 125.320ms
+
+inductor_unique_graphs: 1
+device: cuda:0
+dtype: bfloat16
+fusion: inductor
+dot_level: llamasim-runtime
+seed: 0
+enable_eos_stop: False
+profile_memory: True
+record_shapes: True
+with_stack: True
+with_modules: True
+warmup_runs: 1
+trace_path: exp_results/0521_sweep/llama3b_inductor/llama3b_inductor_gpu_inductor_trace.json
+trace_csv_path: exp_results/0521_sweep/llama3b_inductor/llama3b_inductor_gpu_inductor_trace.csv
+text_output_path: exp_results/0521_sweep/llama3b_inductor/llama3b_inductor_gpu_inductor_output.txt
+execution_trace_path: exp_results/0521_sweep/llama3b_inductor/llama3b_inductor_gpu_inductor_execution_trace.json
+llamasim_output_dir: exp_results/0521_sweep/llama3b_inductor/llama_bundle
+llamasim_runtime_summary:
+  nodes: total=28848 gpu=7593 cpu=21255
+  submit_edges: exact=7593/7593 (100.00%) heuristic=0 provenance=ac2g_endpoint_exact
+  ac2g: paired=7593 matched=7593 errors=0
+  wait_edges: exact=1/2 (50.00%) heuristic=1
+  ws_sync: markers=0 leaves=0
+  wait_sources: aten_parent_scope_exact=1, kineto_sync_frontier=1
+  excluded_wait_sources: profiler_sync_excluded=1
+  wait_kinds: device_sync=1, stream_sync=1
+  wait_exact_note: wrapper emitted no ws_sync evidence; exact waits came from non-wrapper provenance
+  cpu_match_ambiguous: total=0 multiple_execution_nodes=0 no_runtime_candidate=0 multiple_runtime_candidates=0
+sequence_shape: (1, 20)
+generated_text_preview: The quick brown fox jumps over the lazy dog.
+This is a well-known pangram, a
+metadata_json: {"user_annotation_args": "sample_step=0 phase=text_generation component=llama device=cuda:0 fusion=inductor"}
+metadata_parsed: {"user_annotation_args": "sample_step=0 phase=text_generation component=llama device=cuda:0 fusion=inductor"}
+
+# exit_code: 0
+# elapsed_seconds: 62.543

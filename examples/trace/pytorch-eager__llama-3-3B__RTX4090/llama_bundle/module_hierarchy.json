@@ -1,0 +1,1287 @@
+{
+  "class": "LlamaForCausalLM",
+  "children": {
+    "model": {
+      "class": "LlamaModel",
+      "children": {
+        "embed_tokens": {
+          "class": "Embedding"
+        },
+        "layers": {
+          "class": "ModuleList",
+          "children": {
+            "0": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "1": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "2": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "3": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "4": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "5": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "6": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "7": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "8": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "9": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "10": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "11": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "12": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "13": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "14": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "15": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "16": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "17": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "18": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "19": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "20": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "21": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "22": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "23": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "24": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "25": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "26": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            },
+            "27": {
+              "class": "LlamaDecoderLayer",
+              "children": {
+                "self_attn": {
+                  "class": "LlamaAttention",
+                  "children": {
+                    "q_proj": {
+                      "class": "Linear"
+                    },
+                    "k_proj": {
+                      "class": "Linear"
+                    },
+                    "v_proj": {
+                      "class": "Linear"
+                    },
+                    "o_proj": {
+                      "class": "Linear"
+                    }
+                  }
+                },
+                "mlp": {
+                  "class": "LlamaMLP",
+                  "children": {
+                    "gate_proj": {
+                      "class": "Linear"
+                    },
+                    "up_proj": {
+                      "class": "Linear"
+                    },
+                    "down_proj": {
+                      "class": "Linear"
+                    },
+                    "act_fn": {
+                      "class": "SiLU"
+                    }
+                  }
+                },
+                "input_layernorm": {
+                  "class": "LlamaRMSNorm"
+                },
+                "post_attention_layernorm": {
+                  "class": "LlamaRMSNorm"
+                }
+              }
+            }
+          }
+        },
+        "norm": {
+          "class": "LlamaRMSNorm"
+        },
+        "rotary_emb": {
+          "class": "LlamaRotaryEmbedding"
+        }
+      }
+    },
+    "lm_head": {
+      "class": "Linear"
+    }
+  }
+}

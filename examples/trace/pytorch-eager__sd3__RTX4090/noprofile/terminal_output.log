@@ -1,0 +1,53 @@
+2026-05-22 12:55:46.324879: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-05-22 12:55:46.334885: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1779422146.345753 3212697 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1779422146.349206 3212697 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1779422146.359207 3212697 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1779422146.359215 3212697 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1779422146.359217 3212697 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1779422146.359218 3212697 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+2026-05-22 12:55:46.361728: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+
+Loading pipeline components...:   0%|          | 0/9 [00:00<?, ?it/s]You set `add_prefix_space`. The tokenizer needs to be converted from the slow tokenizers
+
+Loading pipeline components...:  11%|█         | 1/9 [00:00<00:01,  7.29it/s]
+Loading pipeline components...:  44%|████▍     | 4/9 [00:00<00:01,  4.10it/s]
+
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s][A
+
+Loading checkpoint shards:  50%|█████     | 1/2 [00:01<00:01,  1.02s/it][A
+
+Loading checkpoint shards: 100%|██████████| 2/2 [00:01<00:00,  1.01it/s][A
+Loading checkpoint shards: 100%|██████████| 2/2 [00:01<00:00,  1.01it/s]
+
+Loading pipeline components...:  67%|██████▋   | 6/9 [00:03<00:01,  1.63it/s]
+Loading pipeline components...:  78%|███████▊  | 7/9 [00:04<00:01,  1.23it/s]
+Loading pipeline components...: 100%|██████████| 9/9 [00:04<00:00,  1.82it/s]
+Loading pipeline components...: 100%|██████████| 9/9 [00:04<00:00,  1.84it/s]
+device: cuda:0
+dtype: bfloat16
+fusion: none
+steps: 20
+seed: 0
+height: 512
+width: 512
+warmup_runs: 20
+image_path: exp_results/0521_sweep/sd3_eager/noprofile/sd3_eager_gpu_steps20_output.png
+latent_shape: (1, 16, 64, 64)
+GPU memory: 15522.9 MB allocated, 16132.1 MB peak
+load_seconds: 10.136469
+warmup_seconds: 24.426739
+inference_seconds: 1.192852
+decode_seconds: 0.057826
+save_seconds: 0.088485
+e2e_seconds: 35.902380
+
+# exit_code: 0
+# elapsed_seconds: 37.736

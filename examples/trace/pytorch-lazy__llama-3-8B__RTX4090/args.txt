@@ -1,0 +1,20 @@
+cmdline:
+  /home/royce/anaconda3/envs/ptvenv/bin/python /data/pytorch-source/scripts/profile_llama_gpu.py --model /data/llamasim/models/Llama-3.1-8b --fusion inductor --output-prefix llama8b_inductor_gpu --warmup-runs 1 --seed 0 --device cuda:0 --dtype bfloat16 --max-new-tokens 15 --output-dir exp_results/0521_sweep/llama8b_inductor
+
+effective_args:
+  model: '/data/llamasim/models/Llama-3.1-8b'
+  prompt: 'The quick brown fox'
+  seed: 0
+  max_new_tokens: 15
+  batch_size: 1
+  do_sample: False
+  temperature: 1.0
+  enable_eos_stop: False
+  device: 'cuda:0'
+  dtype: 'bfloat16'
+  fusion: 'inductor'
+  compile_mode: 'default'
+  fullgraph: False
+  dynamic: True
+  warmup_runs: 1
+  output_prefix: 'llama8b_inductor_gpu'
