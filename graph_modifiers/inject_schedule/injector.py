@@ -83,7 +83,14 @@ def _build_lid_to_node_id(trace: Trace) -> dict[tuple[int, int], int]:
 
 
 def _valid_gpu_node_id(trace: Trace, node_id: int) -> int | None:
-    """Return ``node_id`` iff it names a GPU compute node in ``trace``."""
+    """Return ``node_id`` iff it names a GPU compute node in ``trace``.
+
+    Runtime prefetches must be issued by GPU nodes — CPU-pipeline
+    issuers would fire at sim_t≈0 (CPU races ahead) and storm the
+    PCIe queue during inference. Tids that can't get a feasible GPU
+    issuer belong in cold_start (layout-time load), not runtime
+    prefetch.
+    """
     if node_id < 0:
         return None
     node = trace.node_map.get(int(node_id))
@@ -931,7 +938,12 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
             ct = _trace_ts(c)
             if ct < first_arrival_t:
                 # Un-gated consumer runs before the first arrival fires:
-                # the tid would be ABSENT at C's dispatch. Must demote.
+                # the tid would be ABSENT at C's dispatch. Demote.
+                # (Gating C on a later issuer creates a chain cycle
+                # because the issuer is a downstream gpu_runtime whose
+                # ancestors include C — deadlocks sim. The sync-load
+                # behavior we'd ideally want here needs a layout-time
+                # transfer mechanism, not a runtime gate.)
                 ok = False
                 break
             # Most-recent arrival before C.
@@ -1312,6 +1324,69 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
         f"{total_consumers} un_gated={un_gated}",
         flush=True,
     )
+
+    # ---- Backpressure edges (optional, from schedule meta) ----
+    # Schedulers like ct_milp_lateness_simtime may emit synthetic
+    # GPU→CPU control edges derived from LP-predicted lateness, to
+    # cap sim's CPU race-ahead under streaming pressure. Each edge
+    # is (gpu_runtime_nid, cpu_leaf_nid); we add the gpu_nid to
+    # the cpu_node's parent_nodes so sim's engine waits for the GPU
+    # node to retire before firing the CPU node.
+    meta_doc = doc.get("meta") or {}
+    bp_edges = meta_doc.get("backpressure_edges") or []
+    if bp_edges:
+        added = 0
+        skipped_cycle = 0
+        skipped_missing = 0
+        skipped_dup = 0
+        for entry in bp_edges:
+            try:
+                gpu_nid, cpu_nid = int(entry[0]), int(entry[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            gpu_node = trace.node_map.get(gpu_nid)
+            cpu_node = trace.node_map.get(cpu_nid)
+            if gpu_node is None or cpu_node is None:
+                skipped_missing += 1
+                continue
+            # Cycle guard: skip if the cpu_node is already an ancestor
+            # of gpu_node in the existing dependency graph. In inductor
+            # mode this is essentially never true (CPU and GPU are
+            # decoupled — see audit). In eager mode there are ~10
+            # wait nodes connecting GPU→CPU which could create such
+            # ancestry. Conservative BFS check.
+            def _is_ancestor(maybe_ancestor: int, target: int) -> bool:
+                if maybe_ancestor == target:
+                    return True
+                visited = {target}
+                stack = [target]
+                while stack:
+                    cur = stack.pop()
+                    cur_node = trace.node_map.get(cur)
+                    if cur_node is None:
+                        continue
+                    for pid in cur_node.parent_nodes:
+                        if pid == maybe_ancestor:
+                            return True
+                        if pid in visited:
+                            continue
+                        visited.add(pid)
+                        stack.append(pid)
+                return False
+            if _is_ancestor(cpu_nid, gpu_nid):
+                skipped_cycle += 1
+                continue
+            if gpu_nid in cpu_node.parent_nodes:
+                skipped_dup += 1
+                continue
+            cpu_node.parent_nodes.append(gpu_nid)
+            added += 1
+        print(
+            f"[inject_schedule:backpressure] applied {added} GPU→CPU "
+            f"edges (skipped: missing={skipped_missing} "
+            f"cycle={skipped_cycle} dup={skipped_dup})",
+            flush=True,
+        )
 
 
 
