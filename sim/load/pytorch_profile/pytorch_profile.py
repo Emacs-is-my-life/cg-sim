@@ -1030,6 +1030,22 @@ class PytorchProfile(TraceLoader):
 
         trace.args["start_gated_edges"] = list(self._start_gated_edges)
 
+        # Module hierarchy JSON — needed by schedulers that classify weight
+        # tensors by their owning pipeline component / submodule (e.g.
+        # DiffusersGroupOffload distinguishes direct-child ModuleList
+        # grandchildren from everything else under each top-level component).
+        # Missing or unreadable is non-fatal; schedulers fall back to "no
+        # structural info available".
+        hierarchy_name = manifest.get("module_hierarchy")
+        if hierarchy_name:
+            hierarchy_path = resolve_path(hierarchy_name, bundle_dir)
+            try:
+                with open(hierarchy_path, "r") as f:
+                    trace.args["module_hierarchy"] = json.load(f)
+            except (OSError, ValueError) as e:
+                print(f"[PytorchProfile] Warning: could not load module_hierarchy "
+                      f"from {hierarchy_path}: {e}")
+
         if self._probe_effect_ns and self._probe_clamp_count:
             print(f"[PytorchProfile] probe_effect clamped to 0 for "
                   f"{self._probe_clamp_count} node(s) (duration_ns < probe_effect_ns).")

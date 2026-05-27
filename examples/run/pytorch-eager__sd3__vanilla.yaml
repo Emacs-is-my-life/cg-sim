@@ -29,13 +29,17 @@ hardware:
       args:
         custom_dep_tag: "TARGET_RAM"
         memory_size_KB: 33554432
-        memory_bandwidth_KBps: 25000000
+        # 13 GB/s: matches the SDXL/SD3 diffusers_group_offload YAMLs
+        # so vanilla vs. group_offload comparisons on the same trace
+        # stay apples-to-apples on transfer-bound metrics. See
+        # docs/cg-sim_bandwidth_calibration.md for the rationale.
+        memory_bandwidth_KBps: 13000000
     - name: "vram0"
       type: "SimpleVRAM"
       args:
         custom_dep_tag: "TARGET_VRAM"
         memory_size_KB: 24624320
-        memory_bandwidth_KBps: 25000000
+        memory_bandwidth_KBps: 13000000
   storage:
     - name: "ssd"
       type: "SimpleSSD"
