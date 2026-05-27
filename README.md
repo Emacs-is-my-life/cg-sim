@@ -38,17 +38,22 @@ directories travel together but can be swapped independently.
 
 ```bash
 # python main.py -i <path-to-input.yaml>
-$ python main.py -i examples/run/llamacpp_llama-3-8B_flexinfer.yaml           # Normal run
-$ python main.py -i examples/run/llamacpp_llama-3-8B_flexinfer.yaml +debug=on # Debugging mode
+$ python main.py -i examples/run/llamacpp__llama-3-8B__flexinfer.yaml           # Normal run
+$ python main.py -i examples/run/llamacpp__llama-3-8B__flexinfer.yaml +debug=on # Debugging mode
 ```
 
-Currently shipped configs under `examples/run/`:
-- `llamacpp_llama-3-8B_vanilla.yaml` — llama.cpp CPU trace, `LlamaCppVanilla` scheduler
-- `llamacpp_llama-3-8B_flexinfer.yaml` — llama.cpp CPU trace, `LlamaCppFlexInfer` scheduler
-- `pytorch_eager_llama-3-8B_vanilla.yaml` — PyTorch eager GPU trace (Llama-3 8B), `DeviceAwareVanillaAsync`
-- `pytorch_eager_sdxl-turbo_vanilla.yaml` — PyTorch eager GPU trace (SDXL-turbo), `DeviceAwareVanillaAsync`
-- `pytorch_lazy_llama-3-8B_vanilla.yaml` — PyTorch lazy (Inductor) GPU trace (Llama-3 8B), `DeviceAwareVanillaAsync`
-- `pytorch_lazy_sdxl-turbo_vanilla.yaml` — PyTorch lazy (Inductor) GPU trace (SDXL-turbo), `DeviceAwareVanillaAsync`
+Currently shipped configs under `examples/run/` (filename is
+`<loader>__<workload>__<scheduler>.yaml`, double-underscore separated):
+- `llamacpp__llama-3-8B__vanilla.yaml` — llama.cpp CPU trace, `LlamaCppVanilla` scheduler
+- `llamacpp__llama-3-8B__flexinfer.yaml` — llama.cpp CPU trace, `LlamaCppFlexInfer` scheduler
+- `pytorch-eager__llama-3-3B__vanilla.yaml` — PyTorch eager GPU trace (Llama-3 3B), `DeviceAwareVanillaAsync`
+- `pytorch-eager__llama-3-8B__vanilla.yaml` — PyTorch eager GPU trace (Llama-3 8B), `DeviceAwareVanillaAsync`
+- `pytorch-eager__sd3__vanilla.yaml` — PyTorch eager GPU trace (Stable Diffusion 3), `DeviceAwareVanillaAsync`
+- `pytorch-eager__sdxl-turbo__vanilla.yaml` — PyTorch eager GPU trace (SDXL-turbo), `DeviceAwareVanillaAsync`
+- `pytorch-lazy__llama-3-3B__vanilla.yaml` — PyTorch lazy (Inductor) GPU trace (Llama-3 3B), `DeviceAwareVanillaAsync`
+- `pytorch-lazy__llama-3-8B__vanilla.yaml` — PyTorch lazy (Inductor) GPU trace (Llama-3 8B), `DeviceAwareVanillaAsync`
+- `pytorch-lazy__sd3__vanilla.yaml` — PyTorch lazy (Inductor) GPU trace (Stable Diffusion 3), `DeviceAwareVanillaAsync`
+- `pytorch-lazy__sdxl-turbo__vanilla.yaml` — PyTorch lazy (Inductor) GPU trace (SDXL-turbo), `DeviceAwareVanillaAsync`
 
 ### Overriding input.yaml config from the command line
 `main.py` parses extra positional args with [Hydra](https://hydra.cc/)'s override
@@ -57,17 +62,18 @@ Dotted paths address nested keys; integer indices address list elements.
 
 ```bash
 # Override a scalar
-$ python main.py -i examples/run/llamacpp_llama-3-8B_flexinfer.yaml \
+$ python main.py -i examples/run/llamacpp__llama-3-8B__flexinfer.yaml \
       scheduler.args.prefetch_window=8
 
 # Override a list element by index (hardware.memory is a list)
-$ python main.py -i examples/run/llamacpp_llama-3-8B_flexinfer.yaml \
+$ python main.py -i examples/run/llamacpp__llama-3-8B__flexinfer.yaml \
       hardware.memory.0.args.memory_size_KB=10485760
 ```
 
 Useful for parameter sweeps from a shell loop — `scripts/sim_run/flexinfer.sh`
-does exactly this, sweeping `hardware.memory.0.args.memory_size_KB` and
-redirecting each run's output via `logger.args.result_path`:
+does exactly this against the `llamacpp__llama-3-8B__flexinfer.yaml` config,
+sweeping `hardware.memory.0.args.memory_size_KB` and redirecting each run's
+output via `logger.args.result_path`:
 ```bash
 $ python main.py -i "$INPUT_CFG" \
       logger.args.result_path="${result}" \
@@ -262,6 +268,20 @@ directory.
 - `link_utilization.py <log.json> <memory_hw> [window_us] [--out [DIR]]`
   — bandwidth-side view: busy fraction, achieved aggregate rate,
   per-source breakdown for the offload link.
+- `cpu_offload_timeline.py <log.json> [--filter weight|any] [--out DIR]`
+  — per-tensor TRANSFER/RELEASE swimlane (CSV + interactive Plotly
+  HTML) for validating accelerate/cpu_offload-style schedulers.
+- `extract_sim_metrics.py <log.json> [...]` — one-line summary
+  (`simulation_time_s`, `peak_vram0_GB`) per `SIMULATION_RESULT`
+  event. Suitable for condensing a directory of sweep results into
+  a quick table.
+- `sim_summary.py <log.json>` — streaming summary that tolerates a
+  truncated trace (e.g. a still-running or killed sweep), pulled
+  via regex without loading the whole JSON.
+- `trace_inspect/` — pre-sim trace introspection helpers
+  (`budget.py`, `cp_analysis.py`, `cpu_leaf_types.py`,
+  `op_distribution.py`); these read trace bundles directly rather
+  than cg-sim result logs.
 
 ## Calibrating PyTorch traces against profiler probe effect
 
@@ -308,7 +328,18 @@ scripts above.
   
 ## Trace Importer
 - `sim/load/`: Base directory for trace importers
-  - `sim/load/llamacpp/`: llama.cpp trace importer code
+  - `sim/load/llamacpp/`: llama.cpp trace importer (CPU-only GGML
+    profiling records → cg-sim Trace).
+  - `sim/load/pytorch_profile/`: PyTorch profiler trace importer.
+    Consumes the `llama_bundle/` files (`runtime_nodes.csv`,
+    `runtime_edges.csv`, `pytorch_runtime_tensors.csv`,
+    `module_hierarchy.json`, `manifest.json`,
+    `step_0_compute_graph.dot`) emitted by the upstream
+    `pytorch-source` profiler. Annotates each Node with its hosting
+    `torch.nn.Module` path and the device the op ran on; applies
+    kineto probe-effect compensation when a sibling
+    `probe_effect_table.csv` is present (see *Calibrating PyTorch
+    traces against profiler probe effect* above).
 
 ## Hardware models
 - `sim/hw/`: Base directory for hardware models
@@ -322,11 +353,12 @@ Implement your own hardware model in `sim/hw/<hardware-type>/<hardware-name>/`.
 ## Scheduler
 - `sim/sched/`: Base directory for scheduler, orchestrating hardwares for trace execution
   - `sim/sched/common/`: Common component and logic for schedulers
-  - `sim/sched/llamacpp_vanilla/`: No-offload policy, which keeps all tensors in memory, gives up if its impossible.
-  - `sim/sched/llamacpp_flexinfer/`: Scheduler implementing FlexInfer(https://dl.acm.org/doi/10.1145/3721146.3721961) policy for memory saving
-  - `sim/sched/stub/`: No-op scheduler — spins up a simulation for inspection but aborts at runtime.
+  - `sim/sched/llamacpp_vanilla/` (`LlamaCppVanilla`): No-offload policy for llama.cpp traces — keeps all tensors in memory, aborts if it doesn't fit.
+  - `sim/sched/llamacpp_flexinfer/` (`LlamaCppFlexInfer`): Implements the FlexInfer (https://dl.acm.org/doi/10.1145/3721146.3721961) memory-saving policy for llama.cpp traces.
+  - `sim/sched/device_aware_vanilla_async/` (`DeviceAwareVanillaAsync`): Vanilla scheduler for PyTorch-profile traces — routes each Node to the compute device its kineto record came from (`node.hw`), with async H2D transfer streams.
+  - `sim/sched/generic_stub/` (`Stub`): No-op scheduler — spins up a simulation for inspection at the compile/layout breakpoints but aborts at runtime. Useful when the intended scheduler for a config is not yet implemented on this branch.
   - And more to come...
-  
+
 Implement your own scheduler logic in `sim/sched/<scheduler-name>/`.
 
 ## Others
@@ -340,24 +372,49 @@ Implement your own scheduler logic in `sim/sched/<scheduler-name>/`.
     pair is portable as long as `run/` and `trace/` remain siblings.
     Invoke with `python main.py -i examples/run/<config>.yaml`.
   - `examples/trace/`: Heavy trace bundles consumed by configs in
-    `examples/run/`. One subdirectory per workload trace (e.g.
-    `llamacpp_CPU_llama-3-8B-Q8/`,
-    `pytorch_eager_RTX4090-llama-3-8B/llama_bundle/`,
-    `pytorch_lazy_RTX4090-sdxl-turbo/llama_bundle/`). PyTorch bundles'
-    `manifest.json` references its own siblings (`runtime_*.csv`,
-    `step_*_compute_graph.dot`) by bare filenames — they resolve
-    relative to the manifest, so the bundle directory is self-contained.
+    `examples/run/`. One subdirectory per workload trace, named
+    `<loader>__<workload>__<host>` (e.g.
+    `llamacpp__llama-3-8B-Q8__datai/`,
+    `pytorch-eager__llama-3-8B__RTX4090/llama_bundle/`,
+    `pytorch-lazy__sdxl-turbo__RTX4090/llama_bundle/`,
+    `diffusers-group-offload__sdxl-turbo__RTX4090/llama_bundle/`).
+    PyTorch bundles' `manifest.json` references its own siblings
+    (`runtime_*.csv`, `pytorch_runtime_tensors.csv`,
+    `module_hierarchy.json`, `step_*_compute_graph.dot`,
+    `compiled_*` files for Inductor-mode bundles) by bare filenames
+    — they resolve relative to the manifest, so the bundle
+    directory is self-contained. A sibling `probe_effect_table.csv`
+    next to `llama_bundle/`, if present, is consumed by the
+    PyTorchProfile loader for kineto probe-effect compensation.
 - `scripts/`: Helper scripts, organized by purpose:
   - `scripts/sim_run/`: Bash drivers that launch `main.py` under various
-    configs (e.g. `flexinfer.sh` sweeps memory sizes).
+    configs (e.g. `flexinfer.sh` sweeps memory sizes; `example.sh`
+    is a minimal single-run driver).
   - `scripts/sim_test/`: MCP / debugger tests that drive `main_agent.py`
-    end-to-end (`test_mcp_*.py`).
+    end-to-end (`test_mcp_debugger.py`, `test_mcp_breakonabort.py`,
+    `test_mcp_breakonexception.py`, `test_mcp_breaklambda.py`,
+    `test_mcp_hotreload.py`, `test_mcp_overrides.py`,
+    `test_mcp_prerun_restart.py`, `test_mcp_fragile.py`).
   - `scripts/analysis/`: Post-run log analysis
-    (`prefetch_quality.py`, `link_utilization.py`). Shared helpers
-    in `common/`.
+    (`prefetch_quality.py`, `link_utilization.py`,
+    `cpu_offload_timeline.py`, `extract_sim_metrics.py`,
+    `sim_summary.py`). Shared helpers in `common/`. The
+    `trace_inspect/` subdirectory holds pre-sim trace
+    introspection tools (`budget.py`, `cp_analysis.py`,
+    `cpu_leaf_types.py`, `op_distribution.py`) that read
+    trace bundles directly rather than cg-sim result logs.
   - `scripts/experiments/`: Sweep runners (`sweep_memory.py`,
     `compare_schedulers.py`). Shared subprocess driver in `sweep/`.
   - `scripts/visualization/`: Plotting recipes for the analysis output
     (`plot_metric_vs_param.py`, `plot_time_breakdown.py`, `plot_cdf.py`,
     `plot_timeline.py`). Shared style/io in `common/`.
-- `main.py`: Simulator entry point
+  - `scripts/tool/`: One-shot calibration utilities — see
+    *Calibrating PyTorch traces against profiler probe effect*
+    above (`kineto_probe_microbench.py`,
+    `generate_probe_effect_tables.py`).
+  - `scripts/sim_sweep_script.py`: Top-level sweep driver for the
+    pytorch-source 0521 profiling results — runs vanilla and
+    HF-offload-mode simulations and aggregates a metrics table.
+- `main.py`: Simulator entry point (human / CLI use).
+- `main_agent.py`: MCP server entry point (agent use); see
+  [AGENTS.md](AGENTS.md).

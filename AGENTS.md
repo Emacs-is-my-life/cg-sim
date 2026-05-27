@@ -21,7 +21,7 @@ $ claude mcp add cg-sim-mcp -- python main_agent.py
 
 # Alternative — pin a default config; the agent can still switch later.
 $ claude mcp add cg-sim-mcp -- \
-      python main_agent.py -i examples/run/llamacpp_llama-3-8B_flexinfer.yaml
+      python main_agent.py -i examples/run/llamacpp__llama-3-8B__flexinfer.yaml
 ```
 `-i` is optional. The recommended form omits it, so the same MCP registration
 serves every simulator config the agent might want — the first
@@ -215,7 +215,7 @@ Generic soft-failure safety net. **Every** abort path in the simulator
 funnels through `Engine._log_abort(args)`:
 
 - engine-internal deadlocks and invalid-job submissions
-- scheduler-issued `sys.abort(...)` (LlamaCppVanilla, LlamaCppFlexInfer, your scheduler)
+- scheduler-issued `sys.abort(...)` (LlamaCppVanilla, LlamaCppFlexInfer, DeviceAwareVanillaAsync, Stub, your scheduler)
 - job assertion failures (`transfer_assertion.py`, `compute_assertion.py`)
 - mutation invariant breaks (`claim_mutation.py`)
 - any future caller of `sys.abort()` or `_log_abort()` you add — covered
@@ -392,7 +392,7 @@ restart_simulation(overrides=["hardware.memory.0.args.memory_size_KB=10485760"])
 
 # Combine multiple overrides; combine with a new input YAML:
 restart_simulation(
-    input_path="examples/run/llamacpp_llama-3-8B_vanilla.yaml",
+    input_path="examples/run/llamacpp__llama-3-8B__vanilla.yaml",
     overrides=["+debug=on", "logger.args.log_level=3"],
 )
 ```
@@ -588,10 +588,22 @@ or change `result_path` in the YAML between runs.
 
 ## 8. A/B against a known-good scheduler
 
-The two reference implementations are `LlamaCppVanilla` (no offload) and
-`LlamaCppFlexInfer` (memory-saving). Switch input YAMLs mid-session:
+Three reference implementations ship today:
+- `LlamaCppVanilla` (no offload) and `LlamaCppFlexInfer`
+  (memory-saving) for `llamacpp` traces.
+- `DeviceAwareVanillaAsync` for `pytorch-eager` /
+  `pytorch-lazy` traces — vanilla scheduler with async H2D streams
+  that routes each Node to the compute device its kineto record
+  came from (`node.hw`).
+- `Stub` (in `sim/sched/generic_stub/`) — no-op scheduler.
+  `compile`/`layout` succeed so the simulation reaches every
+  pre-runtime breakpoint, but `runtime` aborts on entry. Useful
+  for loading a config whose intended scheduler isn't on this
+  branch and inspecting the compiled Trace.
+
+Switch input YAMLs mid-session:
 ```
-restart_simulation(input_path="examples/run/llamacpp_llama-3-8B_vanilla.yaml")
+restart_simulation(input_path="examples/run/llamacpp__llama-3-8B__vanilla.yaml")
 ```
 Then re-run with the same breakpoints to compare. `debug.record(...)`
 breadcrumbs end up in each run's own log file.
@@ -690,8 +702,8 @@ output/latest -> <most-recent-experiment-setup>/   # convenience symlink
   experiment. For sweep runners, pass it explicitly
   (`flexinfer-mem-sweep`, `prefetch-window-tuning`). For one-off runs
   of a stock YAML, the YAML basename is the natural default
-  (`llamacpp_llama-3-8B_flexinfer` for
-  `examples/run/llamacpp_llama-3-8B_flexinfer.yaml`).
+  (`llamacpp__llama-3-8B__flexinfer` for
+  `examples/run/llamacpp__llama-3-8B__flexinfer.yaml`).
 - **`<run-id>`** — the cell label in sweeps (`4GB`, `flexinfer-pw3`,
   `vanilla`). For single-shot runs of a YAML use `result` (so the
   artifact reads as `sim_results/result.json`, not the misleading
