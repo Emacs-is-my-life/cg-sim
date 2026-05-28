@@ -30,13 +30,13 @@ hardware:
         custom_dep_tag: "TARGET_RAM"
         memory_size_KB: 33554432
         # See pytorch-eager__llama-3-3B__accelerate_cpu_offload.yaml for the rationale on this value.
-        memory_bandwidth_KBps: 12000000
+        memory_bandwidth_KBps: 14000000
     - name: "vram0"
       type: "SimpleVRAM"
       args:
         custom_dep_tag: "TARGET_VRAM"
         memory_size_KB: 24624320
-        memory_bandwidth_KBps: 12000000
+        memory_bandwidth_KBps: 14000000
   storage:
     - name: "ssd"
       type: "SimpleSSD"

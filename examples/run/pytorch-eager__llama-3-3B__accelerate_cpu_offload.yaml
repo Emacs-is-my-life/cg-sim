@@ -29,26 +29,32 @@ hardware:
       args:
         custom_dep_tag: "TARGET_RAM"
         memory_size_KB: 33554432
-        # 12 GB/s: effective end-to-end wall throughput for
-        # accelerate cpu_offload paging on RTX 4090. Derived as
-        # (per-token H2D bytes) / (per-token wall) = 7.21 GB / 605 ms
-        # for Llama-3-3B (`docs/offload-schemes/accelerate_cpu-offload_buffers-false.md:180,185`).
-        # The doc's per-transfer mean of 14.17 GB/s (:239-246) is the
-        # PCIe DMA throughput in isolation; cg-sim's bandwidth knob
-        # determines the time each TransferJob takes wall-clock, so we
-        # use the effective wall figure here to absorb the per-leaf
-        # CUDA-driver overheads (cuMemCreate/cuMemMap, kernel launch,
-        # cudaStreamSynchronize) that the doc itemizes but cg-sim
-        # doesn't model directly. accelerate cpu_offload's H2D path is
-        # unimodal (every transfer goes through the same pageable
-        # bounce-buffer path) — a single tuned value is faithful here.
-        memory_bandwidth_KBps: 12000000
+        # 14 GB/s: per-transfer DMA bandwidth measured directly from
+        # the accelerate cpu_offload reference traces — computed as
+        # `module_size_bytes / Memcpy_event_duration_ns` over every
+        # Memcpy HtoD event in the trace (2130 transfers >=10 MB on
+        # 3B, 2430 on 8B). Doc lines 230-294 of
+        # docs/offload-schemes/accelerate_cpu-offload_buffers-false.md:
+        #
+        #   | mean | std  | p1  | p50  | p99  | mode      |
+        #   |------|------|-----|------|------|-----------|
+        #   | 14.17| 1.49 | 9.4 | 14.8 | 16.6 | 15.0-15.5 | (3B, GB/s)
+        #   | 14.91| 0.79 | 11.6| 15.1 | 15.8 | (similar) | (8B, GB/s)
+        #
+        # Unimodal distribution (positive excess kurtosis +1.33/+9.10
+        # rules out the bimodal "pinned/pageable" mixture). Every H2D
+        # goes through a single "pageable-source with driver-staged
+        # pinned bounce buffer" path — well above true-pageable
+        # (5-10 GB/s) but well below true-pinned (22-24 GB/s on PCIe
+        # 4.0 x16). Single tuned bandwidth is faithful for this
+        # workload (unlike diffusers_group_offload's bimodal case).
+        memory_bandwidth_KBps: 14000000
     - name: "vram0"
       type: "SimpleVRAM"
       args:
         custom_dep_tag: "TARGET_VRAM"
         memory_size_KB: 24624320
-        memory_bandwidth_KBps: 12000000
+        memory_bandwidth_KBps: 14000000
   storage:
     - name: "ssd"
       type: "SimpleSSD"
