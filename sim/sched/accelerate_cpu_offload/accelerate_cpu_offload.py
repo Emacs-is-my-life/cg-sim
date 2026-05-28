@@ -1,73 +1,58 @@
 """Scheduler that simulates ``accelerate.cpu_offload(..., offload_buffers=False)``
 in cg-sim.
 
-Strategy
---------
-The offload trace's profiler records each ``Memcpy HtoD`` event as an
-alias-style pair: the cuda dst tid sits in both ``input_tensors`` and
-``output_tensors``, and the same cuda dst tid is reused across all 15
-generated tokens. The loader's ``_mark_implicit_inputs`` heuristic
-mis-classifies these (and many other alias-chained activations) as
-``INPUT``, which fills VRAM at layout phase 0 and aborts the run.
+Mirrors the ``DiffusersGroupOffload`` pattern: input is the **eager**
+trace (everything resident on cuda from the start, no per-leaf
+Memcpy events in the trace), and ``compile()`` injects per-leaf paging
+hints via the four DAV ``trace.args`` channels.
 
-This compile stage rewrites the trace so cg-sim's natural CONTEXT
-lifecycle can handle it:
+What accelerate cpu_offload models
+----------------------------------
+Per
+``docs/offload-schemes/accelerate_cpu-offload_buffers-false.md``:
 
-1. **Dealias every Memcpy HtoD** — remove the cuda dst tid from
-   ``input_tensors`` so the Memcpy looks like a real producer.
+* Every module that owns direct params (Linear / Embedding /
+  LlamaRMSNorm in Llama-3) gets an ``AlignDevicesHook``. Its
+  ``pre_forward`` does a synchronous ``cudaMemcpyAsync(Pageable →
+  Device)`` of every param to the execution device; its
+  ``post_forward`` rebinds the param to ``meta`` (no DtoH bytes).
+* Buffers (persistent and non-persistent) stay resident on the
+  execution device for the lifetime of the model.
+* The H2D is on the compute stream with a hard
+  ``cudaStreamSynchronize`` after each copy — no prefetch overlap,
+  end-to-end serialization per leaf.
 
-2. **Per-invocation tid splitting** — each leaf invocation contains
-   one Memcpy per paged tensor; mint a fresh tid for that Memcpy's
-   output and rewire the invocation-local consumers. Each fresh tid
-   now has a single-invocation lifetime, so cg-sim's natural release
-   fires at the last consumer per token (matching accelerate's
-   ``post_forward`` drop-to-meta).
-
-3. **Aggressive cuda-INPUT → CONTEXT demotion** — accelerate's
-   per-leaf hook stack creates so many alias chains (aten::to /
-   detach_ / set_module_tensor_to_device / view / unsqueeze /
-   transpose / in-place ops) that the loader's heuristic over-marks
-   transient activations as INPUT. Legitimate persistent cuda state
-   in this workload is classified as WEIGHT (e.g. rotary_emb's
-   ``inv_freq``) — anything else cuda-homed is genuinely transient.
-
-4. **Explicit evict_after_node hints** for the freshly-minted tids
-   at each invocation's last GPU node, as belt-and-suspenders to
-   bound VRAM if the natural release misses a tid.
-
-5. **Rebuild DAV's lifetime tracking** — ``__init__`` ran against
-   the pre-rewrite graph; refresh ``_remaining_consumers``,
-   ``_remaining_cpu_consumers``, and ``_consumers_by_tid`` on the
-   rewritten graph.
-
-The trace's Memcpy HtoD nodes run as gpu_runtime compute jobs with
-their recorded durations, contributing the pageable-with-driver-staged-
-bounce H2D wall-time (~14 GB/s on RTX 4090, per
-``docs/offload-schemes/accelerate_cpu-offload_buffers-false.md:239-246``)
-directly to the simulated wall-clock.
-
-Known limitations
------------------
-The peak-VRAM estimate is ≈ 2× the reference: cg-sim's runtime keeps
-both the previous leaf's cuda mirror and the next leaf's cuda mirror
-resident momentarily when the next leaf's Memcpy starts before the
-previous mirror's last consumer retires. This is a modeling artifact
-of cg-sim's natural CONTEXT release vs. the explicit evict_after_node
-timing, not the rewrite itself.
-
-The 8B trace deadlocks partway through (cg-sim cannot make progress
-because some downstream aten::view / aten::_unsafe_view alias op
-cannot find a region for its input). 3B completes end-to-end. The
-exact root cause is in cg-sim's per-tid region tracking when a
-shared activation tid is touched by both a real producer and an
-alias-style op in the same time window.
+What this compile stage does
+----------------------------
+1. **Discover paged leaves** — every cuda WEIGHT tid in the eager
+   trace is a parameter. Resolve its first consumer's
+   ``module_path``; that path is the leaf module (Linear,
+   Embedding, LlamaRMSNorm, …). Group WEIGHT tids by leaf.
+2. **Patch each paged WEIGHT tid's device to "cpu"** — DAV's layout
+   phase 0 places ``device == "cpu"`` tensors in RAM (the
+   ``weights_map`` master copy in accelerate, populated at
+   ``big_modeling.py:209``). Buffers (non-WEIGHT cuda tensors or
+   WEIGHT tensors not under any leaf) stay resident.
+3. **Enumerate per-leaf invocations.** Walk the trace in temporal
+   order; a leaf's "epoch" is a contiguous run of nodes whose
+   resolved ``module_path`` equals (or starts with) the leaf path.
+   Llama's eager trace has 15 generated tokens → 15 invocations
+   per leaf.
+4. **Emit ``xfer_arrival`` + ``evict_after_node`` per invocation.**
+   Issuer = first node of the epoch (typically a CPU op at the
+   start of the leaf's forward). Consumer = first GPU node of the
+   epoch (gated on the H2D landing). Evict at the last GPU node
+   (releases the VRAM mirror; RAM master copy preserved by
+   ``_release_vram_only``). No ``d2h_xfer_arrivals`` — accelerate's
+   post_forward drops to meta (descriptor swap, no D2H bytes).
+5. **Refresh DAV's arrival / xfer-state indexes.** DAV.__init__
+   already ran against an empty hint set.
 
 Reference: ``docs/offload-schemes/accelerate_cpu-offload_buffers-false.md``.
 """
 
 from __future__ import annotations
 
-import copy
 from collections import defaultdict
 from typing import Any, TYPE_CHECKING
 
@@ -92,7 +77,7 @@ class _LeafEpoch:
 
 
 class AccelerateCpuOffload(DeviceAwareVanillaAsync):
-    """Plans accelerate-cpu_offload paging via trace rewrite at compile time."""
+    """Plans accelerate-cpu_offload paging as DAV hints at compile time."""
 
     def __init__(
         self,
@@ -105,43 +90,79 @@ class AccelerateCpuOffload(DeviceAwareVanillaAsync):
         super().__init__(obj_id, name, log, sys, args)
 
     def compile(self, trace: Trace) -> None:
-        # 1. Dealias every Memcpy HtoD node.
-        memcpy_h2d_dst_tids = self._dealias_memcpy_h2d(trace)
-
-        # 2. Resolve module paths and enumerate leaf invocations.
+        # 1. Resolve module_path for every node (gpu_runtime nodes
+        #    inherit from their CPU launcher via start-gated submit edges).
         node_module = self._resolve_node_modules(trace)
-        leaf_paths = self._discover_leaf_paths(trace, node_module)
+
+        # 2. WEIGHT tids on cuda → group by owning leaf module_path.
+        leaf_tids = self._resolve_paged_leaves(trace, node_module)
+
+        # 3. Patch each paged WEIGHT's device to "cpu" so layout puts
+        #    it in RAM. DAV's runtime then issues RAM→VRAM transfers
+        #    via the xfer_arrival hints we emit below; evict_after_node
+        #    uses _release_vram_only so the RAM master copy survives.
+        all_offload_tids: set[int] = set()
+        for tids in leaf_tids.values():
+            all_offload_tids.update(tids)
+        for tid in all_offload_tids:
+            tensor = trace.tensor_map.get(tid)
+            if tensor is not None:
+                tensor.args["device"] = "cpu"
+
+        # 4. Enumerate per-leaf invocations.
         leaf_invocations = self._enumerate_leaf_invocations(
-            trace, node_module, leaf_paths,
+            trace, node_module, set(leaf_tids.keys()),
         )
 
-        # 3. Per-invocation tid splitting.
-        split_stats = self._split_memcpy_outputs_per_invocation(
-            trace, leaf_invocations, memcpy_h2d_dst_tids,
-        )
+        # 5. Emit hints. Chain ALL invocations (across every leaf and
+        #    every token) in temporal order, so each prefetch's issuer
+        #    is the *previous* invocation's last_gpu_nid — i.e. the
+        #    previous leaf's eviction key. This serializes per-leaf
+        #    paging exactly the way accelerate's synchronous
+        #    cudaStreamSynchronize does in real life: only one leaf's
+        #    weights are in VRAM at a time.
+        #
+        #    Without this chain, the trace's weak inter-leaf control
+        #    graph lets multiple leaves' CPU preambles retire in
+        #    parallel in sim-time, so multiple prefetches queue up
+        #    concurrently and either (a) inflate VRAM peak (multiple
+        #    leaves resident simultaneously) or (b) collapse into
+        #    no-ops because the relevant tid is already LOADING from a
+        #    previous arrival. The chain serializes arrivals into the
+        #    intended one-leaf-at-a-time pattern.
+        ordered_invocations: list[tuple[int, str, _LeafEpoch]] = []
+        for leaf_path, invocations in leaf_invocations.items():
+            for inv in invocations:
+                if inv.first_gpu_nid is None or inv.last_gpu_nid is None:
+                    continue
+                ordered_invocations.append((inv.first_gpu_nid, leaf_path, inv))
+        ordered_invocations.sort(key=lambda x: x[0])
 
-        # 4. Aggressive cuda-INPUT → CONTEXT demotion.
-        n_demoted = 0
-        for tid, tensor in trace.tensor_map.items():
-            dev = str(tensor.args.get("device", "")).lower()
-            if not dev.startswith("cuda"):
-                continue
-            if tensor.args.get("tensor_type") == "INPUT":
-                tensor.args["tensor_type"] = "CONTEXT"
-                tensor.args.pop("implicit_input", None)
-                n_demoted += 1
-
-        # 5. Explicit evict_after_node for the freshly-minted tids.
+        xfer_arrivals: list[dict[str, Any]] = []
         evict_after_node: dict[int, list[int]] = defaultdict(list)
-        for last_gpu_nid, tids in split_stats.get("new_tids_by_invocation", {}).items():
-            if tids:
-                evict_after_node[last_gpu_nid].extend(tids)
+        prev_last_gpu_nid: int | None = None
+        for _, leaf_path, inv in ordered_invocations:
+            tids = leaf_tids[leaf_path]
+            if not tids:
+                continue
+            issuer = (
+                prev_last_gpu_nid
+                if prev_last_gpu_nid is not None
+                else inv.first_node
+            )
+            xfer_arrivals.append({
+                "issuer_node_id": issuer,
+                "consumer_node_id": inv.first_gpu_nid,
+                "cgsim_tids": tids,
+            })
+            evict_after_node[inv.last_gpu_nid].extend(tids)
+            prev_last_gpu_nid = inv.last_gpu_nid
 
-        trace.args["xfer_arrivals"] = []
+        trace.args["xfer_arrivals"] = xfer_arrivals
         trace.args["d2h_xfer_arrivals"] = []
         trace.args["evict_after_node"] = dict(evict_after_node)
 
-        # 6. Refresh DAV's hint and lifetime state.
+        # 6. Refresh DAV's hint and xfer-state indexes.
         self._arrivals_by_issuer.clear()
         self._gate_by_consumer.clear()
         self._pending_consumers_by_tid.clear()
@@ -149,139 +170,17 @@ class AccelerateCpuOffload(DeviceAwareVanillaAsync):
         self._build_arrival_index()
         self._xfer_state.clear()
         self._init_xfer_states()
-        self._rebuild_lifetime_tracking(trace)
 
+        total_invocations = sum(len(v) for v in leaf_invocations.values())
         print(
             f"[{type(self).__name__}] compile: "
-            f"memcpy_h2d_nodes={len(memcpy_h2d_dst_tids)} "
-            f"leaf_paths={len(leaf_paths)} "
-            f"invocations={sum(len(v) for v in leaf_invocations.values())} "
-            f"splits={split_stats['splits']} "
-            f"new_tids={split_stats['new_tids']} "
-            f"rewired_consumers={split_stats['rewired_consumers']} "
-            f"demoted_cuda_INPUT_to_CONTEXT={n_demoted} "
+            f"paged_leaves={len(leaf_tids)} "
+            f"paged_tids={len(all_offload_tids)} "
+            f"invocations={total_invocations} "
+            f"xfer_arrivals={len(xfer_arrivals)} "
             f"evict_after_node_keys={len(evict_after_node)}",
             flush=True,
         )
-
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _dealias_memcpy_h2d(trace: Trace) -> dict[int, int]:
-        result: dict[int, int] = {}
-        for nid, node in trace.node_map.items():
-            name = ""
-            if isinstance(node.args, dict):
-                name = node.args.get("op_name") or node.args.get("node_name") or ""
-            if "Memcpy HtoD" not in name:
-                continue
-            ins = list(node.input_tensors)
-            outs = list(node.output_tensors)
-            for tid in set(ins) & set(outs):
-                tensor = trace.tensor_map.get(tid)
-                if tensor is None:
-                    continue
-                if not str(tensor.args.get("device", "")).startswith("cuda"):
-                    continue
-                node.input_tensors = [t for t in ins if t != tid]
-                result[nid] = tid
-                break
-        return result
-
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _split_memcpy_outputs_per_invocation(
-        trace: Trace,
-        leaf_invocations: dict[str, list[_LeafEpoch]],
-        memcpy_h2d_dst_tids: dict[int, int],
-    ) -> dict[str, Any]:
-        memcpy_node_ids = set(memcpy_h2d_dst_tids.keys())
-        next_tid_id = (max(trace.tensor_map.keys()) + 1) if trace.tensor_map else 1
-        splits = 0
-        new_tids_created = 0
-        rewired_consumers = 0
-        new_tids_by_invocation: dict[int, list[int]] = defaultdict(list)
-
-        consumers_of_tid: dict[int, list[int]] = defaultdict(list)
-        for nid, node in trace.node_map.items():
-            for tid in node.input_tensors:
-                consumers_of_tid[tid].append(nid)
-
-        for leaf_path, invs in leaf_invocations.items():
-            for inv in invs:
-                if inv.last_gpu_nid is None:
-                    continue
-                first_nid = inv.first_node
-                last_nid = inv.last_gpu_nid
-                inv_memcpys = [
-                    nid for nid in memcpy_node_ids
-                    if first_nid <= nid <= last_nid
-                ]
-                if not inv_memcpys:
-                    continue
-                for memcpy_nid in inv_memcpys:
-                    memcpy_node = trace.node_map[memcpy_nid]
-                    orig_dst_tid = memcpy_h2d_dst_tids[memcpy_nid]
-                    new_tid_id = next_tid_id
-                    next_tid_id += 1
-                    orig_tensor = trace.tensor_map[orig_dst_tid]
-                    new_tensor = copy.copy(orig_tensor)
-                    new_tensor.id = new_tid_id
-                    new_tensor.args = dict(orig_tensor.args)
-                    new_tensor.args["tensor_type"] = "CONTEXT"
-                    new_tensor.args.pop("implicit_input", None)
-                    trace.tensor_map[new_tid_id] = new_tensor
-                    new_tids_created += 1
-
-                    memcpy_node.output_tensors = [
-                        new_tid_id if t == orig_dst_tid else t
-                        for t in memcpy_node.output_tensors
-                    ]
-
-                    for consumer_nid in consumers_of_tid.get(orig_dst_tid, []):
-                        if not (first_nid <= consumer_nid <= last_nid):
-                            continue
-                        cnode = trace.node_map.get(consumer_nid)
-                        if cnode is None or cnode is memcpy_node:
-                            continue
-                        if orig_dst_tid in cnode.input_tensors:
-                            cnode.input_tensors = [
-                                new_tid_id if t == orig_dst_tid else t
-                                for t in cnode.input_tensors
-                            ]
-                            rewired_consumers += 1
-                        if orig_dst_tid in cnode.output_tensors:
-                            cnode.output_tensors = [
-                                new_tid_id if t == orig_dst_tid else t
-                                for t in cnode.output_tensors
-                            ]
-                    splits += 1
-                    new_tids_by_invocation[inv.last_gpu_nid].append(new_tid_id)
-
-        return {
-            "splits": splits,
-            "new_tids": new_tids_created,
-            "rewired_consumers": rewired_consumers,
-            "new_tids_by_invocation": dict(new_tids_by_invocation),
-        }
-
-    # ------------------------------------------------------------------
-    def _rebuild_lifetime_tracking(self, trace: Trace) -> None:
-        self._remaining_consumers = {}
-        self._remaining_cpu_consumers = {}
-        self._consumers_by_tid = {}
-        for nid, n in trace.node_map.items():
-            ins = set(n.input_tensors)
-            outs = set(n.output_tensors)
-            for tid in ins:
-                self._remaining_consumers[tid] = self._remaining_consumers.get(tid, 0) + 1
-            role = n.args.get("runtime_role") if isinstance(n.args, dict) else None
-            if role == "cpu_leaf":
-                for tid in ins:
-                    self._remaining_cpu_consumers[tid] = (
-                        self._remaining_cpu_consumers.get(tid, 0) + 1
-                    )
-            for tid in ins - outs:
-                self._consumers_by_tid.setdefault(tid, []).append(nid)
 
     # ------------------------------------------------------------------
     def _resolve_node_modules(self, trace: Trace) -> dict[int, str]:
@@ -335,20 +234,33 @@ class AccelerateCpuOffload(DeviceAwareVanillaAsync):
         return node_module
 
     @staticmethod
-    def _discover_leaf_paths(
+    def _resolve_paged_leaves(
         trace: Trace, node_module: dict[int, str],
-    ) -> set[str]:
-        leaf_paths: set[str] = set()
+    ) -> dict[str, list[int]]:
+        """WEIGHT tid → owning module_path, grouped by leaf.
+
+        Only includes WEIGHT tids whose recorded device is cuda
+        (the actual model parameters in the eager trace). Their first
+        consumer's module_path identifies the leaf module.
+        """
+        consumers_by_tid: dict[int, list[int]] = defaultdict(list)
         for nid, node in trace.node_map.items():
-            name = ""
-            if isinstance(node.args, dict):
-                name = node.args.get("op_name") or node.args.get("node_name") or ""
-            if "cudaMemcpyAsync" not in name:
+            for tid in node.input_tensors:
+                consumers_by_tid[tid].append(nid)
+
+        leaf_tids: dict[str, list[int]] = defaultdict(list)
+        for tid, tensor in trace.tensor_map.items():
+            if tensor.args.get("tensor_type") != "WEIGHT":
                 continue
-            mp = node_module.get(nid)
-            if mp:
-                leaf_paths.add(mp)
-        return leaf_paths
+            device = str(tensor.args.get("device", "")).lower()
+            if not device.startswith("cuda"):
+                continue
+            for cnid in sorted(consumers_by_tid.get(tid, [])):
+                mp = node_module.get(cnid)
+                if mp:
+                    leaf_tids[mp].append(tid)
+                    break
+        return leaf_tids
 
     @staticmethod
     def _enumerate_leaf_invocations(
@@ -356,17 +268,26 @@ class AccelerateCpuOffload(DeviceAwareVanillaAsync):
         node_module: dict[int, str],
         leaf_paths: set[str],
     ) -> dict[str, list[_LeafEpoch]]:
+        """Enumerate per-leaf invocations.
+
+        Epochs are bracketed by the leaf's CPU activity (sorted by
+        start_ns). The CPU thread runs each module's forward
+        sequentially, so the CPU-side trace gives an unambiguous
+        per-token leaf bracketing. The GPU kernels each CPU forward
+        launches run asynchronously and may not be contiguous with
+        their CPU preamble in start_ns order (other modules' CPU
+        activity can land in between) — so we don't use them to
+        bracket the epoch. Instead, for each closed CPU epoch we
+        collect the gpu_runtime children launched by any submit node
+        in the epoch (via ``trace.args["start_gated_edges"]``) and
+        take the temporal min/max for first_gpu_nid / last_gpu_nid.
+        """
         sorted_leaves = sorted(leaf_paths, key=len, reverse=True)
 
-        order: list[tuple[int, int]] = []
-        for nid, node in trace.node_map.items():
-            sn = node.args.get("start_ns") if isinstance(node.args, dict) else None
-            order.append((sn if sn is not None else 1 << 62, nid))
-        order.sort()
-
-        invocations: dict[str, list[_LeafEpoch]] = defaultdict(list)
-        cur_leaf: str | None = None
-        cur_epoch: _LeafEpoch | None = None
+        # Map: cpu_launcher_nid -> list of launched gpu_runtime nids.
+        gpu_children_by_launcher: dict[int, list[int]] = defaultdict(list)
+        for parent_id, child_id in trace.args.get("start_gated_edges", []) or []:
+            gpu_children_by_launcher[int(parent_id)].append(int(child_id))
 
         def _classify(mp: str | None) -> str | None:
             if not mp:
@@ -376,23 +297,63 @@ class AccelerateCpuOffload(DeviceAwareVanillaAsync):
                     return leaf
             return None
 
-        for _, nid in order:
+        # Iterate CPU nodes (cpu_leaf + submit) by start_ns. gpu_runtime
+        # nodes are not part of the bracketing — their epoch membership
+        # is derived from their CPU launcher.
+        cpu_order: list[tuple[int, int]] = []
+        for nid, node in trace.node_map.items():
+            if not isinstance(node.args, dict):
+                continue
+            role = node.args.get("runtime_role")
+            if role not in ("cpu_leaf", "submit"):
+                continue
+            sn = node.args.get("start_ns")
+            cpu_order.append((sn if sn is not None else 1 << 62, nid))
+        cpu_order.sort()
+
+        invocations: dict[str, list[_LeafEpoch]] = defaultdict(list)
+
+        def _close_epoch(leaf: str, first_nid: int, launchers: list[int]) -> None:
+            if not launchers:
+                # No GPU activity in this CPU epoch — nothing to gate
+                # an arrival on. Skip.
+                return
+            gpu_nids: list[int] = []
+            for L in launchers:
+                gpu_nids.extend(gpu_children_by_launcher.get(L, []))
+            if not gpu_nids:
+                return
+            node_map = trace.node_map
+            def _sn(x: int) -> int:
+                n = node_map.get(x)
+                if n is None or not isinstance(n.args, dict):
+                    return 1 << 62
+                return n.args.get("start_ns") or (1 << 62)
+            gpu_nids.sort(key=_sn)
+            ep = _LeafEpoch(first_nid)
+            ep.first_gpu_nid = gpu_nids[0]
+            ep.last_gpu_nid = gpu_nids[-1]
+            invocations[leaf].append(ep)
+
+        cur_leaf: str | None = None
+        cur_first: int | None = None
+        cur_launchers: list[int] = []
+        for _, nid in cpu_order:
             node = trace.node_map[nid]
             mp = node_module.get(nid)
             leaf = _classify(mp)
             if leaf != cur_leaf:
-                if cur_epoch is not None and cur_leaf is not None:
-                    invocations[cur_leaf].append(cur_epoch)
+                if cur_leaf is not None and cur_first is not None:
+                    _close_epoch(cur_leaf, cur_first, cur_launchers)
                 cur_leaf = leaf
-                cur_epoch = _LeafEpoch(nid) if leaf is not None else None
-            if cur_epoch is None:
+                cur_first = nid if leaf is not None else None
+                cur_launchers = []
+            if cur_leaf is None:
                 continue
-            role = node.args.get("runtime_role") if isinstance(node.args, dict) else None
-            if role == "gpu_runtime":
-                if cur_epoch.first_gpu_nid is None:
-                    cur_epoch.first_gpu_nid = nid
-                cur_epoch.last_gpu_nid = nid
+            role = node.args.get("runtime_role")
+            if role == "submit":
+                cur_launchers.append(nid)
 
-        if cur_epoch is not None and cur_leaf is not None:
-            invocations[cur_leaf].append(cur_epoch)
+        if cur_leaf is not None and cur_first is not None:
+            _close_epoch(cur_leaf, cur_first, cur_launchers)
         return invocations

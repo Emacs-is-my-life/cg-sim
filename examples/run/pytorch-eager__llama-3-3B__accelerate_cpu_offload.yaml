@@ -5,7 +5,7 @@ logger:
 trace:
   type: "PytorchProfile"
   args:
-    bundle_manifest: "../trace/llama3b_offload_model/llama_bundle/manifest.json"
+    bundle_manifest: "../trace/pytorch-eager__llama-3-3B__RTX4090/llama_bundle/manifest.json"
     skip_zero_byte_tensors: true
     zero_wait_nodes: true
     add_temporal_data_control_edges: true
@@ -29,21 +29,26 @@ hardware:
       args:
         custom_dep_tag: "TARGET_RAM"
         memory_size_KB: 33554432
-        # 14 GB/s: measured pageable-with-driver-staged-bounce HtoD
-        # bandwidth from this offload trace's H2D events (mean
-        # 14.17 GB/s on 3B, 14.91 GB/s on 8B across all transfers
-        # >=10 MB; per docs/offload-schemes/accelerate_cpu-offload_buffers-false.md:239-246).
-        # cg-sim has a single bandwidth knob, but accelerate cpu_offload
-        # is unimodal in real life — every H2D goes through the same
-        # pageable bounce-buffer path — so a single tuned value is
-        # faithful here (unlike diffusers_group_offload's bimodal case).
-        memory_bandwidth_KBps: 14000000
+        # 12 GB/s: effective end-to-end wall throughput for
+        # accelerate cpu_offload paging on RTX 4090. Derived as
+        # (per-token H2D bytes) / (per-token wall) = 7.21 GB / 605 ms
+        # for Llama-3-3B (`docs/offload-schemes/accelerate_cpu-offload_buffers-false.md:180,185`).
+        # The doc's per-transfer mean of 14.17 GB/s (:239-246) is the
+        # PCIe DMA throughput in isolation; cg-sim's bandwidth knob
+        # determines the time each TransferJob takes wall-clock, so we
+        # use the effective wall figure here to absorb the per-leaf
+        # CUDA-driver overheads (cuMemCreate/cuMemMap, kernel launch,
+        # cudaStreamSynchronize) that the doc itemizes but cg-sim
+        # doesn't model directly. accelerate cpu_offload's H2D path is
+        # unimodal (every transfer goes through the same pageable
+        # bounce-buffer path) — a single tuned value is faithful here.
+        memory_bandwidth_KBps: 12000000
     - name: "vram0"
       type: "SimpleVRAM"
       args:
         custom_dep_tag: "TARGET_VRAM"
         memory_size_KB: 24624320
-        memory_bandwidth_KBps: 14000000
+        memory_bandwidth_KBps: 12000000
   storage:
     - name: "ssd"
       type: "SimpleSSD"
@@ -77,11 +82,3 @@ scheduler:
     cuda_compute: "gpu0"
     cuda_device: "cuda:0"
     h2d_streams: 1
-    # The offload trace's per-leaf pre/post_forward hooks generate
-    # many alias-style ops (aten::to, detach_, set_module_tensor_to_device),
-    # which makes the loader's _mark_implicit_inputs heuristic
-    # retype too many transient activations to INPUT and overrun
-    # VRAM at layout. Restrict the layout-time pre-claim to actual
-    # model parameters (WEIGHT + LEAF only); transient INPUT tids
-    # get claimed lazily by _ensure_outputs_claimed at runtime.
-    initial_tensor_types: ["WEIGHT", "LEAF"]
