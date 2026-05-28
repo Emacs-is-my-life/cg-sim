@@ -314,6 +314,126 @@ Additionally, `_onload_from_memory` calls `self.stream.synchronize()` at its
 start (line 282-283) — a host stall — so when the prefetch for block N+1 is
 slower than block N's compute, the host blocks at block N+1's `pre_forward`.
 
+### Per-event transfer bandwidth distribution
+
+The two-stream / two-path structure described above also produces a
+**bimodal bandwidth distribution** at the individual-Memcpy level.
+Computed from both bundles by linking each `Memcpy HtoD` GPU event to
+its source-tensor bytes via `data_input` edges in `runtime_edges.csv`
+(note: each Memcpy event has two `data_input` edges — one for the CPU
+source tensor, one for the GPU destination tensor, both of equal
+`tensor_size_bytes`; the per-event byte count is the **max**, not the
+sum, of those).
+
+Restricting to transfers ≥ 1 MB so the metric is bandwidth-dominated
+rather than launch-overhead-dominated:
+
+| run  | kind                 | stream | n     | mean GB/s | std  | p5    | p50   | p95   | max   |
+|------|----------------------|--------|-------|-----------|------|-------|-------|-------|-------|
+| SDXL | Pinned -> Device     | 13     | 2404  | **26.31** | 1.14 | 25.54 | 26.49 | 26.79 | 26.82 |
+| SDXL | Pageable -> Device   | 7      | 710   | **17.81** | 2.39 | 14.05 | 17.89 | 24.44 | 24.94 |
+| SD3  | Pinned -> Device     | 13     | 7700  | **26.41** | 0.94 | 25.50 | 26.58 | 26.80 | 26.83 |
+| SD3  | Pageable -> Device   | 7      | 1014  | **17.22** | 2.81 | 14.19 | 16.49 | 24.72 | 25.18 |
+
+Two facts to read off this table:
+
+- **The pinned path is exceptionally tight** (std ≈ 1 GB/s, p5–p95
+  spans ~1.3 GB/s out of 26.5 GB/s mean). Every matched-group
+  prefetch hits within ~2 GB/s of the PCIe 4.0 x16 pinned ceiling
+  (~27 GB/s practical on this RTX 4090 link, ~31.5 GB/s theoretical).
+- **The pageable path is wider** (std ≈ 2.4–2.8 GB/s) and has a
+  long right-tail reaching the pinned regime. The mode of the
+  pageable lobe sits at ~17–18 GB/s — about **1.5× slower** than
+  pinned — but a minority of transfers (~5–10%) reach 24–25 GB/s,
+  i.e. nearly pinned-rate. Those right-tail events likely reflect
+  driver-cached page-pinning: when the same source pages are touched
+  repeatedly across steps (CLIP/T5 weights re-used), the staging
+  buffers stay warm.
+
+Combined histogram (SDXL, large transfers, both kinds; bar ∝ count):
+
+```
+    9.0-10.0 GB/s  n=    2
+   10.0-11.0 GB/s  n=    8
+   11.0-12.0 GB/s  n=    6
+   12.0-13.0 GB/s  n=   15
+   13.0-14.0 GB/s  n=    9
+   14.0-15.0 GB/s  n=    8
+   15.0-16.0 GB/s  n=   27
+   16.0-17.0 GB/s  n=  158  ###
+   17.0-18.0 GB/s  n=  158  ###     ← pageable lobe (~17.8 GB/s)
+   18.0-19.0 GB/s  n=  272  #####
+   19.0-20.0 GB/s  n=   18
+   20.0-21.0 GB/s  n=    4
+   21.0-22.0 GB/s  n=   14
+   22.0-23.0 GB/s  n=   27
+   23.0-24.0 GB/s  n=   12
+   24.0-25.0 GB/s  n=   71  #
+   25.0-26.0 GB/s  n=   67  #
+   26.0-27.0 GB/s  n= 2238  ########################################  ← pinned lobe (~26.3 GB/s)
+```
+
+SD3 (same axis):
+
+```
+    9.0-10.0 GB/s  n=    2
+   10.0-11.0 GB/s  n=   12
+   11.0-12.0 GB/s  n=    8
+   12.0-13.0 GB/s  n=   13
+   13.0-14.0 GB/s  n=   16
+   14.0-15.0 GB/s  n=   33
+   15.0-16.0 GB/s  n=  332  ##      ← pageable lobe (~17.2 GB/s)
+   16.0-17.0 GB/s  n=  202  #
+   17.0-18.0 GB/s  n=  169  #
+   18.0-19.0 GB/s  n=  158  #
+   19.0-20.0 GB/s  n=   15
+   20.0-21.0 GB/s  n=   10
+   21.0-22.0 GB/s  n=   13
+   22.0-23.0 GB/s  n=   76
+   23.0-24.0 GB/s  n=   52
+   24.0-25.0 GB/s  n=  139  #
+   25.0-26.0 GB/s  n=  556  ###
+   26.0-27.0 GB/s  n= 6908  ########################################  ← pinned lobe (~26.4 GB/s)
+```
+
+Both runs show two clearly separated bandwidth clusters in the
+~17–18 GB/s and ~26 GB/s range. The bimodality is **structural** —
+fully partitioned by `(memcpy kind, stream_id)` — not a statistical
+mixture artifact. (Aggregate excess kurtosis is positive in both
+because the pinned mode dominates by count: 77% of large transfers
+in SDXL, 88% in SD3. The smaller pageable lobe acts as a left-tail
+in moment statistics. The bimodality is unambiguous in the histogram
+and in the per-kind table, not in raw kurtosis on the combined data.)
+
+### Contrast with `accelerate.cpu_offload(offload_buffers=False)`
+
+For reference, the Llama-3-{3,8}B accelerate cpu_offload traces in
+`examples/trace/llama{3,8}b_offload_model/` (analyzed in
+`accelerate_cpu-offload_buffers-false.md`) show a single **unimodal**
+H2D distribution at ~14–15 GB/s mean (excess kurtosis +1.3 to +9.1,
+positive — peakier than Gaussian, single mode). Every Memcpy event
+there is `Pageable -> Device` on the compute stream. Direct
+side-by-side:
+
+| aspect (large transfers ≥ 1 MB) | accelerate cpu_offload (Llama) | group_offload use_stream=True (SD3/SDXL) |
+|---------------------------------|--------------------------------|------------------------------------------|
+| modes                           | 1                              | 2 (pinned ~26 GB/s + pageable ~17 GB/s)  |
+| mean of dominant mode           | 14.2 GB/s                      | 26.4 GB/s (pinned)                       |
+| std of dominant mode            | 1.5 GB/s                       | 1.0 GB/s                                 |
+| dedicated copy stream           | no                             | yes (stream 13)                          |
+| compute/copy overlap            | 0%                             | 16–51% of pinned events overlap stream-7 |
+| host source memory              | always pageable                | pinned (matched) + pageable (unmatched)  |
+
+Note that absolute numbers between the two traces are **not
+directly comparable** — the Llama traces were recorded on a slower
+PCIe link (Llama's pinned-equivalent ceiling looks like ~17 GB/s,
+consistent with PCIe Gen3 x16 or a Gen4 link sharing bandwidth, while
+the SD3/SDXL traces saturate at ~27 GB/s, consistent with a clean
+Gen4 x16 link on RTX 4090). The portable facts are the **within-trace
+ratios** (pinned ≈ 1.5× pageable) and the **structural bimodality**
+that the offload library induces, neither of which appears in the
+single-stream pageable-only accelerate path.
+
 ### Implications for downstream modeling
 
 1. **Matched-group eviction is free.** Model it as a pointer swap plus an
