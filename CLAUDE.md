@@ -3,6 +3,40 @@
 Things a future Claude Code session should know before working in this
 repo. Everything here is durable — not specific to a transient task.
 
+## Faithfulness principle (read first)
+
+cg-sim's purpose is to predict what would happen in a real run
+without actually running it. If we make arbitrary adjustments to
+fit the simulator's output to a reference trace, the simulator
+stops being predictive — it just memorizes that trace.
+
+Two responsibilities, two faithfulness contracts:
+
+- **Loader's job**: faithfully translate the input trace into
+  cg-sim's internal representation. Don't drop information, don't
+  invent it. If the trace says a CPU node took 8 µs, that's 8 µs.
+- **Scheduler's job**: faithfully model the real scheduler's
+  behavior. If accelerate's `AlignDevicesHook.pre_forward` calls
+  `aten::to` once per parameter, the simulator's scheduler should
+  reflect that — not because it makes the wall time fit, but
+  because that's what the real scheduler does.
+
+Ad hoc adjustments (phantom nodes, latency knobs without physical
+backing, deleting work from the trace, "fudge factors") are the
+opposite of faithful. They should be **absolutely minimum** and
+need a defensible justification any researcher in the field would
+sign off on — e.g. "PCIe Gen4 ×16 pageable-source effective HtoD
+throughput is well-known to be 13 GB/s after host-stack overhead",
+not "13 GB/s lands inside the ±20% bound."
+
+When a verification gap remains after honest modeling, that gap is
+real data about the simulator's limits. Document the cause; don't
+mask it. Examples of "honest documentation" already in this repo:
+the SDXL bandwidth comment in this file (single global knob can't
+model pinned + pageable simultaneously), and the
+`AccelerateCpuOffload` tied-weight commit message (eager trace
+records tied parameters as one tid; accelerate doesn't dedup).
+
 ## DiffusersGroupOffload scheduler
 
 Lives at `sim/sched/diffusers_group_offload/`. Subclasses
