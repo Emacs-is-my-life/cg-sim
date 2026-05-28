@@ -237,11 +237,20 @@ class AccelerateCpuOffload(DeviceAwareVanillaAsync):
     def _resolve_paged_leaves(
         trace: Trace, node_module: dict[int, str],
     ) -> dict[str, list[int]]:
-        """WEIGHT tid → owning module_path, grouped by leaf.
+        """WEIGHT tid → owning module_path(s), grouped by leaf.
 
-        Only includes WEIGHT tids whose recorded device is cuda
-        (the actual model parameters in the eager trace). Their first
-        consumer's module_path identifies the leaf module.
+        Each tid is registered with EVERY leaf module whose forward
+        consumes it. Tied weights (e.g. Llama's
+        ``model.embed_tokens.weight`` ↔ ``lm_head.weight``, same
+        storage, two ``nn.Parameter`` aliases) appear once in the
+        eager trace's WEIGHT tensors but accelerate's
+        ``AlignDevicesHook.pre_forward`` issues a separate
+        ``cudaMemcpyAsync`` for each owning module — once when
+        ``embed_tokens`` runs at the top of the model and again when
+        ``lm_head`` runs at the bottom. Assigning to all consumers
+        reproduces the two-transfer behavior; the eviction after
+        ``embed_tokens.last_gpu_nid`` then releases the VRAM region
+        so ``lm_head``'s subsequent prefetch is a real transfer.
         """
         consumers_by_tid: dict[int, list[int]] = defaultdict(list)
         for nid, node in trace.node_map.items():
@@ -255,11 +264,12 @@ class AccelerateCpuOffload(DeviceAwareVanillaAsync):
             device = str(tensor.args.get("device", "")).lower()
             if not device.startswith("cuda"):
                 continue
+            seen_mps: set[str] = set()
             for cnid in sorted(consumers_by_tid.get(tid, [])):
                 mp = node_module.get(cnid)
-                if mp:
+                if mp and mp not in seen_mps:
+                    seen_mps.add(mp)
                     leaf_tids[mp].append(tid)
-                    break
         return leaf_tids
 
     @staticmethod
