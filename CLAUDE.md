@@ -144,6 +144,28 @@ cp -r antlr4-python3-runtime-4.9.3/src/antlr4 \
 
 The default 4.13.x conflicts with omegaconf's bundled ATN.
 
+## Commit hygiene
+
+**Never commit anything under `examples/trace/`.** That directory is
+LFS-managed (mostly); commits there belong to a separate trace-curation
+workflow run by the repo owner, not to scheduler/engine code changes.
+
+In particular: `git lfs pull` can leave files in a state where git
+sees the working-tree (real content, MBs) differing from the committed
+LFS pointer (134 bytes), and reports them as "modified". This is a
+false positive — never `git add` those files. The stop-hook check will
+nag about uncommitted changes; ignore that for trace files. There's
+also a pre-existing repo bug where `examples/trace/sd3_offload_group/*`
+files were committed as inline blobs containing LFS pointer text
+*without* a matching `.gitattributes` LFS filter entry — those will
+always show as modified in any session that ran `git lfs pull`. Fixing
+that requires adding LFS filter entries and re-pointing the files;
+not something to do incidentally.
+
+When committing code changes, always stage explicit code paths
+(`sim/...`, `examples/run/*.yaml`, `scripts/...`, `docs/...`,
+`CLAUDE.md`, `AGENTS.md`) — never use `git add .` or `git add -A`.
+
 ## Git / commit signing
 
 Commit signing in this environment is provided by the env-runner's
