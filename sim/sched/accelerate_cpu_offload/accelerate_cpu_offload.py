@@ -56,7 +56,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, TYPE_CHECKING
 
-from sim.core.trace import Trace
+from sim.core.trace import Node, Trace
 from sim.sched.device_aware_vanilla_async import DeviceAwareVanillaAsync
 
 if TYPE_CHECKING:
@@ -138,25 +138,73 @@ class AccelerateCpuOffload(DeviceAwareVanillaAsync):
                 ordered_invocations.append((inv.first_gpu_nid, leaf_path, inv))
         ordered_invocations.sort(key=lambda x: x[0])
 
+        # Per-leaf phantom CPU node models accelerate's hook execution
+        # chain (AlignDevicesHook.pre_forward + post_forward + the
+        # surrounding aten::to / cuMemMap / cudaStreamSynchronize that
+        # frame every cudaMemcpyAsync). The eager-mode trace has none of
+        # these because the eager run wasn't wrapped with accelerate, so
+        # the scheduler — as the model of accelerate — emits them.
+        #
+        # Wiring: phantom_i is parented to leaf_{i-1}.last_gpu_nid (or to
+        # leaf_0.first_node for the very first invocation). The H2D
+        # xfer_arrival for leaf_i is then issued from phantom_i, so the
+        # chain becomes
+        #   leaf_{i-1}.last_gpu retires
+        #     → eviction frees prev VRAM (evict_after_node)
+        #     → phantom_i runs on cpu_compute for pageable_post_xfer_us
+        #     → phantom_i retires → H2D for leaf_i fires
+        #     → leaf_i.first_gpu runs once H2D lands.
+        post_xfer_us = self._post_xfer_cpu_us["pageable"]
+        next_node_id = max(trace.node_map.keys()) + 1
+        phantom_id_for_inv: dict[int, int] = {}  # ordered_invocations index → phantom_id
+
+        for idx, (_, leaf_path, inv) in enumerate(ordered_invocations):
+            phantom_id = next_node_id
+            next_node_id += 1
+            phantom = Node(
+                node_id=phantom_id,
+                node_name=f"phantom_accelerate_hook__{leaf_path}",
+                compute_time_micros=post_xfer_us,
+                args={
+                    "device_type": "CPU",
+                    "runtime_role": "cpu_leaf",
+                    "phantom_offload_hook": True,
+                    "module": {"module_path": leaf_path},
+                },
+            )
+            trace.node_map[phantom_id] = phantom
+            phantom_id_for_inv[idx] = phantom_id
+
+        # Wire phantoms into the control graph. Parent = prev leaf's
+        # last_gpu_nid, or for the first invocation the leaf's own
+        # first_node.
+        prev_last_gpu_nid_chain: int | None = None
+        for idx, (_, leaf_path, inv) in enumerate(ordered_invocations):
+            phantom_id = phantom_id_for_inv[idx]
+            parent_nid = (
+                prev_last_gpu_nid_chain
+                if prev_last_gpu_nid_chain is not None
+                else inv.first_node
+            )
+            parent_node = trace.node_map[parent_nid]
+            phantom = trace.node_map[phantom_id]
+            phantom.add_parent_node(parent_nid)
+            parent_node.add_child_node(phantom_id)
+            self.pending_parent_count[phantom_id] = 1
+            prev_last_gpu_nid_chain = inv.last_gpu_nid
+
         xfer_arrivals: list[dict[str, Any]] = []
         evict_after_node: dict[int, list[int]] = defaultdict(list)
-        prev_last_gpu_nid: int | None = None
-        for _, leaf_path, inv in ordered_invocations:
+        for idx, (_, leaf_path, inv) in enumerate(ordered_invocations):
             tids = leaf_tids[leaf_path]
             if not tids:
                 continue
-            issuer = (
-                prev_last_gpu_nid
-                if prev_last_gpu_nid is not None
-                else inv.first_node
-            )
             xfer_arrivals.append({
-                "issuer_node_id": issuer,
+                "issuer_node_id": phantom_id_for_inv[idx],
                 "consumer_node_id": inv.first_gpu_nid,
                 "cgsim_tids": tids,
             })
             evict_after_node[inv.last_gpu_nid].extend(tids)
-            prev_last_gpu_nid = inv.last_gpu_nid
 
         trace.args["xfer_arrivals"] = xfer_arrivals
         trace.args["d2h_xfer_arrivals"] = []

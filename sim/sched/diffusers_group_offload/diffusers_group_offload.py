@@ -29,7 +29,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, TYPE_CHECKING
 
-from sim.core.trace import Trace
+from sim.core.trace import Node, Trace
 from sim.sched.device_aware_vanilla_async import DeviceAwareVanillaAsync
 
 if TYPE_CHECKING:
@@ -159,6 +159,76 @@ class DiffusersGroupOffload(DeviceAwareVanillaAsync):
                     "cgsim_tids": unmatched_tids,
                 })
 
+        # Per-arrival phantom CPU node models diffusers' hook-execution
+        # chain. Matched (pinned, side-stream) prefetches incur a small
+        # software-stack overhead per transfer (~70 µs); unmatched
+        # (pageable, compute-stream) transfers incur the heavier pageable
+        # path overhead (~1090 µs). For mixed batches (only the
+        # component-start arrival, which lumps unmatched + first matched
+        # tids together) we use the pageable value conservatively — the
+        # component-start fires on the compute stream in reality and
+        # blocks the same way the unmatched path does.
+        #
+        # Wiring: phantom_i is parented to the original issuer of
+        # arrival_i; arrival_i's issuer is then rewritten to phantom_i.
+        # So the chain becomes
+        #   original_issuer retires → phantom runs on cpu_compute
+        #     → phantom retires → arrival fires.
+        # The arrival's existing consumer-gate is unchanged.
+        matched_tids: set[int] = set()
+        for _tids in matched_tids_by_block.values():
+            matched_tids.update(_tids)
+
+        def classify_path(tids: list[int]) -> str:
+            in_matched = sum(1 for t in tids if t in matched_tids)
+            if in_matched == len(tids):
+                return "pinned"
+            return "pageable"  # all-unmatched or mixed (component-start)
+
+        next_node_id = max(trace.node_map.keys()) + 1
+
+        def inject_phantom(original_issuer: int, tids: list[int], tag: str) -> int:
+            nonlocal next_node_id
+            path = classify_path(tids)
+            phantom_id = next_node_id
+            next_node_id += 1
+            phantom = Node(
+                node_id=phantom_id,
+                node_name=f"phantom_diffusers_hook_{path}__{tag}__after_{original_issuer}",
+                compute_time_micros=self._post_xfer_cpu_us[path],
+                args={
+                    "device_type": "CPU",
+                    "runtime_role": "cpu_leaf",
+                    "phantom_offload_hook": True,
+                    "transfer_path": path,
+                },
+            )
+            trace.node_map[phantom_id] = phantom
+            phantom.add_parent_node(original_issuer)
+            trace.node_map[original_issuer].add_child_node(phantom_id)
+            self.pending_parent_count[phantom_id] = 1
+            return phantom_id
+
+        phantom_count = {"pinned": 0, "pageable": 0}
+        for arrival in xfer_arrivals:
+            new_issuer = inject_phantom(
+                arrival["issuer_node_id"], arrival["cgsim_tids"], "h2d"
+            )
+            arrival["issuer_node_id"] = new_issuer
+            phantom_count[
+                "pinned" if classify_path(arrival["cgsim_tids"]) == "pinned"
+                else "pageable"
+            ] += 1
+        for arrival in d2h_xfer_arrivals:
+            new_issuer = inject_phantom(
+                arrival["issuer_node_id"], arrival["cgsim_tids"], "d2h"
+            )
+            arrival["issuer_node_id"] = new_issuer
+            phantom_count[
+                "pinned" if classify_path(arrival["cgsim_tids"]) == "pinned"
+                else "pageable"
+            ] += 1
+
         trace.args["xfer_arrivals"] = xfer_arrivals
         trace.args["d2h_xfer_arrivals"] = d2h_xfer_arrivals
         trace.args["evict_after_node"] = dict(evict_after_node)
@@ -187,7 +257,8 @@ class DiffusersGroupOffload(DeviceAwareVanillaAsync):
             f"spans={len(spans)} "
             f"xfer_arrivals={len(xfer_arrivals)} "
             f"d2h_xfer_arrivals={len(d2h_xfer_arrivals)} "
-            f"evict_after_node={len(evict_after_node)}",
+            f"evict_after_node={len(evict_after_node)} "
+            f"phantom_hooks=pinned:{phantom_count['pinned']}+pageable:{phantom_count['pageable']}",
             flush=True,
         )
 

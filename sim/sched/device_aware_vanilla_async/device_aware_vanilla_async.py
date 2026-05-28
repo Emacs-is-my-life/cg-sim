@@ -113,6 +113,26 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         self.initial_tensor_types = set(self.args.get("initial_tensor_types", ["WEIGHT", "INPUT", "LEAF"]))
         self.node_ids: list[int] = list(self.sys.trace.node_map.keys())
 
+        # Per-transfer software-stack overhead, by DMA path. Used by
+        # subclass schedulers (AccelerateCpuOffload, DiffusersGroupOffload)
+        # to size phantom CPU nodes they inject into trace.node_map during
+        # compile() — one per leaf invocation, sitting between the previous
+        # leaf's last GPU node and the next leaf's H2D arrival issuer.
+        #
+        # These represent the CPU-side hook dispatch + CUDA driver entry
+        # chain that wraps every cudaMemcpyAsync but isn't in the eager-mode
+        # trace input (since the eager run had no accelerate/diffusers hooks
+        # installed). Defaults derived from inter-Memcpy gap statistics in
+        # the reference offload traces.
+        #
+        # Per-workload tuning of these knobs is discouraged — they represent
+        # properties of the DMA path (pageable bounce-buffer dance vs pinned
+        # async side-stream), not of any particular model.
+        self._post_xfer_cpu_us: dict[str, float] = {
+            "pageable": float(self.args.get("pageable_post_xfer_us", 1090.0)),
+            "pinned": float(self.args.get("pinned_post_xfer_us", 70.0)),
+        }
+
         # Start-gated edges: (parent_id, child_id) pairs the loader
         # carved out of the trace's control graph because they model
         # CUDA's async-launch semantics — a `submit` node on the CPU
