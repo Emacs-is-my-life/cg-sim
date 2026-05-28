@@ -4,6 +4,12 @@ This note documents the `memory_bandwidth_KBps` value used in the cg-sim
 YAML configurations for SDXL/SD3 with `DiffusersGroupOffload`, and why it
 differs from the catalog-spec PCIe Gen4 ×16 number that the LLM YAMLs use.
 
+## Related PyTorch Reference
+https://docs.pytorch.org/tutorials/intermediate/pinmem_nonblock.html
+
+Read the documentation above, for clear understanding of how `pin_memory()` works in PyTorch.
+
+
 ## Bottom line
 
 For all four diffusion configs
