@@ -743,6 +743,18 @@ def _solve_lp_highspy(
 
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
+    # Numerical conditioning. The model is built in raw bytes: sizes ~7e8,
+    # peak/RHS ~2e10, mixed with the 1e6 peak-slack penalty — a ~1e16
+    # objective dynamic range. On large-weight models (llama8b) HiGHS'
+    # simplex then fails (model_status Unknown/Infeasible, or "Solve error"
+    # with presolve off) even though the LP is provably feasible (s_P /
+    # L_window slacks absorb any peak/lateness). These are HiGHS' own
+    # recommended scale exponents (power-of-2 on cost / bound): they rescale
+    # the offending ranges into a solvable window WITHOUT changing the
+    # optimum (uniform scaling). Verified: llama8b 8g goes from
+    # Unknown→Optimal in ~10 s. See IMPROVEMENTS.md §1bis.
+    h.setOptionValue("user_bound_scale", -14)
+    h.setOptionValue("user_objective_scale", -7)
     _set_highs_threads(h, solver_threads)
     if time_limit_s is not None:
         h.setOptionValue("time_limit", float(time_limit_s))
@@ -811,6 +823,18 @@ def _build_highspy_model(
 
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
+    # Numerical conditioning. The model is built in raw bytes: sizes ~7e8,
+    # peak/RHS ~2e10, mixed with the 1e6 peak-slack penalty — a ~1e16
+    # objective dynamic range. On large-weight models (llama8b) HiGHS'
+    # simplex then fails (model_status Unknown/Infeasible, or "Solve error"
+    # with presolve off) even though the LP is provably feasible (s_P /
+    # L_window slacks absorb any peak/lateness). These are HiGHS' own
+    # recommended scale exponents (power-of-2 on cost / bound): they rescale
+    # the offending ranges into a solvable window WITHOUT changing the
+    # optimum (uniform scaling). Verified: llama8b 8g goes from
+    # Unknown→Optimal in ~10 s. See IMPROVEMENTS.md §1bis.
+    h.setOptionValue("user_bound_scale", -14)
+    h.setOptionValue("user_objective_scale", -7)
     _set_highs_threads(h, solver_threads)
     if time_limit_s is not None:
         h.setOptionValue("time_limit", float(time_limit_s))
@@ -1268,16 +1292,26 @@ def _solve_milp(
     # the moment when a streaming tid must be alive because its
     # prefetch is in-flight. These are the binding peak moments the
     # legacy 256-uniform-stride grid systematically missed.
-    n_arc_samples = 0
+    # Collect arc_start times deduped by time, recording the LARGEST
+    # tid size whose arc opens at that time. Size drives the thinning
+    # policy below: big tids dominate peak, so their arc moments are
+    # the ones worth keeping when the grid must be capped.
+    arc_size_by_t: dict[int, int] = {}
     for _tid in feasible_tids:
         _tau = _pt_arc_tau[_tid]
+        _size = int(pool[_tid].size_bytes)
         _consumers = pool[_tid].consumers
         for _c_nid, _c_start, _c_end in _consumers:
             _arc_start = max(0, int(_c_start) - _tau)
-            if _arc_start not in seen_t:
-                samples.append((-1, _arc_start))
-                seen_t.add(_arc_start)
-                n_arc_samples += 1
+            if _arc_start in seen_t:
+                continue
+            prev = arc_size_by_t.get(_arc_start)
+            if prev is None or _size > prev:
+                arc_size_by_t[_arc_start] = _size
+    for _arc_start in arc_size_by_t:
+        samples.append((-1, _arc_start))
+        seen_t.add(_arc_start)
+    n_arc_samples = len(arc_size_by_t)
     n_post_consumer_samples = 0
 
     # Big intermediate producer events (large transient intermediates
@@ -1316,26 +1350,55 @@ def _solve_milp(
 
     samples.sort(key=lambda x: x[1])
 
-    # Safety cap for very large traces. We always keep every arc_start
-    # event (those are the binding moments for streaming residency)
-    # and uniformly down-sample the consumer / post-consumer set if
-    # the total grows past max_peak_samples * 8. max_peak_samples ≤ 0
-    # disables the cap.
-    if max_peak_samples > 0 and len(samples) > max_peak_samples * 8:
-        keep_arc_post = [s for s in samples if s[0] == -1]
-        keep_consumer = [s for s in samples if s[0] != -1]
-        if len(keep_consumer) > max_peak_samples:
-            step = len(keep_consumer) / float(max_peak_samples)
-            keep_consumer = [
-                keep_consumer[int(i * step)] for i in range(max_peak_samples)
+    # Safety cap for very large traces. The arc_start events (one per
+    # distinct consumer time of every streaming tid) DOMINATE the grid
+    # on multi-iter workloads — e.g. llama8b: ~22k arc vs ~9k consumer
+    # events, sd3med: ~69k arc. The legacy guard kept ALL arc samples
+    # and thinned only consumers, so --max-peak-samples had no effect
+    # on the binding term and the LP relaxation itself timed out
+    # (falling back to stream-everything). We now thin arc samples too:
+    #   - keep the arcs of the LARGEST tids (they dominate peak), plus
+    #   - a uniform time-spread of the rest (preserves coverage of
+    #     binding moments across the whole timeline).
+    # Consumer / big-interm samples are thinned uniformly as before.
+    # max_peak_samples ≤ 0 disables the cap.
+    n_arc_kept = n_arc_samples
+    if max_peak_samples > 0:
+        arc_samples = [s for s in samples if s[0] == -1]
+        other_samples = [s for s in samples if s[0] != -1]
+        # Arc budget: a small multiple of max_peak_samples is plenty —
+        # adjacent arcs constrain nearly the same alive set.
+        arc_budget = max_peak_samples * 2
+        if len(arc_samples) > arc_budget:
+            n_by_size = arc_budget // 2
+            by_size = sorted(
+                arc_samples,
+                key=lambda s: arc_size_by_t.get(s[1], 0),
+                reverse=True,
+            )
+            keep_size = by_size[:n_by_size]
+            keep_size_t = {s[1] for s in keep_size}
+            rest = [s for s in arc_samples if s[1] not in keep_size_t]
+            n_stride = arc_budget - len(keep_size)
+            if rest and n_stride > 0:
+                step = len(rest) / float(n_stride)
+                keep_stride = [rest[int(i * step)] for i in range(n_stride)]
+            else:
+                keep_stride = []
+            arc_samples = keep_size + keep_stride
+        n_arc_kept = len(arc_samples)
+        if len(other_samples) > max_peak_samples:
+            step = len(other_samples) / float(max_peak_samples)
+            other_samples = [
+                other_samples[int(i * step)] for i in range(max_peak_samples)
             ]
-        samples = sorted(keep_arc_post + keep_consumer, key=lambda x: x[1])
+        samples = sorted(arc_samples + other_samples, key=lambda x: x[1])
 
     if audit:
         print(
             f"[ct_milp_lateness:audit] event-aligned sample grid: "
             f"gpu_consumer={n_gpu_samples} "
-            f"arc_start={n_arc_samples} "
+            f"arc_start={n_arc_samples}→{n_arc_kept} "
             f"post_consumer={n_post_consumer_samples} "
             f"big_interm={n_big_interm_samples} "
             f"total={len(samples)} "
