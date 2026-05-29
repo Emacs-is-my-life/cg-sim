@@ -663,9 +663,18 @@ def _stream_cold_tensors_to_cover_overrun(
     feasible_tids: list[int],
     c_solution: dict[int, float],
     e_solution: dict[tuple[int, int], float],
-    overrun_bytes: int,
+    target_adj_bytes: float,
+    peak_fn: "Any",
 ) -> dict[str, int]:
-    """Flip enough cold tensors to streamed to cover a peak overrun.
+    """Flip cold tensors to streamed until the TRUE modeled peak fits.
+
+    ``peak_fn(c_solution, e_solution)`` recomputes the real max-over-samples
+    alive-set peak for the current assignment. We flip cold→streamed in
+    priority order and *recompute* the true peak rather than assuming each
+    flipped byte removes a byte from peak (the old code subtracted
+    ``streamed_bytes`` from ``P`` directly — a flipped tensor still occupies
+    ``size`` at its consumers and in-flight, so that under-credited the peak
+    and silently shipped plans that overran in sim).
 
     Selection policy:
       1. tensors with fewer consumers first;
@@ -673,7 +682,10 @@ def _stream_cold_tensors_to_cover_overrun(
       3. then larger tensors, to avoid excessive tiny picks.
 
     Only c-feasible tensors are candidates because c-infeasible and
-    forced-cold tensors cannot be safely initial-prefetched.
+    forced-cold tensors cannot be safely initial-prefetched. Converges to
+    the stream-everything-feasible plan in the limit; if even that overruns
+    (cap below the streaming floor) the residual is reported honestly so
+    the caller sets ``target_infeasible=True``.
     """
     candidates: list[tuple[int, int, int, int, int]] = []
     for tid in feasible_tids:
@@ -694,21 +706,35 @@ def _stream_cold_tensors_to_cover_overrun(
 
     streamed_bytes = 0
     streamed_count = 0
-    for _n_uses, _neg_first_use, _neg_size, tid, size in candidates:
-        if streamed_bytes >= overrun_bytes:
-            break
-        pt = pool[tid]
-        c_solution[tid] = 0.0
-        for k in range(len(pt.consumers) - 1):
-            if pt.gap_feasibility[k]:
-                e_solution[(tid, k)] = 1.0
-        streamed_bytes += size
-        streamed_count += 1
+    cur_peak = float(peak_fn(c_solution, e_solution))
+    idx = 0
+    n = len(candidates)
+    # Flip in byte-sized batches (estimated from the current overrun), then
+    # recompute the true peak; repeat while still over. Each round's batch
+    # is an over-estimate of the reduction, so a few rounds converge.
+    while cur_peak > target_adj_bytes and idx < n:
+        overrun = cur_peak - target_adj_bytes
+        batch_bytes = 0.0
+        while idx < n and batch_bytes < overrun:
+            _n_uses, _neg_first_use, _neg_size, tid, size = candidates[idx]
+            idx += 1
+            if float(c_solution.get(tid, 1.0)) < 0.5:
+                continue
+            pt = pool[tid]
+            c_solution[tid] = 0.0
+            for k in range(len(pt.consumers) - 1):
+                if pt.gap_feasibility[k]:
+                    e_solution[(tid, k)] = 1.0
+            streamed_bytes += size
+            streamed_count += 1
+            batch_bytes += size
+        cur_peak = float(peak_fn(c_solution, e_solution))
 
     return {
         "streamed_count": streamed_count,
         "streamed_bytes": streamed_bytes,
-        "residual_overrun_bytes": max(0, int(overrun_bytes) - streamed_bytes),
+        "final_peak_bytes": int(cur_peak),
+        "residual_overrun_bytes": max(0, int(cur_peak - target_adj_bytes)),
     }
 
 
@@ -933,6 +959,7 @@ def _solve_two_phase_highspy(
     solver_threads: int,
     audit: bool,
     phase1_time_limit_s: float | None = None,
+    feasible_fallback: np.ndarray | None = None,
 ) -> tuple[np.ndarray | None, bool, str, str, bool]:
     """Two-phase solve via highspy.
 
@@ -990,10 +1017,12 @@ def _solve_two_phase_highspy(
     status = h.getModelStatus()
     if status != highspy.HighsModelStatus.kOptimal:
         msg = h.modelStatusToString(status)
+        seeded = feasible_fallback is not None
         if audit:
             print(
                 f"[ct_milp_lateness:solver] phase1 LP not optimal "
-                f"({msg}); running cold-start MILP"
+                f"({msg}); running MILP "
+                f"{'seeded with stream-everything feasible incumbent' if seeded else 'cold'}"
             )
         h_cold = _build_highspy_model(
             total_vars=total_vars,
@@ -1010,8 +1039,11 @@ def _solve_two_phase_highspy(
             h_cold,
             total_vars=total_vars,
             integrality_arr=integrality_arr,
-            warm_start=None,
-            label=f"cold-start after phase1 {msg}",
+            warm_start=feasible_fallback,
+            label=(
+                f"feasible-seed after phase1 {msg}" if seeded
+                else f"cold-start after phase1 {msg}"
+            ),
         )
     lp_sol = h.getSolution()
     x_lp = np.asarray(list(lp_sol.col_value), dtype=np.float64)
@@ -1466,6 +1498,16 @@ def _solve_milp(
                 f"{arc_queue_factor} (models PCIe queue residency)"
             )
 
+    # Per-sample peak terms, saved so we can recompute the TRUE modeled
+    # alive-set peak for any (c, e) assignment after the solve — used by
+    # the honest overrun-repair below. Each entry is
+    # (const_bytes, [(var_col, coef), ...]); peak(x) = max over samples of
+    # const + Σ coef·x[var_col]. This is the exact same arithmetic the
+    # per-sample peak rows encode (minus the lateness→peak coupling term,
+    # which is a modeling addon, not physical VRAM), so the recomputed
+    # peak is consistent with the constraints by construction.
+    peak_sample_terms: list[tuple[float, list[tuple[int, float]]]] = []
+
     n_samples_total = len(samples)
     audit_progress_step = max(1, n_samples_total // 10)
     for _sample_idx, (nid_sample, t_l) in enumerate(samples):
@@ -1550,6 +1592,12 @@ def _solve_milp(
             else:
                 # Infeasible gap — no evict can fit, tensor stays.
                 const_addons += size
+
+        # Save this sample's peak terms for post-solve true-peak recompute.
+        peak_sample_terms.append((
+            float(const_addons),
+            [(vc, cf) for vc, cf in var_coefs.items() if abs(cf) >= 1e-9],
+        ))
 
         # P ≥ const_addons + Σ var_coef · c + α · L_window_i
         #   ⇒  Σ var_coef · c − P + α · L_window_i ≤ −const_addons
@@ -1708,6 +1756,35 @@ def _solve_milp(
     res_success = False
     res_message = ""
 
+    # Feasibility-aware warm-start: the stream-everything assignment
+    # (c=0 for c-feasible, c=1 for c-infeasible, e=1 on feasible gaps of
+    # streamed tids) is a known sim-feasible plan with a low residency
+    # floor. Continuous vars are set to safe over-estimates so the point
+    # satisfies every row (slacks have no upper bound). When phase-1 LP
+    # doesn't reach Optimal (e.g. numerical "Solve error" on tight caps),
+    # seeding phase-2 with THIS instead of running cold guarantees the
+    # MILP returns a feasible under-floor incumbent rather than a garbage
+    # high-peak one that only the overrun-repair could (dishonestly) mask.
+    feasible_warm_start = np.zeros(total_vars, dtype=np.float64)
+    for tid in feasible_tids:
+        pt = pool[tid]
+        c_val = 0.0 if pt.c_feasibility else 1.0
+        feasible_warm_start[c_var_idx[tid]] = c_val
+        for k in range(len(pt.consumers) - 1):
+            if (tid, k) in e_var_idx:
+                feasible_warm_start[e_var_idx[(tid, k)]] = (
+                    1.0 if c_val < 0.5 else 0.0
+                )
+    _total_feasible_bytes = float(
+        sum(pool[t].size_bytes for t in feasible_tids)
+    ) + float(constant_floor)
+    feasible_warm_start[P_IDX] = _total_feasible_bytes
+    if peak_target_bytes is not None:
+        feasible_warm_start[S_PEAK_IDX] = _total_feasible_bytes
+    _big_L = float(sum(pool[t].tau_h2d_ns for t in feasible_tids))
+    for i in range(NUM_LATENESS_WINDOWS):
+        feasible_warm_start[L_WINDOW_IDX_BASE + i] = _big_L
+
     if _HIGHSPY_AVAILABLE and integrality_arr is not None and not lp_relaxation:
         used_two_phase = True
         res_x, res_success, res_message, milp_status_str, lp_only = (
@@ -1724,6 +1801,7 @@ def _solve_milp(
                 solver_threads=solver_threads,
                 audit=audit,
                 phase1_time_limit_s=phase1_time_limit_s,
+                feasible_fallback=feasible_warm_start,
             )
         )
         # If MILP couldn't even start (rare), fall through to scipy fallback.
@@ -1891,6 +1969,30 @@ def _solve_milp(
         for i in range(NUM_LATENESS_WINDOWS)
     ]
 
+    # True modeled peak for any (c, e) assignment, recomputed over the
+    # saved per-sample terms. Consistent-by-construction with the peak
+    # constraint rows; used to report an honest peak and to drive the
+    # iterative overrun-repair below.
+    _c_col_to_tid = {col: tid for tid, col in c_var_idx.items()}
+    _e_col_to_key = {col: key for key, col in e_var_idx.items()}
+
+    def _alive_peak(c_sol: dict[int, float],
+                    e_sol: dict[tuple[int, int], float]) -> float:
+        pk = 0.0
+        for const_s, terms in peak_sample_terms:
+            v = const_s
+            for col, coef in terms:
+                tid_c = _c_col_to_tid.get(col)
+                if tid_c is not None:
+                    v += coef * float(c_sol.get(tid_c, 0.0))
+                else:
+                    key_e = _e_col_to_key.get(col)
+                    if key_e is not None:
+                        v += coef * float(e_sol.get(key_e, 0.0))
+            if v > pk:
+                pk = v
+        return pk
+
     if res.success and res.x is not None:
         x = np.asarray(res.x)
         for tid in feasible_tids:
@@ -1901,7 +2003,7 @@ def _solve_milp(
                     e_solution[(tid, k)] = float(x[e_var_idx[(tid, k)]])
                 else:
                     e_solution[(tid, k)] = 0.0
-        peak_bytes = int(float(x[P_IDX]))
+        peak_bytes = int(_alive_peak(c_solution, e_solution))
         # Total lateness = sum across all window slacks (physically:
         # cascading stalls add to wall-clock).
         window_slacks_ns = [
@@ -1921,34 +2023,42 @@ def _solve_milp(
                 f"{[(i, round(v/1e6, 2)) for i, v in nonzero]}"
             )
         if peak_target_bytes is not None:
-            peak_overrun_bytes = int(float(x[S_PEAK_IDX]))
-            if peak_overrun_bytes > 1:
+            target_adj = max(
+                0.0,
+                float(peak_target_bytes) * (1.0 - float(safety_margin_frac)),
+            )
+            # x[S_PEAK_IDX] is the solver's own overrun slack; the TRUE
+            # peak is peak_bytes (recomputed above). Repair against the
+            # true peak so the reported number is what sim will actually
+            # hit — not the old `peak − streamed_bytes` under-credit.
+            if peak_bytes > target_adj + 1:
                 overrun_repair_diag = _stream_cold_tensors_to_cover_overrun(
                     pool,
                     feasible_tids,
                     c_solution,
                     e_solution,
-                    peak_overrun_bytes,
+                    target_adj,
+                    _alive_peak,
                 )
-                streamed_repair_bytes = int(
-                    overrun_repair_diag["streamed_bytes"]
-                )
-                residual_overrun_bytes = int(
+                peak_bytes = int(overrun_repair_diag["final_peak_bytes"])
+                peak_overrun_bytes = int(
                     overrun_repair_diag["residual_overrun_bytes"]
                 )
-                peak_bytes = max(0, peak_bytes - streamed_repair_bytes)
-                peak_overrun_bytes = residual_overrun_bytes
                 target_infeasible = peak_overrun_bytes > 1
                 if audit:
                     print(
-                        f"[ct_milp_lateness:solver] solution exceeds "
-                        f"cap by {float(x[S_PEAK_IDX])/1e6:.1f}MB; "
-                        f"streaming {overrun_repair_diag['streamed_count']} "
-                        f"cold tensors "
-                        f"({streamed_repair_bytes/1e6:.1f}MB) selected by "
-                        f"fewest consumers, then farthest first use. "
-                        f"residual_overrun={peak_overrun_bytes/1e6:.1f}MB"
+                        f"[ct_milp_lateness:solver] true modeled peak "
+                        f"exceeds cap; streamed "
+                        f"{overrun_repair_diag['streamed_count']} cold tensors "
+                        f"({overrun_repair_diag['streamed_bytes']/1e6:.1f}MB) "
+                        f"selected by fewest consumers, then farthest first "
+                        f"use → true peak now {peak_bytes/1e6:.1f}MB, "
+                        f"residual_overrun={peak_overrun_bytes/1e6:.1f}MB "
+                        f"(target_infeasible={target_infeasible})"
                     )
+            else:
+                peak_overrun_bytes = 0
+                target_infeasible = False
     if not (res.success and res.x is not None):
         # Hard-fallback: stream every async-feasible tid (c=0),
         # cold-load every c_feasibility=False tid (c=1, layout time).
@@ -1976,26 +2086,25 @@ def _solve_milp(
                     e_solution[(tid, k)] = 1.0
                 else:
                     e_solution[(tid, k)] = 0.0
-        # Peak estimate: forced_cold + c_feasibility=False bound-cold
-        # tids' total size (loaded at layout). Streamed tids contribute
-        # only during their active residency windows; in fallback
-        # mode the per-sample peak isn't computed precisely.
-        cold_now_bytes = sum(
-            pool[t].size_bytes
-            for t in feasible_tids
-            if c_solution[t] >= 0.5
-        )
-        peak_bytes = int(constant_floor + cold_now_bytes)
+        # Honest peak: recompute the true max-over-samples alive set for
+        # the stream-everything assignment (same arithmetic as the peak
+        # rows), not just the layout cold floor.
+        peak_bytes = int(_alive_peak(c_solution, e_solution))
         lateness_ns = 0
-        if peak_target_bytes is not None and peak_bytes > peak_target_bytes:
-            target_infeasible = True
+        if peak_target_bytes is not None:
+            target_adj = max(
+                0.0,
+                float(peak_target_bytes) * (1.0 - float(safety_margin_frac)),
+            )
+            peak_overrun_bytes = max(0, int(peak_bytes - target_adj))
+            target_infeasible = peak_overrun_bytes > 1
         if audit:
             n_stream = sum(1 for t in feasible_tids if c_solution[t] < 0.5)
             n_cold = sum(1 for t in feasible_tids if c_solution[t] >= 0.5)
             print(
                 f"[ct_milp_lateness:solver] hard-fallback: stream-where-feasible "
                 f"(c=0 for {n_stream} async-feasible tids, c=1 for {n_cold} "
-                f"bound-cold). layout_cold={peak_bytes/1e6:.1f}MB "
+                f"bound-cold). true_peak={peak_bytes/1e6:.1f}MB "
                 f"target_infeasible={target_infeasible}"
             )
 

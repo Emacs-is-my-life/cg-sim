@@ -170,7 +170,96 @@ it's strictly better to skip phase-1 and give all 600 s to phase-2.
 Split the 5 aborts by **modeled peak vs cap** (sweep table) — they need
 different fixes:
 
-### Class A — modeled < cap but sim aborts → the LP↔sim peak gap (FIXABLE without margin)
+### ⟫ UPDATE (verified by sim): the aborts are a SOLVER-CONVERGENCE problem, not an injector/formulation one
+
+Ran the decisive test the analysis below was missing — sim a genuinely
+**converged, under-cap, non-masked** MILP plan:
+
+- **sd3-med 14g** (`fell_back=False`, proven incumbent, no "solution exceeds
+  cap" line, s_P≈0) → **sim FINISHED CLEAN, no abort.** Peak respected the
+  14 GiB cap.
+
+So when the MILP converges to a real under-cap integer plan, the injector +
+peak/lateness formulation are sound to within the existing 10% margin. The
+Class-A "injector cold-start gate" mechanism below was **disproven** on llama8b
+10g by three independent facts: (1) prefetch dst is claimed at *issue*, 1 at a
+time (`_issue_prefetch`, DAV ~1549), so the 254-deep queue doesn't inflate
+peak; (2) `coverage_repair` silent-patch overhead = 0.0 MB; (3) the original
+stream-everything fallback peaks at 5054 MB and sims fine at 10g — so 10g is
+feasible.
+
+**Actual root cause of the llama8b 8g/10g aborts:**
+1. Phase-1 LP fails to reach Optimal on tight caps (10g: numerical "Solve
+   error" even with the `-14/-7` scale — not robust across caps; 8g: Optimal
+   but 408/11835 binaries fractional).
+2. So phase-2 MILP runs cold or from a rounded warm-start that overruns, and
+   times out before branching back under cap → returns a **bad high-peak
+   incumbent** (true peak ~15.5 GB at 8g, ~15.6 GB at 10g).
+3. **`_stream_cold_tensors_to_cover_overrun` (scheduler ~1863-1878) masks it**:
+   it does `peak_bytes -= streamed_repair_bytes` without re-deriving the
+   max-over-samples and sets `target_infeasible=False`. A flipped cold→stream
+   tensor still occupies `size` at its consumers + in-flight, so the
+   subtraction over-credits. Reported peak 7717 (8g) / 9611 (10g) "fits"; the
+   real plan doesn't → sim aborts.
+
+**Real fixes (scope = solver/repair, NOT injector):**
+- **(verified bug) Make overrun-repair honest** — re-solve with the flipped
+  tensors pinned streamed (one more solve), or set `target_infeasible=True`.
+  Makes the output truthful; does not by itself produce a feasible plan.
+- **(the lever) Feasibility-aware warm-start / phase-2 convergence** — the
+  warm-start is the rounded LP relaxation; with hundreds of fractional binaries
+  near a tight cap, rounding overruns and phase-2 can't branch back in time.
+  Push the rounded start under-cap before phase-2 (repair heuristic), or seed
+  with the stream-everything plan (peak 5054, known feasible) as the incumbent.
+- **(robustness) Phase-1 numerical** — the fixed `-14/-7` scale isn't robust
+  across caps (10g Solve error); the principled bytes→MB rescale (§1bis) would
+  let phase-1 reach Optimal at every cap so a usable warm-start always exists.
+
+### ⟫⟫ IMPLEMENTED + VALIDATED (honest overrun-repair + feasible warm-start)
+
+Two fixes landed in `scheduler.py`:
+
+1. **Honest, iterative overrun-repair.** `_stream_cold_tensors_to_cover_overrun`
+   now takes a `peak_fn` and flips cold→stream in priority order, *recomputing
+   the true max-over-samples peak* (`_alive_peak`, from saved per-sample terms)
+   until it fits or candidates exhaust — instead of the old
+   `peak -= streamed_bytes` under-credit that masked overruns. `peak_bytes` and
+   `target_infeasible` are now truthful.
+2. **Feasibility-aware warm-start.** When phase-1 LP doesn't reach Optimal
+   (e.g. 10g numerical "Solve error"), phase-2 is seeded with the
+   stream-everything feasible incumbent (continuous slacks over-estimated so
+   it's a valid point) instead of running cold → returns a feasible plan
+   rather than a garbage high-peak one.
+
+**Validation (llama8b 8g + 10g, sched + sim):**
+
+| cfg | arc | reported peak | target_infeasible | sim | note |
+|-----|-----|--------------:|-------------------|-----|------|
+| 10g | 2   | 12236 (pessimistic) | True  | **CLEAN** | flag wrong; plan (stream-everything) sims fine |
+| 10g | 1   | 9594 ≤ 9663   | **False** | **CLEAN** | real plan (cold 5876/streamed 10404), e2e 6244 ms (vs 6714 fallback) |
+| 8g  | 2   | 12229         | True  | abort | over-pessimistic model |
+| 8g  | 1   | 8729 > 8590   | True  | abort | **genuinely infeasible** — even stream-everything peaks > 8 GiB cap |
+
+**Outcomes:**
+- **10g: ABORT → CLEAN**, now an honest, feasible, *non-fallback* plan.
+- **8g: honestly infeasible** (true stream-everything peak 8729 MB > 8 GiB cap
+  8590); sim agrees. The scheduler no longer ships a masked plan that aborts.
+
+**Key finding — drop `arc_queue_factor=2`.** With honest accounting, the
+sweep's `arc_queue_factor=2` is *over-pessimistic*: it widens each streamed
+tid's residency arc to model a "queued prefetches all claim dst" effect that
+**does not exist** — DAV claims dst at *issue*, one at a time
+(`_issue_prefetch`). It inflated the modeled stream-everything peak to 12.2 GB
+(sim: 5–8 GB), so the honest repair declared feasible configs infeasible.
+`arc_queue_factor=1` (the CLI default) matches sim's claim-at-issue semantics
+and gives consistent, truthful results. The `--arc-queue-factor` help text and
+the sweep scripts should drop the `2`.
+
+**Residual (separate accuracy item, not feasibility):** 10g e2e is still ~6.2 s
+— the per-window lateness model under-predicts real serial-PCIe stall (§3a).
+Feasibility/abort is fixed; e2e *accuracy* is the next formulation item.
+
+### Class A — modeled < cap but sim aborts → the LP↔sim peak gap (was the hypothesis; DISPROVEN, see above)
 - llama8b 8g: modeled 7703 < cap 8590; sim aborts.
 - llama3b 3g: modeled 2886 < cap 3221; sim aborts.
 

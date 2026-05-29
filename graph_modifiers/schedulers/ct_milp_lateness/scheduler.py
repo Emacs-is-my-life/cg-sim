@@ -272,6 +272,62 @@ def _build_pool(trace: Trace, hw: HwParams) -> dict[int, _PoolTensor]:
     return pool
 
 
+def _build_intermediate_residencies(
+    trace: Trace,
+) -> list[tuple[int, int, int]]:
+    """List of (start_ns, end_ns, size_bytes) for cuda INTERMEDIATEs.
+
+    Residency window: [producer.start_ns, last_consumer.end_ns]. The
+    LP adds the sum of intermediates alive at each sample T into that
+    sample's peak-row const_addons — i.e. intermediate VRAM is a
+    fixed schedule of the trace, no scheduler variables involved.
+
+    Conservative: doesn't model Python-refcount release (last CPU
+    consumer can free earlier than last GPU consumer). Over-counts a
+    bit; better to over-reserve and not blow the cap.
+    """
+    # Producer lookup
+    producer_of: dict[int, int] = {}
+    last_consumer_end: dict[int, int] = {}
+    for nid, node in trace.node_map.items():
+        start_ns = int((node.args or {}).get("start_ns") or 0)
+        end_ns = int((node.args or {}).get("end_ns") or start_ns)
+        if start_ns <= 0:
+            continue
+        for tid in (node.output_tensors or []):
+            t = int(tid)
+            # First occurrence wins (matches multigraph_timeline)
+            if t not in producer_of:
+                producer_of[t] = nid
+        for tid in (node.input_tensors or []):
+            t = int(tid)
+            if end_ns > last_consumer_end.get(t, 0):
+                last_consumer_end[t] = end_ns
+
+    out: list[tuple[int, int, int]] = []
+    for tid, t in trace.tensor_map.items():
+        if (t.args or {}).get("tensor_type") != "INTERMEDIATE":
+            continue
+        device = str((t.args or {}).get("device", "")).lower()
+        if not device.startswith("cuda"):
+            continue
+        size = int(t.size_bytes)
+        if size <= 0:
+            continue
+        prod_nid = producer_of.get(int(tid))
+        if prod_nid is None:
+            continue
+        prod_start = int(
+            (trace.node_map[prod_nid].args or {}).get("start_ns") or 0
+        )
+        end_t = last_consumer_end.get(int(tid), prod_start)
+        if prod_start <= 0 or end_t <= prod_start:
+            continue
+        out.append((prod_start, end_t, size))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
 def _build_gpu_consumer_timeline(
     trace: Trace,
 ) -> list[tuple[int, int]]:
@@ -666,10 +722,49 @@ def _solve_milp(
             "cannot build LP sample grid."
         )
     samples = _select_sample_points(gpu_consumers, max_samples=max_peak_samples)
+    n_gpu_samples = len(samples)
+
+    # Density boost: include every "big" intermediate's producer event
+    # as an extra sample point. The 256-point gpu-consumer grid can
+    # miss transient large intermediates whose [producer, last_consumer]
+    # lifetime falls between two gpu consumer samples. Without sampling
+    # the producer event, the LP never sees that binding moment and
+    # plans weight residency up to cap — sim then OOMs when the
+    # intermediate is actually allocated.
+    BIG_INTERM_BYTES = 64 * 1024 * 1024  # 64 MB threshold
+    extra_samples: list[tuple[int, int]] = []
+    seen_t = set(t for _, t in samples)
+    producer_of_big: list[tuple[int, int, int]] = []  # (nid, start_ns, size)
+    for nid, node in trace.node_map.items():
+        start_ns = int((node.args or {}).get("start_ns") or 0)
+        if start_ns <= 0:
+            continue
+        for tid in (node.output_tensors or []):
+            t = trace.tensor_map.get(int(tid))
+            if t is None:
+                continue
+            if (t.args or {}).get("tensor_type") != "INTERMEDIATE":
+                continue
+            dev = str((t.args or {}).get("device", "")).lower()
+            if not dev.startswith("cuda"):
+                continue
+            sz = int(t.size_bytes)
+            if sz < BIG_INTERM_BYTES:
+                continue
+            producer_of_big.append((nid, start_ns, sz))
+            break  # one entry per node is enough; size-grouping is per-tid
+    for nid, start_ns, _sz in producer_of_big:
+        if start_ns in seen_t:
+            continue
+        extra_samples.append((nid, start_ns))
+        seen_t.add(start_ns)
+    samples = sorted(samples + extra_samples, key=lambda x: x[1])
+
     if audit:
         print(
             f"[ct_milp_lateness:audit] gpu_consumer_events={len(gpu_consumers)} "
-            f"sampled_points={len(samples)}"
+            f"sampled_points={n_gpu_samples}+{len(extra_samples)}_big_interm "
+            f"(threshold={BIG_INTERM_BYTES//1024//1024}MB) = {len(samples)} total"
         )
 
     # ---- 7. Peak VRAM rows (one per sample point) ----
@@ -689,8 +784,63 @@ def _solve_milp(
     forced_cold_bytes = sum(pool[t].size_bytes for t in forced_cold)
     constant_floor = float(forced_cold_bytes) + float(extra_static_bytes)
 
+    # Intermediate residency: sum of cuda INTERMEDIATE tensor sizes
+    # alive at each sample T. INTERMEDIATEs aren't LP variables — their
+    # lifetimes are fixed by the trace's producer/consumer graph — but
+    # they DO consume VRAM, so the LP must reserve room for them in
+    # the per-sample peak constraint. Otherwise the LP plans weights
+    # up to cap and the sim's INTERMEDIATE working set blows it.
+    _intermediates = _build_intermediate_residencies(trace)
+    _interm_starts = [s for s, _, _ in _intermediates]
+    if audit:
+        # Compute per-sample stats for an audit summary.
+        sizes_alive = []
+        for _, t_l in samples:
+            s = sum(sz for s_, e_, sz in _intermediates if s_ <= t_l <= e_)
+            sizes_alive.append(s)
+        if sizes_alive:
+            print(
+                f"[ct_milp_lateness:audit] intermediates: "
+                f"n={len(_intermediates)} "
+                f"per-sample residency MB min={min(sizes_alive)/1e6:.1f} "
+                f"max={max(sizes_alive)/1e6:.1f} "
+                f"mean={sum(sizes_alive)/len(sizes_alive)/1e6:.1f}"
+            )
+
+    # Option-(b) coupling: when window-i admits L_window_i ns of late
+    # streaming, those bytes (L · bw / 1e9) must be cold-resident
+    # because the prefetch can't actually deliver in time — the
+    # injector's coverage_repair will demote late tids back to cold.
+    # Encode this physically into the peak rows so the LP can't escape
+    # peak by accepting lateness. Compute window assignment for each
+    # sample once.
+    _timeline_start = min(c[1] for pt in pool.values() for c in pt.consumers)
+    _timeline_end = max(c[1] for pt in pool.values() for c in pt.consumers)
+    _window_length = max(1, (_timeline_end - _timeline_start) / NUM_LATENESS_WINDOWS)
+    # effective_h2d_bw returns bytes/ns (not bytes/s — see hw.py).
+    _bw_h2d_Bpns = max(effective_h2d_bw(hw), 1e-18)
+    # Coefficient: bytes per ns of lateness in window i = bw (bytes/ns).
+    _bytes_per_ns_late = _bw_h2d_Bpns
+
+    def _sample_window_idx(t_l: float) -> int:
+        idx = int((t_l - _timeline_start) / _window_length)
+        return max(0, min(NUM_LATENESS_WINDOWS - 1, idx))
+
+    if audit:
+        print(
+            f"[ct_milp_lateness:audit] lateness→peak coupling: "
+            f"bw={_bw_h2d_Bpns:.1f}GB/s → "
+            f"{_bytes_per_ns_late*1e6/1e6:.1f}MB peak per 1ms window-lateness"
+        )
+
     for nid_sample, t_l in samples:
         const_addons = constant_floor
+        # Intermediate residency at this sample (linear scan; small).
+        for s_, e_, sz_ in _intermediates:
+            if s_ > t_l:
+                break  # list is sorted by start
+            if t_l <= e_:
+                const_addons += sz_
         var_coefs: dict[int, float] = {}
         for tid in feasible_tids:
             pt = pool[tid]
@@ -750,7 +900,8 @@ def _solve_milp(
                 # Infeasible gap — no evict can fit, tensor stays.
                 const_addons += size
 
-        # P ≥ const_addons + Σ var_coef · c   ⇒   Σ var_coef · c − P ≤ −const_addons
+        # P ≥ const_addons + Σ var_coef · c + (bw/1e9) · L_window_i
+        #   ⇒  Σ var_coef · c − P − (bw/1e9) · L_window_i ≤ −const_addons
         rows.append(row)
         cols.append(P_IDX)
         vals.append(-1.0)
@@ -760,6 +911,14 @@ def _solve_milp(
             rows.append(row)
             cols.append(var_col)
             vals.append(float(coef))
+        # Lateness-to-peak coupling (option b).
+        # Want: P ≥ const + Σ coef·var + α·L_window_i
+        # LP form: Σ coef·var − P + α·L_window_i ≤ −const
+        # → coefficient on L_window_i is +α (positive).
+        _wi = _sample_window_idx(t_l)
+        rows.append(row)
+        cols.append(L_WINDOW_IDX_BASE + _wi)
+        vals.append(float(_bytes_per_ns_late))
         ub_list.append(-float(const_addons))
         row += 1
 
