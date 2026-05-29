@@ -54,62 +54,95 @@ For each pool tid `t` with `n_t` consumers:
 | `L_window_i`  | ℝ ≥ 0  | one per timeline window (default 20 windows; ns of stall) |
 | `s_P`         | ℝ ≥ 0  | one global (peak overrun slack, bytes) |
 
-**Symmetric coupling: `c_t + e_{t,k} = 1`** on every feasible gap.
-Locks each tid into one of two patterns:
+**Coupling: `c_t + e_{t,k} ≤ 1`** on every feasible gap whose tid is
+*c-feasible* (i.e., the c bound is the free `[0, 1]` interval). This
+forbids the unrealizable `c=1, e=1` pattern for tids the LP could
+choose to stream — the injector would demote it back to resident.
 
-| `c` | `e` | meaning |
-|---|---|---|
-| 1 | 0 | cold, locked in VRAM the whole run |
-| 0 | 1 | per-iter JIT prefetch+evict cycle |
+For **c-infeasible tids** (`c_feasibility = False`, c pinned to
+`(1, 1)` via bounds), the coupling row is **suppressed**. These tids
+are going to be cold-loaded at layout no matter what, so allowing
+`e_{t,k} = 1` on a feasible gap unlocks the *hybrid* pattern: cold
+at layout, evict mid-run between widely-spaced consumers, refetch
+from RAM before the next use. This is exactly the right knob for
+tight caps with multi-iter weights (sd3med UNet across N steps,
+llama decoder weights across N tokens) — without it those tids
+would occupy peak across every dead zone.
 
-The two patterns the symmetric coupling rules out:
+Per-tid patterns now possible:
 
-- `c=0, e=0` — streamed but never evicted (tensor alive from initial
-  prefetch to last consumer with no PCIe round trip; peak inflates
-  with no benefit). Forbidden by `c + e ≥ 1`.
-- `c=1, e=1` — *hybrid*: cold at layout, evict mid-run, refetch
-  before later consumers. Mathematically sound, but **not currently
-  supported by the injector**. See note below.
+| `c` | `e` | meaning | available to |
+|---|---|---|---|
+| 1 | 0 | cold, locked in VRAM the whole run | all tids |
+| 0 | 1 | per-iter JIT prefetch+evict cycle | c-feasible tids |
+| 0 | 0 | streamed but never evicted across this gap | c-feasible tids |
+| 1 | 1 | *hybrid* — cold at layout, mid-run evict+refetch | **c-infeasible tids only** |
 
-For **c-infeasible tids** (`c_feasibility = False`, c pinned to 1 via
-bounds), coupling forces `e = 0` on every feasible gap — they sit
-cold the whole run.
+⚠ **LP–sim peak gap under hybrid.** The injector's
+`coverage_repair` pass treats any tid that has a prefetch arrival
+as "demote candidate": consumers BEFORE the first refetch are
+un-gated (cold-start residency doesn't count as a gate), so the
+tid gets silently patched back to fully resident. This means the
+LP's dead-zone savings (the `size · (1 − e)` term in the peak row)
+won't fully materialize in sim. On sd3med 8g this gap was
+measured around 1 GB. Bump ``safety_margin_frac`` (default 0.05)
+to absorb it on tight caps, or fix the injector to recognize
+cold-start as a gate within `[layout, first_evict_node]`.
 
 Infeasible gaps have no `e` variable (implicit `e ≡ 0`).
 
-### Why no hybrid mode (`c=1, e=1`)?
+### Why hybrid for c-infeasible tids only
 
-The hybrid pattern would let a cold-started tid reclaim VRAM during
-a long inter-consumer gap and refetch from RAM before the next use.
+The hybrid pattern lets a cold-started tid reclaim VRAM during long
+inter-consumer gaps and refetch from RAM before the next use.
 Conceptually it's exactly the right knob for tight caps with
 spread-out consumers (sd3med UNet weights, llama8b decoder weights
 used across many tokens).
 
-We tested it. The LP picks hybrid plans cleanly (integer MILP via
-highspy two-phase warm-start converges), but **sim peak exceeds LP
-prediction by ~1 GB on sd3med 8g** because the injector's
-`coverage_repair` pass:
+A first attempt enabled hybrid for *every* tid. The LP picked
+clean integer hybrid plans (highspy two-phase warm-start converges
+fine), but **sim peak exceeded LP prediction by ~1 GB on sd3med
+8g** because of the injector's `coverage_repair` pass:
 
-1. Adds the tid to `prefetch_covered_cgsim` once any prefetch arrival
-   exists (the refetch is a prefetch).
-2. Iterates all gpu consumers of the tid and demands each be gated by
-   an async arrival in the schedule.
+1. Adds the tid to `prefetch_covered_cgsim` once any prefetch
+   arrival exists (the refetch is a prefetch).
+2. Iterates all gpu consumers of the tid and demands each be gated
+   by an async arrival in the schedule.
 3. Cold-start residency *doesn't count as a gate*. So consumers
    BEFORE the mid-run evict are un-gated and the tid gets demoted
-   back to fully resident — adding silent-patch VRAM overhead the LP
-   didn't see.
+   back to fully resident — adding silent-patch VRAM overhead the
+   LP didn't see.
 
-Fixing this would need either:
+We now restrict hybrid to the **c-infeasible** set (tids pinned to
+`c=1` because no GPU node fires early enough for an async initial
+prefetch). The reasoning:
 
-- An injector change so cold-start counts as a gate for consumers in
-  `[layout, first_evict_node]` (out of scope here, breaks injector
-  compatibility);
-- Or modeling silent-patch overhead in the LP's peak constraint when
-  it picks hybrid (LP becomes harder to converge — adding ~size·c·e
-  bilinear terms breaks linearity).
+- These tids are going to be cold-resident through `[layout,
+  first_consumer]` no matter what — coverage_repair's demotion
+  during that window doesn't change residency, because they were
+  already resident there.
+- Allowing `e_{t,k} = 1` on their feasible cross-iter gaps lets
+  the LP free the VRAM the original `c+e=1` formulation forced
+  into peak. This is the dominant lever for tight-cap feasibility
+  on multi-iter workloads.
+- For c-feasible tids the coupling row stays in place — the LP
+  can still pick `c=0, e=1` (full per-iter streaming) or `c=1,
+  e=0` (resident throughout); it just can't try to be cold AND
+  refetch later, which the injector would demote.
 
-The symmetric coupling forbids `c=1, e=1` structurally so the LP
-stays in sync with what the injector + sim will actually realize.
+The LP–sim peak gap doesn't fully vanish: even for c-pinned tids,
+coverage_repair will demote across mid-run dead zones, so the
+`size · (1 − e)` savings in the peak rows are partially aspirational.
+Two future paths if the residual gap matters:
+
+- Fix the injector so cold-start counts as a gate for consumers
+  in `[layout, first_evict_node]` (cleanest);
+- Model silent-patch overhead in the LP's peak constraint when
+  it picks hybrid (would need bilinear `size · c · e` terms —
+  breaks linearity).
+
+In the meantime, bump `safety_margin_frac` on workloads where
+sim peak overshoots LP peak.
 
 ## Feasibility filters
 

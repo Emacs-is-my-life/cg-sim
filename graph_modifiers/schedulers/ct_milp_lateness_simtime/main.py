@@ -9,6 +9,7 @@ runtime trace directly — no compile-side sidecar identity layer.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -38,6 +39,18 @@ def main() -> None:
     p.add_argument("bundle")
     p.add_argument("--hw", required=True)
     p.add_argument("--output", "-o", default=None)
+    default_cores = max(1, os.cpu_count() or 1)
+    p.add_argument(
+        "--cores",
+        "--core",
+        dest="cores",
+        type=int,
+        default=default_cores,
+        help=(
+            "Number of CPU cores/solver threads to use. Defaults to "
+            "all detected cores (%(default)s)."
+        ),
+    )
     p.add_argument(
         "--baseline-sim-result",
         default=None,
@@ -51,14 +64,60 @@ def main() -> None:
         ),
     )
     p.add_argument("--time-limit-s", type=float, default=120.0)
+    p.add_argument(
+        "--phase1-time-limit-s",
+        type=float,
+        default=None,
+        help=(
+            "Separate time limit (s) for the phase-1 LP relaxation. "
+            "Default None ⇒ uses --time-limit-s. Set to a small value "
+            "(e.g. 30-60) when the LP is large enough that phase 1 "
+            "can't finish in seconds — its only purpose is a warm-start "
+            "for phase 2 MILP, so it's better to bail fast and give the "
+            "full --time-limit-s to phase 2."
+        ),
+    )
     p.add_argument("--peak-target-mb", type=float, default=None)
     p.add_argument("--safety-margin-frac", type=float, default=0.05)
     p.add_argument("--max-peak-samples", type=int, default=256)
     p.add_argument("--lp-relaxation", action="store_true")
+    p.add_argument(
+        "--backpressure-edges",
+        action="store_true",
+        help=(
+            "Derive synthetic GPU→CPU control edges from the LP's "
+            "per-window lateness. The edges cap sim's CPU race-ahead, "
+            "modeling the real CachingAllocator's wait-on-event "
+            "behavior under memory pressure. Edges are serialized to "
+            "the schedule meta and applied by the injector."
+        ),
+    )
+    p.add_argument(
+        "--backpressure-lateness-threshold-us",
+        type=float,
+        default=100.0,
+        help="Skip backpressure edges for windows whose LP-reported "
+             "lateness is below this threshold (us). Default 100us.",
+    )
+    p.add_argument(
+        "--arc-queue-factor",
+        type=float,
+        default=1.0,
+        help=(
+            "Multiply each streaming tid's residency-arc width by this "
+            "factor in the LP's peak constraint. Models the PCIe queue "
+            "serialization that holds dst VRAM claimed across multiple "
+            "queued transfers in sim. 1.0 = no widening (original "
+            "model). Try 3-10 if sim peak exceeds LP modeled peak."
+        ),
+    )
     p.add_argument("--audit", action="store_true")
     args = p.parse_args()
+    if args.cores < 1:
+        p.error("--cores must be >= 1")
 
     trace = load_trace_from_bundle(args.bundle)
+    sidecars = load_multi_graph_sidecars(args.bundle)
     hw = load_hw_params(args.hw)
 
     peak_target_bytes = (
@@ -73,8 +132,19 @@ def main() -> None:
         safety_margin_frac=float(args.safety_margin_frac),
         max_peak_samples=int(args.max_peak_samples),
         time_limit_s=float(args.time_limit_s),
+        phase1_time_limit_s=(
+            float(args.phase1_time_limit_s)
+            if args.phase1_time_limit_s is not None else None
+        ),
+        solver_threads=int(args.cores),
         lp_relaxation=bool(args.lp_relaxation),
+        backpressure_edges=bool(args.backpressure_edges),
+        backpressure_lateness_threshold_ns=int(
+            args.backpressure_lateness_threshold_us * 1000
+        ),
+        arc_queue_factor=float(args.arc_queue_factor),
         audit=bool(args.audit),
+        sidecars=sidecars,
     )
 
     out_dir = (
@@ -88,7 +158,6 @@ def main() -> None:
     # Also emit the pytorch-format schedule for downstream tooling that
     # consumes ``jit_sim_prune_schedule.json``. Reuse the existing
     # builder; it accepts our cgsim_tid-resolved NeutralSchedule.
-    sidecars = load_multi_graph_sidecars(args.bundle)
     if sidecars.launch_maps:
         tl = build_unified_timeline(
             trace, sidecars, cpu_per_launch_ns=hw.cpu_per_launch_ns,

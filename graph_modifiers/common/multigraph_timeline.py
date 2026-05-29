@@ -522,13 +522,28 @@ def build_unified_timeline(
             continue
         storage_to_trace_tids.setdefault(int(sid), []).append(int(trace_tid))
 
+    # Build launch_id -> GPU node_ids index for shape-based fallback matching
+    # (mirrors injector's _build_lid_to_gpu_node_ids strategy).
+    lid_to_gpu_nodes: dict[tuple[int, int], list[int]] = {}
+    for nid, node in trace.node_map.items():
+        rk = str((node.args or {}).get("resource_kind") or "")
+        if rk not in ("gpu_stream", "gpu", "gpu_runtime"):
+            continue
+        gid = (node.args or {}).get("compiled_graph_id")
+        lid = (node.args or {}).get("compiled_launch_id")
+        if gid is None or lid is None:
+            continue
+        lid_to_gpu_nodes.setdefault((int(gid), int(lid)), []).append(int(nid))
+
     backfilled = 0
+    backfilled_by_shape = 0
     unschedulable_count = 0
     unschedulable_bytes = 0
     samples_unsch: list[tuple[int, int, int, int]] = []
     for t in tensors:
         if t.trace_tids:
             continue
+        # Try storage_id matching first
         if t.storage_group_id is not None:
             sid = int(t.storage_group_id)
             hits = storage_to_trace_tids.get(sid)
@@ -536,6 +551,55 @@ def build_unified_timeline(
                 t.trace_tids = list(hits)
                 backfilled += 1
                 continue
+        # Fallback: shape-based matching via consumer launch intersection
+        # (same strategy as injector's _resolve_multi_ctid_tensor_metas).
+        used_by = t.entry.get("used_by_launch_ids") if isinstance(t.entry, dict) else []
+        if used_by:
+            common: set[int] | None = None
+            for lid in used_by:
+                per_launch: set[int] = set()
+                for nid in lid_to_gpu_nodes.get((t.graph_id, int(lid)), []):
+                    node = trace.node_map.get(nid)
+                    if node is None:
+                        continue
+                    for tid in node.input_tensors or []:
+                        tt = trace.tensor_map.get(tid)
+                        if tt is None:
+                            continue
+                        if (tt.args or {}).get("tensor_type") not in ("WEIGHT", "LEAF"):
+                            continue
+                        per_launch.add(int(tid))
+                if common is None:
+                    common = per_launch
+                else:
+                    common &= per_launch
+                if not common:
+                    break
+            if common:
+                # Filter by shape/size_bytes match
+                target_shape = t.entry.get("shape") if isinstance(t.entry, dict) else None
+                target_numel = _safe_numel(target_shape)
+                target_bytes = t.size_bytes
+                candidates = list(common)
+                if target_numel is not None:
+                    filt = [
+                        tid for tid in candidates
+                        if _safe_numel((trace.tensor_map[tid].args or {}).get("shape"))
+                           == target_numel
+                    ]
+                    if filt:
+                        candidates = filt
+                if target_bytes > 0 and len(candidates) > 1:
+                    filt = [
+                        tid for tid in candidates
+                        if int(trace.tensor_map[tid].size_bytes or 0) == target_bytes
+                    ]
+                    if filt:
+                        candidates = filt
+                if candidates:
+                    t.trace_tids = candidates
+                    backfilled_by_shape += 1
+                    continue
         # No storage_group_id OR no trace tid backs this storage. The
         # tensor is unschedulable: the scheduler should not reference
         # it, because the injector won't be able to find a runtime
@@ -547,10 +611,11 @@ def build_unified_timeline(
                 (int(t.graph_id), int(t.compiled_tensor_id),
                  int(t.size_bytes), int(t.uid))
             )
-    if backfilled or unschedulable_count:
+    if backfilled or backfilled_by_shape or unschedulable_count:
         print(
             f"[multigraph_timeline:diag] trace_tid coverage: "
             f"backfilled_by_storage_id={backfilled} "
+            f"backfilled_by_shape={backfilled_by_shape} "
             f"unschedulable={unschedulable_count} "
             f"({unschedulable_bytes/1e6:.1f}MB)",
             flush=True,

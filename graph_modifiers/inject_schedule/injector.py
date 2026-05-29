@@ -279,7 +279,7 @@ def _retarget_non_coldstart_weights_to_ram(
     coldstart_cgsim_tids: set[int],
     prefetch_covered_cgsim_tids: set[int] | None = None,
 ) -> int:
-    """Switch WEIGHT/LEAF tensors that are explicitly covered by the
+    """Switch WEIGHT/LEAF/INPUT tensors that are explicitly covered by the
     schedule's prefetch ops from cuda → cpu device, so DAV's layout
     places them in RAM only and the schedule's prefetches do real work.
 
@@ -298,7 +298,7 @@ def _retarget_non_coldstart_weights_to_ram(
     """
     n = 0
     for tid, tensor in trace.tensor_map.items():
-        if tensor.args.get("tensor_type") not in ("WEIGHT", "LEAF"):
+        if tensor.args.get("tensor_type") not in ("WEIGHT", "LEAF", "INPUT"):
             continue
         if tid in coldstart_cgsim_tids:
             continue
@@ -873,13 +873,11 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
     # every gpu trace consumer of a tid:
     #   - "demoted_no_arrivals_for_tid": tid was in prefetch_covered_cgsim
     #     but somehow has no scheduled arrival. Schedule emit bug.
-    #   - "demoted_consumer_before_first_arrival": some gpu trace
-    #     consumer of the tid (often an aten/aux op the schedule
-    #     didn't account for) runs BEFORE the schedule's first arrival
-    #     fires. The injector can't synthesize a gate (nothing prior
-    #     to anchor it to), so it gives up on retargeting this tid →
-    #     stays cuda-resident at layout. The schedule's prefetch
-    #     becomes a no-op since the tid was already kept resident.
+    #   - "sync_fallback_consumer_before_first_arrival": some gpu trace
+    #     consumer of the tid runs BEFORE the schedule's first async
+    #     arrival fires. This is not a reason to force the tensor
+    #     cuda-resident: keep it retargeted to RAM and let DAV's
+    #     residency-miss path model the late read as a sync H2D stall.
     #   - "repaired_with_synth_gates": some un-gated consumer existed
     #     but a prior arrival was available, so the injector
     #     synthesized a fake gate. Schedule should have emitted that
@@ -889,10 +887,13 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
         "demoted_no_arrivals_bytes": 0,
         "demoted_consumer_before_arrival_tids": 0,
         "demoted_consumer_before_arrival_bytes": 0,
+        "sync_fallback_consumer_before_arrival_tids": 0,
+        "sync_fallback_consumer_before_arrival_bytes": 0,
         "repaired_tids": 0,
         "repaired_bytes": 0,
         "synth_gates_count": 0,
         "samples_demoted": [],
+        "samples_sync_fallback": [],
         "samples_repaired": [],
     }
 
@@ -934,18 +935,16 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
         ok = True
         per_tid_drops: list[tuple[int, int]] = []
         per_tid_synth: list[dict[str, Any]] = []
+        saw_sync_fallback = False
         for c in un_gated:
             ct = _trace_ts(c)
             if ct < first_arrival_t:
-                # Un-gated consumer runs before the first arrival fires:
-                # the tid would be ABSENT at C's dispatch. Demote.
-                # (Gating C on a later issuer creates a chain cycle
-                # because the issuer is a downstream gpu_runtime whose
-                # ancestors include C — deadlocks sim. The sync-load
-                # behavior we'd ideally want here needs a layout-time
-                # transfer mechanism, not a runtime gate.)
-                ok = False
-                break
+                # Un-gated consumer runs before the first async arrival.
+                # Keep the tensor retargeted to RAM; DAV's normal
+                # residency-miss path will issue a sync H2D and stall
+                # this consumer instead of inflating layout VRAM.
+                saw_sync_fallback = True
+                continue
             # Most-recent arrival before C.
             last_arrival_t = max(
                 (at for at, _idx, _a in arrival_ts if at <= ct),
@@ -984,19 +983,29 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
                     (int(tid), _tid_size(tid), tname, len(un_gated), len(arrivals_t))
                 )
             continue
+        if saw_sync_fallback:
+            cov_diag["sync_fallback_consumer_before_arrival_tids"] += 1
+            cov_diag["sync_fallback_consumer_before_arrival_bytes"] += _tid_size(tid)
+            if len(cov_diag["samples_sync_fallback"]) < 5:
+                tt = trace.tensor_map.get(int(tid))
+                tname = (tt.args.get("name", "?") if tt else "?")[:40]
+                cov_diag["samples_sync_fallback"].append(
+                    (int(tid), _tid_size(tid), tname, len(un_gated), len(arrivals_t))
+                )
         evicts_to_drop.update(per_tid_drops)
         synthesized_gates.extend(per_tid_synth)
-        repaired_tids += 1
-        repaired_consumers += len(per_tid_synth)
-        cov_diag["repaired_tids"] += 1
-        cov_diag["repaired_bytes"] += _tid_size(tid)
-        cov_diag["synth_gates_count"] += len(per_tid_synth)
-        if len(cov_diag["samples_repaired"]) < 5:
-            tt = trace.tensor_map.get(int(tid))
-            tname = (tt.args.get("name", "?") if tt else "?")[:40]
-            cov_diag["samples_repaired"].append(
-                (int(tid), _tid_size(tid), tname, len(per_tid_synth), len(un_gated))
-            )
+        if per_tid_drops or per_tid_synth:
+            repaired_tids += 1
+            repaired_consumers += len(per_tid_synth)
+            cov_diag["repaired_tids"] += 1
+            cov_diag["repaired_bytes"] += _tid_size(tid)
+            cov_diag["synth_gates_count"] += len(per_tid_synth)
+            if len(cov_diag["samples_repaired"]) < 5:
+                tt = trace.tensor_map.get(int(tid))
+                tname = (tt.args.get("name", "?") if tt else "?")[:40]
+                cov_diag["samples_repaired"].append(
+                    (int(tid), _tid_size(tid), tname, len(per_tid_synth), len(un_gated))
+                )
 
     if coverage_demoted:
         prefetch_covered_cgsim -= coverage_demoted
@@ -1034,7 +1043,7 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
         prefetch_covered_cgsim_tids=covered_for_retarget,
     )
     print(
-        f"[inject_schedule] retargeted {n_retarget} WEIGHT tensors → RAM "
+        f"[inject_schedule] retargeted {n_retarget} tensors → RAM "
         f"(prefetch_covered={len(prefetch_covered_cgsim)}, "
         f"coverage_demoted={len(coverage_demoted)}, "
         f"coverage_repaired_tids={repaired_tids} "
@@ -1087,6 +1096,9 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
         f"demoted_consumer_before_arrival="
         f"{cov_diag['demoted_consumer_before_arrival_tids']} "
         f"({cov_diag['demoted_consumer_before_arrival_bytes']/1e6:.1f}MB) | "
+        f"sync_fallback_consumer_before_arrival="
+        f"{cov_diag['sync_fallback_consumer_before_arrival_tids']} "
+        f"({cov_diag['sync_fallback_consumer_before_arrival_bytes']/1e6:.1f}MB) | "
         f"repaired={cov_diag['repaired_tids']} "
         f"({cov_diag['repaired_bytes']/1e6:.1f}MB, "
         f"synth_gates={cov_diag['synth_gates_count']})",
@@ -1099,6 +1111,16 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
             + ", ".join(
                 f"({t},{sz/1e6:.1f}MB,{nm!r},ng={ng},ar={ar})"
                 for t, sz, nm, ng, ar in cov_diag["samples_demoted"]
+            ),
+            flush=True,
+        )
+    if cov_diag["samples_sync_fallback"]:
+        print(
+            "[inject_schedule:diag]   sync-fallback samples (cgsim_tid, "
+            "size_mb, name, n_un_gated, n_arrivals): "
+            + ", ".join(
+                f"({t},{sz/1e6:.1f}MB,{nm!r},ng={ng},ar={ar})"
+                for t, sz, nm, ng, ar in cov_diag["samples_sync_fallback"]
             ),
             flush=True,
         )

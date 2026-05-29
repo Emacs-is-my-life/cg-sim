@@ -39,6 +39,7 @@ fires and shape-disambiguation / synth_gates / coverage_repair don't run.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -67,6 +68,23 @@ from sim.core.trace import Trace
 _GPU_RESOURCE_KINDS = ("gpu_stream", "gpu", "gpu_runtime")
 _POOL_TENSOR_TYPES = ("WEIGHT", "LEAF", "INPUT")
 PEAK_SLACK_PENALTY = 1.0e6
+
+
+def _default_solver_threads() -> int:
+    return max(1, os.cpu_count() or 1)
+
+
+def _normalize_solver_threads(solver_threads: int | None) -> int:
+    if solver_threads is None:
+        return _default_solver_threads()
+    solver_threads = int(solver_threads)
+    if solver_threads < 1:
+        raise ValueError("solver_threads must be >= 1")
+    return solver_threads
+
+
+def _set_highs_threads(h: Any, solver_threads: int) -> None:
+    h.setOptionValue("threads", int(solver_threads))
 
 
 def _load_baseline_sim_times(
@@ -360,6 +378,209 @@ def _build_pool(
     return pool
 
 
+def _build_intermediate_residencies(
+    trace: Trace,
+    sim_times: dict[int, tuple[int, int]] | None = None,
+) -> list[tuple[int, int, int]]:
+    """List of (start_ns, end_ns, size_bytes) for cuda INTERMEDIATEs.
+
+    Residency window in the LP's time axis (sim_t if available, else
+    trace_t): [producer.start, last_consumer.end]. The LP adds the
+    sum of intermediates alive at each sample T into that sample's
+    peak-row const_addons — these aren't scheduler variables, their
+    lifetimes are fixed by the trace's producer/consumer graph.
+
+    Without this, the LP plans weight residency up to cap and sim
+    OOMs when intermediate working set materialises (esp. SDXL kv
+    cache and similar large transients).
+    """
+    def _t(nid: int, fallback: int) -> int:
+        if sim_times is None:
+            return fallback
+        st = sim_times.get(int(nid))
+        return int(st[0]) if st is not None else fallback
+
+    def _t_end(nid: int, fallback: int) -> int:
+        if sim_times is None:
+            return fallback
+        st = sim_times.get(int(nid))
+        return int(st[1]) if st is not None else fallback
+
+    producer_of: dict[int, int] = {}
+    last_consumer_end: dict[int, int] = {}
+    for nid, node in trace.node_map.items():
+        start_ns = int((node.args or {}).get("start_ns") or 0)
+        end_ns = int((node.args or {}).get("end_ns") or start_ns)
+        if start_ns <= 0:
+            continue
+        for tid in (node.output_tensors or []):
+            t = int(tid)
+            if t not in producer_of:
+                producer_of[t] = nid
+        for tid in (node.input_tensors or []):
+            t = int(tid)
+            lp_end = _t_end(nid, end_ns)
+            if lp_end > last_consumer_end.get(t, 0):
+                last_consumer_end[t] = lp_end
+
+    out: list[tuple[int, int, int]] = []
+    for tid, t in trace.tensor_map.items():
+        if (t.args or {}).get("tensor_type") != "INTERMEDIATE":
+            continue
+        device = str((t.args or {}).get("device", "")).lower()
+        if not device.startswith("cuda"):
+            continue
+        size = int(t.size_bytes)
+        if size <= 0:
+            continue
+        prod_nid = producer_of.get(int(tid))
+        if prod_nid is None:
+            continue
+        prod_start_trace = int(
+            (trace.node_map[prod_nid].args or {}).get("start_ns") or 0
+        )
+        prod_start = _t(prod_nid, prod_start_trace)
+        end_t = last_consumer_end.get(int(tid), prod_start)
+        if prod_start <= 0 or end_t <= prod_start:
+            continue
+        out.append((prod_start, end_t, size))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _derive_backpressure_edges(
+    trace: Trace,
+    result: "_LPResult",
+    hw: HwParams,
+    *,
+    sim_times: dict[int, tuple[int, int]] | None = None,
+    lateness_threshold_ns: int = 100_000,
+    audit: bool = False,
+) -> tuple[list[tuple[int, int]], dict[str, Any]]:
+    """Derive synthetic GPU→CPU control edges from per-window lateness.
+
+    For each window i where L_window_i > threshold:
+      - gpu_anchor = last gpu_runtime node with start_ns ≤ window end
+      - delta = bw_h2d × L_window_i  (in ns; equivalent CPU work the
+        allocator should make CPU wait for under real-PyTorch
+        backpressure)
+      - cpu_anchor = first cpu_leaf node with start_ns ≥
+        gpu_anchor.start_ns + delta
+      - add edge (gpu_anchor.nid, cpu_anchor.nid)
+
+    Edge timing uses the LP's time axis (sim_t if sim_times given).
+    """
+    L_windows = result.per_window_lateness_ns
+    windows = result.window_bounds_ns
+    if not L_windows or not windows:
+        return [], {"reason": "no per-window data from LP"}
+
+    bw_Bpns = max(effective_h2d_bw(hw), 1e-18)  # bytes/ns
+    # delta in ns: bytes-of-lateness / bytes-per-ns = L (ns). So delta = L.
+    # That is: 1 ns of lateness costs 1 ns of CPU wait. Adjust below
+    # via safety factor if desired.
+
+    # Build node timelines in LP time axis.
+    def _lp_t(nid: int, fallback: int) -> int:
+        if sim_times is None:
+            return fallback
+        st = sim_times.get(int(nid))
+        return int(st[0]) if st is not None else fallback
+
+    # Two indexes per node: lp_t for lateness-threshold matching;
+    # trace_t for anchor ordering (cycle avoidance — cpu_node we pick
+    # must be "future" in trace order vs gpu_node, otherwise gpu→cpu
+    # closes a cycle through the existing cpu_leaf→submit→gpu_runtime
+    # chain).
+    gpu_events: list[tuple[int, int, int]] = []     # (lp_start, trace_start, nid)
+    cpu_events: list[tuple[int, int, int]] = []     # (lp_start, trace_start, nid)
+    for nid, node in trace.node_map.items():
+        rk = str((node.args or {}).get("resource_kind") or "")
+        role = str((node.args or {}).get("runtime_role") or "")
+        ts = int((node.args or {}).get("start_ns") or 0)
+        if ts <= 0:
+            continue
+        lp_t = _lp_t(int(nid), ts)
+        if rk in _GPU_RESOURCE_KINDS:
+            gpu_events.append((lp_t, ts, int(nid)))
+        elif role == "cpu_leaf":
+            cpu_events.append((lp_t, ts, int(nid)))
+    gpu_events.sort()
+    cpu_events.sort()
+
+    if not gpu_events or not cpu_events:
+        return [], {"reason": "no gpu or cpu events"}
+
+    gpu_ts = [t for t, _, _ in gpu_events]
+    gpu_traces = [tr for _, tr, _ in gpu_events]
+    gpu_nids = [n for _, _, n in gpu_events]
+    cpu_ts = [t for t, _, _ in cpu_events]
+    cpu_traces = [tr for _, tr, _ in cpu_events]
+    cpu_nids = [n for _, _, n in cpu_events]
+
+    import bisect
+    edges: list[tuple[int, int]] = []
+    n_skip_below_threshold = 0
+    n_skip_no_gpu = 0
+    n_skip_no_cpu = 0
+    n_skip_dup = 0
+    seen: set[tuple[int, int]] = set()
+    for i, L_i in enumerate(L_windows):
+        if L_i <= lateness_threshold_ns:
+            n_skip_below_threshold += 1
+            continue
+        s_i, e_i = windows[i]
+        # Last gpu node whose start_ns ≤ window end
+        idx = bisect.bisect_right(gpu_ts, e_i) - 1
+        if idx < 0:
+            n_skip_no_gpu += 1
+            continue
+        gpu_nid = gpu_nids[idx]
+        gpu_t = gpu_ts[idx]
+        gpu_trace = gpu_traces[idx]
+        delta = int(L_i)  # ns
+        cpu_target_t = gpu_t + delta
+        # First cpu node with lp_start ≥ cpu_target_t AND
+        # trace_start > gpu_trace (cycle avoidance — cpu must be in
+        # the "future" relative to gpu in profile wall-clock order,
+        # so the existing cpu→submit→gpu chain doesn't close on us).
+        c_idx = bisect.bisect_left(cpu_ts, cpu_target_t)
+        while c_idx < len(cpu_nids) and cpu_traces[c_idx] <= gpu_trace:
+            c_idx += 1
+        if c_idx >= len(cpu_nids):
+            n_skip_no_cpu += 1
+            continue
+        cpu_nid = cpu_nids[c_idx]
+        pair = (gpu_nid, cpu_nid)
+        if pair in seen:
+            n_skip_dup += 1
+            continue
+        seen.add(pair)
+        edges.append(pair)
+
+    diag = {
+        "n_windows_total": len(L_windows),
+        "n_windows_above_threshold": len(L_windows) - n_skip_below_threshold,
+        "n_edges_emitted": len(edges),
+        "n_skip_no_gpu": n_skip_no_gpu,
+        "n_skip_no_cpu": n_skip_no_cpu,
+        "n_skip_dup": n_skip_dup,
+        "lateness_threshold_ns": lateness_threshold_ns,
+        "total_predicted_stall_ms": sum(
+            L_i for L_i in L_windows if L_i > lateness_threshold_ns
+        ) / 1e6,
+    }
+    if audit:
+        print(
+            f"[ct_milp_lateness:backpressure] derived {len(edges)} edges "
+            f"({diag['n_windows_above_threshold']}/{diag['n_windows_total']} "
+            f"windows above {lateness_threshold_ns/1e3:.0f}us threshold; "
+            f"total predicted stall = "
+            f"{diag['total_predicted_stall_ms']:.1f}ms)"
+        )
+    return edges, diag
+
+
 def _build_gpu_consumer_timeline(
     trace: Trace,
     sim_times: dict[int, tuple[int, int]] | None = None,
@@ -403,6 +624,12 @@ class _LPResult:
     target_infeasible: bool
     solver_status: str
     diagnostics: dict[str, Any]
+    # Per-window lateness slack (ns). Length = NUM_LATENESS_WINDOWS.
+    # Used for backpressure-edge derivation in solve_neutral.
+    per_window_lateness_ns: list[int] = field(default_factory=list)
+    # Window bounds in the LP's time axis (sim_t if available, else
+    # trace_t). Length = NUM_LATENESS_WINDOWS, (s_i, e_i) per window.
+    window_bounds_ns: list[tuple[int, int]] = field(default_factory=list)
 
 
 def _select_sample_points(
@@ -431,7 +658,61 @@ def _select_sample_points(
     return picked
 
 
-def _solve_two_phase_highspy(
+def _stream_cold_tensors_to_cover_overrun(
+    pool: dict[int, _PoolTensor],
+    feasible_tids: list[int],
+    c_solution: dict[int, float],
+    e_solution: dict[tuple[int, int], float],
+    overrun_bytes: int,
+) -> dict[str, int]:
+    """Flip enough cold tensors to streamed to cover a peak overrun.
+
+    Selection policy:
+      1. tensors with fewer consumers first;
+      2. then tensors whose first use is farthest in the future;
+      3. then larger tensors, to avoid excessive tiny picks.
+
+    Only c-feasible tensors are candidates because c-infeasible and
+    forced-cold tensors cannot be safely initial-prefetched.
+    """
+    candidates: list[tuple[int, int, int, int, int]] = []
+    for tid in feasible_tids:
+        pt = pool[tid]
+        if not pt.c_feasibility:
+            continue
+        if float(c_solution.get(tid, 1.0)) < 0.5:
+            continue
+        first_use = int(pt.consumers[0][1]) if pt.consumers else 0
+        candidates.append((
+            len(pt.consumers),
+            -first_use,
+            -int(pt.size_bytes),
+            int(tid),
+            int(pt.size_bytes),
+        ))
+    candidates.sort()
+
+    streamed_bytes = 0
+    streamed_count = 0
+    for _n_uses, _neg_first_use, _neg_size, tid, size in candidates:
+        if streamed_bytes >= overrun_bytes:
+            break
+        pt = pool[tid]
+        c_solution[tid] = 0.0
+        for k in range(len(pt.consumers) - 1):
+            if pt.gap_feasibility[k]:
+                e_solution[(tid, k)] = 1.0
+        streamed_bytes += size
+        streamed_count += 1
+
+    return {
+        "streamed_count": streamed_count,
+        "streamed_bytes": streamed_bytes,
+        "residual_overrun_bytes": max(0, int(overrun_bytes) - streamed_bytes),
+    }
+
+
+def _solve_lp_highspy(
     *,
     total_vars: int,
     c_obj: np.ndarray,
@@ -440,40 +721,32 @@ def _solve_two_phase_highspy(
     cols: list[int],
     vals: list[float],
     ub_list: list[float],
-    integrality_arr: np.ndarray,
     time_limit_s: float | None,
+    solver_threads: int,
     audit: bool,
-) -> tuple[np.ndarray | None, bool, str, str, bool]:
-    """Two-phase solve via highspy.
+) -> tuple[np.ndarray | None, bool, str]:
+    """LP relaxation via highspy directly (no scipy wrapper).
 
-    Phase 1: build the LP and solve it as a relaxation (all binaries
-    continuous in [0, 1]). Fast (~1 s on sd3med 14g) — gives a
-    near-integer point.
+    Why: scipy.linprog's HiGHS wrapper hides the time-limit-feasible
+    primal — it returns ``success=False, x=None`` when HiGHS reports
+    "Time limit reached, primal_status is Feasible". Going through
+    highspy directly lets us read ``h.getSolution().col_value`` even
+    on time-limit. Also avoids a non-deterministic heap-corruption
+    bug we observed in scipy/HiGHS at long iteration counts on dense
+    problems.
 
-    Phase 2: round the Phase-1 solution to integer-feasible (binary
-    vars rounded at 0.5; continuous vars kept as-is from the LP),
-    flip the binaries to integer, pass the rounded values as
-    warm-start via ``Highs.setSolution()``, and run MILP. A good
-    warm-start sets a tight initial incumbent, which prunes the
-    branch-and-bound tree aggressively. On problems where the LP
-    relaxation is already 99 %+ integer (typical for this LP), MILP
-    converges to the proven optimum in a small fraction of the
-    cold-start budget.
-
-    Returns (x, success, message, status_str, lp_only) where
-    ``lp_only=True`` means Phase 2 didn't complete with a proven
-    integer solution and the LP relaxation was used as the final
-    plan (rounding at emit time, same as the legacy fallback).
+    Returns (x, has_primal, message). ``has_primal`` is True if we
+    have ANY feasible point (optimal or time-limited feasible), False
+    if no primal was found at all.
     """
     inf = highspy.kHighsInf
 
-    # ---- Build the model in highspy ----
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
+    _set_highs_threads(h, solver_threads)
     if time_limit_s is not None:
         h.setOptionValue("time_limit", float(time_limit_s))
 
-    # Variables: bounds + objective.
     lo_arr = [float(b[0]) for b in bounds_list]
     hi_arr = [
         float(b[1]) if b[1] is not None else inf for b in bounds_list
@@ -482,8 +755,6 @@ def _solve_two_phase_highspy(
     h.addVars(total_vars, lo_arr, hi_arr)
     h.changeColsCost(total_vars, list(range(total_vars)), obj_arr)
 
-    # Rows: group sparse (row, col, val) entries by row index, then
-    # add each row to highspy as ``-inf ≤ Σ coef·var ≤ ub``.
     row_data: dict[int, list[tuple[int, float]]] = {}
     for r, c, v in zip(rows, cols, vals):
         row_data.setdefault(int(r), []).append((int(c), float(v)))
@@ -496,15 +767,227 @@ def _solve_two_phase_highspy(
         coef = [e[1] for e in entries]
         h.addRow(-inf, float(ub_list[r]), len(col_idx), col_idx, coef)
 
+    h.run()
+    status = h.getModelStatus()
+    status_str = h.modelStatusToString(status)
+    info = h.getInfo()
+    # HighsSolutionStatus.kSolutionStatusFeasible = 2.
+    primal_status = int(getattr(info, "primal_solution_status", 0))
+    primal_feasible = primal_status == 2
+    if audit:
+        print(
+            f"[ct_milp_lateness:solver] highspy LP done: "
+            f"model_status={status_str!r} primal_status={primal_status}"
+        )
+    if status == highspy.HighsModelStatus.kOptimal:
+        sol = h.getSolution()
+        x = np.asarray(list(sol.col_value), dtype=np.float64)
+        return (x, True, f"LP optimal ({status_str})")
+    # Accept ANY model status as long as a feasible primal exists.
+    # HiGHS sometimes reports "TimeLimit" or "Unknown" while still
+    # having a feasible incumbent — scipy's wrapper drops these but
+    # we can read them via highspy directly.
+    if primal_feasible:
+        sol = h.getSolution()
+        x = np.asarray(list(sol.col_value), dtype=np.float64)
+        return (x, True, f"LP {status_str} with feasible primal")
+    return (None, False, f"LP solver returned {status_str} (no primal)")
+
+
+def _build_highspy_model(
+    *,
+    total_vars: int,
+    c_obj: np.ndarray,
+    bounds_list: list[tuple[float, float | None]],
+    rows: list[int],
+    cols: list[int],
+    vals: list[float],
+    ub_list: list[float],
+    time_limit_s: float | None,
+    solver_threads: int,
+) -> Any:
+    """Build a continuous highspy model; caller may add integrality."""
+    inf = highspy.kHighsInf
+
+    h = highspy.Highs()
+    h.setOptionValue("output_flag", False)
+    _set_highs_threads(h, solver_threads)
+    if time_limit_s is not None:
+        h.setOptionValue("time_limit", float(time_limit_s))
+
+    lo_arr = [float(b[0]) for b in bounds_list]
+    hi_arr = [
+        float(b[1]) if b[1] is not None else inf for b in bounds_list
+    ]
+    obj_arr = [float(c_obj[i]) for i in range(total_vars)]
+    h.addVars(total_vars, lo_arr, hi_arr)
+    h.changeColsCost(total_vars, list(range(total_vars)), obj_arr)
+
+    row_data: dict[int, list[tuple[int, float]]] = {}
+    for r, c, v in zip(rows, cols, vals):
+        row_data.setdefault(int(r), []).append((int(c), float(v)))
+    n_rows = len(ub_list)
+    for r in range(n_rows):
+        entries = row_data.get(r)
+        if not entries:
+            continue
+        col_idx = [e[0] for e in entries]
+        coef = [e[1] for e in entries]
+        h.addRow(-inf, float(ub_list[r]), len(col_idx), col_idx, coef)
+
+    return h
+
+
+def _solve_integer_highspy_model(
+    h: Any,
+    *,
+    total_vars: int,
+    integrality_arr: np.ndarray,
+    warm_start: np.ndarray | None,
+    label: str,
+) -> tuple[np.ndarray | None, bool, str, str, bool]:
+    """Run a highspy model as a MILP, optionally with an incumbent."""
+    int_indices = [i for i in range(total_vars) if integrality_arr[i] == 1]
+    h.changeColsIntegrality(
+        len(int_indices),
+        int_indices,
+        [highspy.HighsVarType.kInteger] * len(int_indices),
+    )
+    if warm_start is not None:
+        sol = highspy.HighsSolution()
+        sol.col_value = list(warm_start)
+        h.setSolution(sol)
+
+    h.run()
+    status = h.getModelStatus()
+    status_str = h.modelStatusToString(status)
+    if status == highspy.HighsModelStatus.kOptimal:
+        final = np.asarray(list(h.getSolution().col_value), dtype=np.float64)
+        return (final, True, f"{label} MILP optimal", status_str, False)
+
+    info = h.getInfo()
+    primal_status = int(getattr(info, "primal_solution_status", 0))
+    primal_feasible = primal_status == 2
+    if primal_feasible:
+        final = np.asarray(list(h.getSolution().col_value), dtype=np.float64)
+        binary_mask = np.asarray(integrality_arr) == 1
+        bvals = final[binary_mask]
+        is_integer = bool(np.all(
+            (bvals < 0.01) | (bvals > 0.99)
+        ))
+        if is_integer:
+            return (
+                final, True,
+                f"{label} MILP {status_str} (returning incumbent)",
+                status_str, False,
+            )
+    if warm_start is not None and status == highspy.HighsModelStatus.kTimeLimit:
+        return (
+            warm_start, True,
+            f"{label} MILP {status_str} (returning warm-start)",
+            status_str, True,
+        )
+
+    return (
+        None, False,
+        f"{label} MILP returned {status_str}",
+        status_str, True,
+    )
+
+
+def _solve_two_phase_highspy(
+    *,
+    total_vars: int,
+    c_obj: np.ndarray,
+    bounds_list: list[tuple[float, float | None]],
+    rows: list[int],
+    cols: list[int],
+    vals: list[float],
+    ub_list: list[float],
+    integrality_arr: np.ndarray,
+    time_limit_s: float | None,
+    solver_threads: int,
+    audit: bool,
+    phase1_time_limit_s: float | None = None,
+) -> tuple[np.ndarray | None, bool, str, str, bool]:
+    """Two-phase solve via highspy.
+
+    Phase 1: build the LP and solve it as a relaxation (all binaries
+    continuous in [0, 1]). Fast (~1 s on sd3med 14g) — gives a
+    near-integer point. Pass ``phase1_time_limit_s`` (defaults to
+    ``time_limit_s``) to bound this phase separately — useful when
+    the LP relaxation is large enough that it can't solve in a few
+    seconds, in which case the warm-start it provides isn't worth
+    much and we'd rather give the full budget to phase 2.
+
+    Phase 2: round the Phase-1 solution to integer-feasible (binary
+    vars rounded at 0.5; continuous vars kept as-is from the LP),
+    flip the binaries to integer, pass the rounded values as
+    warm-start via ``Highs.setSolution()``, and run MILP. A good
+    warm-start sets a tight initial incumbent, which prunes the
+    branch-and-bound tree aggressively. On problems where the LP
+    relaxation is already 99 %+ integer (typical for this LP), MILP
+    converges to the proven optimum in a small fraction of the
+    cold-start budget.
+
+    If phase 1 does not prove LP optimality, skip the warm start and
+    run the MILP cold. Phase 1 is only a performance hint; it should
+    not gate correctness.
+
+    Returns (x, success, message, status_str, lp_only) where
+    ``lp_only=True`` means Phase 2 didn't complete with a proven
+    integer solution and the LP relaxation was used as the final
+    plan (rounding at emit time, same as the legacy fallback).
+    """
+    _phase1_limit = (
+        float(phase1_time_limit_s)
+        if phase1_time_limit_s is not None
+        else (float(time_limit_s) if time_limit_s is not None else None)
+    )
+    h = _build_highspy_model(
+        total_vars=total_vars,
+        c_obj=c_obj,
+        bounds_list=bounds_list,
+        rows=rows,
+        cols=cols,
+        vals=vals,
+        ub_list=ub_list,
+        time_limit_s=_phase1_limit,
+        solver_threads=solver_threads,
+    )
+    if audit and _phase1_limit is not None:
+        print(
+            f"[ct_milp_lateness:solver] phase1 LP time_limit={_phase1_limit:.1f}s "
+            f"(phase2 MILP gets full time_limit_s={time_limit_s})"
+        )
+
     # ---- Phase 1: LP relaxation (no integrality yet) ----
     h.run()
     status = h.getModelStatus()
     if status != highspy.HighsModelStatus.kOptimal:
         msg = h.modelStatusToString(status)
-        return (
-            None, False,
-            f"phase1 LP not optimal: {msg}",
-            msg, True,
+        if audit:
+            print(
+                f"[ct_milp_lateness:solver] phase1 LP not optimal "
+                f"({msg}); running cold-start MILP"
+            )
+        h_cold = _build_highspy_model(
+            total_vars=total_vars,
+            c_obj=c_obj,
+            bounds_list=bounds_list,
+            rows=rows,
+            cols=cols,
+            vals=vals,
+            ub_list=ub_list,
+            time_limit_s=time_limit_s,
+            solver_threads=solver_threads,
+        )
+        return _solve_integer_highspy_model(
+            h_cold,
+            total_vars=total_vars,
+            integrality_arr=integrality_arr,
+            warm_start=None,
+            label=f"cold-start after phase1 {msg}",
         )
     lp_sol = h.getSolution()
     x_lp = np.asarray(list(lp_sol.col_value), dtype=np.float64)
@@ -527,52 +1010,12 @@ def _solve_two_phase_highspy(
     for i in int_indices:
         x_warm[i] = 1.0 if x_lp[i] >= 0.5 else 0.0
 
-    h.changeColsIntegrality(
-        len(int_indices),
-        int_indices,
-        [highspy.HighsVarType.kInteger] * len(int_indices),
-    )
-    sol = highspy.HighsSolution()
-    sol.col_value = list(x_warm)
-    h.setSolution(sol)
-    h.run()
-
-    status = h.getModelStatus()
-    status_str = h.modelStatusToString(status)
-    if status == highspy.HighsModelStatus.kOptimal:
-        final = np.asarray(list(h.getSolution().col_value), dtype=np.float64)
-        return (final, True, "phase2 MILP optimal", status_str, False)
-    if status == highspy.HighsModelStatus.kTimeLimit:
-        # MILP timed out; we have at least the warm-start as
-        # incumbent. Read it back from highspy (it returns the best
-        # solution found, which is ≥ warm-start quality).
-        final = np.asarray(list(h.getSolution().col_value), dtype=np.float64)
-        # Sanity: if all binaries are integer, this is a real
-        # incumbent (just not proven optimal). Treat as success but
-        # report fell_back=False (we have a real integer solution).
-        binary_mask = np.asarray(integrality_arr) == 1
-        bvals = final[binary_mask]
-        is_integer = bool(np.all(
-            (bvals < 0.01) | (bvals > 0.99)
-        ))
-        if is_integer:
-            return (
-                final, True,
-                "phase2 MILP time-limited (returning incumbent)",
-                status_str, False,
-            )
-        # No integer incumbent — return the warm-start as the plan.
-        return (
-            x_warm, True,
-            "phase2 MILP time-limited (returning warm-start)",
-            status_str, True,
-        )
-    # Other statuses (infeasible, unbounded, etc.) — treat as
-    # solver failure; caller falls back to scipy.
-    return (
-        None, False,
-        f"phase2 MILP returned {status_str}",
-        status_str, True,
+    return _solve_integer_highspy_model(
+        h,
+        total_vars=total_vars,
+        integrality_arr=integrality_arr,
+        warm_start=x_warm,
+        label="phase2",
     )
 
 
@@ -587,8 +1030,11 @@ def _solve_milp(
     safety_margin_frac: float,
     max_peak_samples: int,
     time_limit_s: float | None,
+    solver_threads: int | None,
     lp_relaxation: bool,
+    arc_queue_factor: float = 1.0,
     audit: bool,
+    phase1_time_limit_s: float | None = None,
 ) -> _LPResult:
     """Build and solve the lateness MILP.
 
@@ -600,6 +1046,10 @@ def _solve_milp(
                       stall slack; total ns of stall = Σ L_window_i
         s_P           continuous ≥ 0 — peak overrun slack (bytes)
     """
+    solver_threads = _normalize_solver_threads(solver_threads)
+    if audit:
+        print(f"[ct_milp_lateness:audit] solver_threads={solver_threads}")
+
     # ---- 1. Feasibility filter ----
     feasible_tids: list[int] = []
     forced_cold: set[int] = set()
@@ -661,11 +1111,13 @@ def _solve_milp(
     for tid in feasible_tids:
         pt = pool[tid]
         if not pt.c_feasibility:
-            # No room for an async initial prefetch in the consumer's
-            # graph — emit would fall back to a sync prefetch, the
-            # injector would silently demote, and sim would carry the
-            # tid as effectively cold anyway. Pin c=1 so the LP plans
-            # the residency explicitly and the peak constraint sees it.
+            # No GPU node fires early enough that a runtime prefetch
+            # could deliver this tid in time. Pin c=1 → load at layout
+            # phase, before runtime PCIe contention starts. The c+e<=1
+            # coupling below is SUPPRESSED for these tids so e_{t,k}
+            # can still be 1 on feasible gaps — yielding the hybrid
+            # `cold-at-layout + evict-between-consumers + refetch`
+            # pattern. See the coupling section and the emit path.
             bounds_list.append((1.0, 1.0))
         else:
             bounds_list.append((0.0, 1.0))
@@ -720,48 +1172,176 @@ def _solve_milp(
         size = pool[tid].size_bytes
         c_obj[col] = float(size) * epsilon_per_byte
 
-    # ---- 5. Coupling: NONE (HYBRID mode enabled) ----
+    # ---- 5. Coupling: forbid cold-start + runtime refetch hybrid ----
     #
-    # The previous formulation enforced `c + e_{t,k} = 1` per feasible
-    # gap, locking each tid into one of two patterns (cold-resident or
-    # per-iter stream cycle) and foreclosing the hybrid `c=1, e=1`
-    # (cold at layout, evict mid-run, refetch before later consumers).
+    # The injector's coverage_repair pass does not treat cold-start
+    # residency as a gate for consumers before a later runtime refetch.
+    # For *c-feasible* tids the LP could otherwise spuriously pick
+    # `c=1, e=1` and the injector would silently demote the tid back
+    # to cuda-resident, adding peak the LP didn't see. Forbid that
+    # combination on those tids:
     #
-    # Hybrid is now allowed. Dead-zone residency is governed by
-    # `(1 − e_{t,k})` per feasible gap (see section 7 below),
-    # independent of `c_t`. Four patterns now possible:
-    #   c=1, e=0   cold from layout, never evicted
-    #   c=1, e=1   cold at layout, evict mid-run, refetch before next use
-    #   c=0, e=0   JIT prefetch, stays resident across this gap
-    #   c=0, e=1   JIT prefetch + per-iter evict-refetch cycle
+    #   c_t + e_{t,k} <= 1   (only when c_t is a free [0,1] variable)
     #
-    # ⚠ Injector caveat: `coverage_repair` is all-or-nothing. Once any
-    # prefetch fires for a tid, every gpu consumer is expected to be
-    # gated by an async arrival. Cold-start residency doesn't count
-    # as a gate. So consumers BEFORE a mid-run evict get demoted back
-    # to cold by the injector — sim peak may exceed the LP plan when
-    # hybrid `c=1, e=1` is actually chosen. Verify in sim.
-    #
-    # For c-infeasible tids (pinned c=1 via bounds), hybrid means
-    # e_{t,k}=1 is now legal on feasible gaps.
+    # For *c-infeasible* tids the c bound is pinned to (1, 1) — they
+    # are going to be cold-resident no matter what. Allowing e_{t,k}=1
+    # for them unlocks the hybrid `cold-at-layout + evict-between-
+    # consumers + refetch` pattern, which is the right plan for
+    # widely-spaced multi-iter weights and recovers tight-budget
+    # feasibility (this set is exactly the population whose dead-zone
+    # residency the original c+e<=1 forced into peak). Coverage_repair
+    # still demotes these tids in sim, so the LP's dead-zone savings
+    # are accounting for VRAM that sim won't actually free — bump
+    # ``safety_margin_frac`` if the gap matters for your cap.
     rows: list[int] = []
     cols: list[int] = []
     vals: list[float] = []
     ub_list: list[float] = []
     row = 0
+    for (tid, k), e_col in e_var_idx.items():
+        if not pool[tid].c_feasibility:
+            # c pinned to 1 — hybrid allowed, no coupling row needed.
+            continue
+        rows.append(row)
+        cols.append(c_var_idx[tid])
+        vals.append(1.0)
+        rows.append(row)
+        cols.append(e_col)
+        vals.append(1.0)
+        ub_list.append(1.0)
+        row += 1
 
     # ---- 6. Sample grid (shared by peak & lateness rows) ----
+    #
+    # Event-aligned sampling. The LP's peak P is a max over the
+    # set of sampled time points; between any two adjacent samples
+    # the alive set for every pool tid is piecewise constant. So
+    # peak only ever transitions at one of:
+    #   - GPU consumer start (consumer fires → "currently consumed"
+    #     window),
+    #   - consumer end+1 (consumer done → gap residency may go
+    #     dead under hybrid),
+    #   - arc_start = next_consumer.start − τ · arc_queue_factor
+    #     (refetch arrival window opens → tid must be alive).
+    # Sampling at every union of those events makes the LP's
+    # modeled peak its true peak under the residency model.
+    # The legacy uniform-256-stride over GPU consumers left ~30
+    # events between samples on llama3b — enough room for ~300 MB
+    # of hidden transient peak on a 5g cap. That was the dominant
+    # contributor to LP-vs-sim divergence on tight budgets.
     gpu_consumers = _build_gpu_consumer_timeline(trace, sim_times)
     if not gpu_consumers:
         raise RuntimeError(
             "[ct_milp_lateness] no gpu consumer events in trace; "
             "cannot build LP sample grid."
         )
-    samples = _select_sample_points(gpu_consumers, max_samples=max_peak_samples)
+
+    # Precompute per-tid arc_tau and consumer_nids_set for the
+    # per-sample LP build inner loop (consumed below) — saves a
+    # per-iteration linear scan of pt.consumers for the
+    # is_currently_consumed check.
+    _pt_arc_tau: dict[int, int] = {
+        tid: int(round(pool[tid].tau_h2d_ns * float(arc_queue_factor)))
+        for tid in feasible_tids
+    }
+    _pt_consumer_nids_set: dict[int, frozenset[int]] = {
+        tid: frozenset(c[0] for c in pool[tid].consumers)
+        for tid in feasible_tids
+    }
+    _pt_first_start: dict[int, int] = {
+        tid: pool[tid].consumers[0][1] for tid in feasible_tids
+    }
+    _pt_last_end: dict[int, int] = {
+        tid: pool[tid].consumers[-1][2] for tid in feasible_tids
+    }
+
+    seen_t: set[int] = set()
+    samples: list[tuple[int, int]] = []
+    for nid_e, t_e in gpu_consumers:
+        if t_e in seen_t:
+            continue
+        samples.append((int(nid_e), int(t_e)))
+        seen_t.add(int(t_e))
+    n_gpu_samples = len(samples)
+
+    # arc_start (refetch arrival window) events for every pool tid:
+    # the moment when a streaming tid must be alive because its
+    # prefetch is in-flight. These are the binding peak moments the
+    # legacy 256-uniform-stride grid systematically missed.
+    n_arc_samples = 0
+    for _tid in feasible_tids:
+        _tau = _pt_arc_tau[_tid]
+        _consumers = pool[_tid].consumers
+        for _c_nid, _c_start, _c_end in _consumers:
+            _arc_start = max(0, int(_c_start) - _tau)
+            if _arc_start not in seen_t:
+                samples.append((-1, _arc_start))
+                seen_t.add(_arc_start)
+                n_arc_samples += 1
+    n_post_consumer_samples = 0
+
+    # Big intermediate producer events (large transient intermediates
+    # whose producer doesn't already coincide with a sampled event).
+    BIG_INTERM_BYTES = 64 * 1024 * 1024  # 64 MB threshold
+    n_big_interm_samples = 0
+    for nid, node in trace.node_map.items():
+        start_ns_trace = int((node.args or {}).get("start_ns") or 0)
+        if start_ns_trace <= 0:
+            continue
+        sample_t = start_ns_trace
+        if sim_times is not None:
+            st = sim_times.get(int(nid))
+            if st is not None:
+                sample_t = int(st[0])
+        has_big = False
+        for tid in (node.output_tensors or []):
+            t = trace.tensor_map.get(int(tid))
+            if t is None:
+                continue
+            if (t.args or {}).get("tensor_type") != "INTERMEDIATE":
+                continue
+            dev = str((t.args or {}).get("device", "")).lower()
+            if not dev.startswith("cuda"):
+                continue
+            if int(t.size_bytes) >= BIG_INTERM_BYTES:
+                has_big = True
+                break
+        if not has_big:
+            continue
+        if sample_t in seen_t:
+            continue
+        samples.append((int(nid), sample_t))
+        seen_t.add(sample_t)
+        n_big_interm_samples += 1
+
+    samples.sort(key=lambda x: x[1])
+
+    # Safety cap for very large traces. We always keep every arc_start
+    # event (those are the binding moments for streaming residency)
+    # and uniformly down-sample the consumer / post-consumer set if
+    # the total grows past max_peak_samples * 8. max_peak_samples ≤ 0
+    # disables the cap.
+    if max_peak_samples > 0 and len(samples) > max_peak_samples * 8:
+        keep_arc_post = [s for s in samples if s[0] == -1]
+        keep_consumer = [s for s in samples if s[0] != -1]
+        if len(keep_consumer) > max_peak_samples:
+            step = len(keep_consumer) / float(max_peak_samples)
+            keep_consumer = [
+                keep_consumer[int(i * step)] for i in range(max_peak_samples)
+            ]
+        samples = sorted(keep_arc_post + keep_consumer, key=lambda x: x[1])
+
     if audit:
         print(
-            f"[ct_milp_lateness:audit] gpu_consumer_events={len(gpu_consumers)} "
-            f"sampled_points={len(samples)}"
+            f"[ct_milp_lateness:audit] event-aligned sample grid: "
+            f"gpu_consumer={n_gpu_samples} "
+            f"arc_start={n_arc_samples} "
+            f"post_consumer={n_post_consumer_samples} "
+            f"big_interm={n_big_interm_samples} "
+            f"total={len(samples)} "
+            f"(legacy uniform stride would have been "
+            f"{min(len(gpu_consumers), max_peak_samples)})",
+            flush=True,
         )
 
     # ---- 7. Peak VRAM rows (one per sample point) ----
@@ -781,23 +1361,89 @@ def _solve_milp(
     forced_cold_bytes = sum(pool[t].size_bytes for t in forced_cold)
     constant_floor = float(forced_cold_bytes) + float(extra_static_bytes)
 
-    for nid_sample, t_l in samples:
+    # Intermediates: fixed (non-variable) VRAM residency per sample.
+    _intermediates = _build_intermediate_residencies(trace, sim_times)
+    if audit and _intermediates:
+        sizes_alive = []
+        for _, t_l in samples:
+            s = sum(sz for s_, e_, sz in _intermediates if s_ <= t_l <= e_)
+            sizes_alive.append(s)
+        print(
+            f"[ct_milp_lateness:audit] intermediates: "
+            f"n={len(_intermediates)} per-sample residency MB "
+            f"min={min(sizes_alive)/1e6:.1f} "
+            f"max={max(sizes_alive)/1e6:.1f} "
+            f"mean={sum(sizes_alive)/len(sizes_alive)/1e6:.1f}"
+        )
+
+    # Option-(b) lateness→peak coupling. When window i admits L_window_i
+    # ns of late streaming, those bytes (L · bw) effectively need to be
+    # cold-resident (the injector demotes late tids back to cold). Couple
+    # this into the per-sample peak rows so the LP can't escape peak by
+    # accepting lateness.
+    _bw_h2d_Bpns = max(effective_h2d_bw(hw), 1e-18)
+    _bytes_per_ns_late = _bw_h2d_Bpns
+    _timeline_start_w = min(c[1] for pt in pool.values() for c in pt.consumers)
+    _timeline_end_w = max(c[1] for pt in pool.values() for c in pt.consumers)
+    _window_length_w = max(1, (_timeline_end_w - _timeline_start_w) / NUM_LATENESS_WINDOWS)
+
+    def _sample_window_idx(t_l_val: float) -> int:
+        idx = int((t_l_val - _timeline_start_w) / _window_length_w)
+        return max(0, min(NUM_LATENESS_WINDOWS - 1, idx))
+
+    if audit:
+        print(
+            f"[ct_milp_lateness:audit] lateness→peak coupling: "
+            f"bw={_bw_h2d_Bpns:.1f}GB/s → "
+            f"{_bytes_per_ns_late*1e6/1e6:.1f}MB peak per 1ms window-lateness"
+        )
+        if arc_queue_factor != 1.0:
+            print(
+                f"[ct_milp_lateness:audit] arc widening: τ × "
+                f"{arc_queue_factor} (models PCIe queue residency)"
+            )
+
+    n_samples_total = len(samples)
+    audit_progress_step = max(1, n_samples_total // 10)
+    for _sample_idx, (nid_sample, t_l) in enumerate(samples):
+        if audit and _sample_idx > 0 and _sample_idx % audit_progress_step == 0:
+            print(
+                f"[ct_milp_lateness:audit] LP build progress: "
+                f"{_sample_idx}/{n_samples_total} samples processed",
+                flush=True,
+            )
         const_addons = constant_floor
+        # Intermediate residency at this sample.
+        for s_, e_, sz_ in _intermediates:
+            if s_ > t_l:
+                break
+            if t_l <= e_:
+                const_addons += sz_
         var_coefs: dict[int, float] = {}
         for tid in feasible_tids:
             pt = pool[tid]
             size = pt.size_bytes
-            # Currently consumed at this exact node?
-            is_currently_consumed = any(c[0] == nid_sample for c in pt.consumers)
-            if is_currently_consumed:
+            # Currently consumed at this exact node? O(1) via precomputed
+            # frozenset of consumer node ids.
+            if nid_sample in _pt_consumer_nids_set[tid]:
                 const_addons += size
                 continue
-            first_start = pt.consumers[0][1]
-            last_end = pt.consumers[-1][2]
-            tau = pt.tau_h2d_ns
+            first_start = _pt_first_start[tid]
+            last_end = _pt_last_end[tid]
+
+            # PCIe-queue-residency widening. With h2d_streams=1 (sim's
+            # default), prefetches serialize on the PCIe channel. When
+            # N issuers fire near the same time, all N tids' dst VRAM
+            # is claimed at issuer-fire but transfers run one at a
+            # time — so each tid stays resident for an extended window
+            # of up to N×τ_h2d rather than just τ_h2d. The LP's
+            # original arc model (width = τ) understates this. We
+            # widen by `arc_queue_factor` to match. Set to 1.0 to
+            # disable, larger to model deeper queue serialization.
+            arc_tau = _pt_arc_tau[tid]
 
             if t_l < first_start:
-                arc_0_start = max(0, first_start - tau)
+                arc_0_start = max(0, first_start - arc_tau)
                 if t_l >= arc_0_start:
                     const_addons += size
                 else:
@@ -820,7 +1466,7 @@ def _solve_milp(
                 # without matching node id — treat as alive.
                 const_addons += size
                 continue
-            arc_kp1_start = pt.consumers[k_in + 1][1] - tau
+            arc_kp1_start = pt.consumers[k_in + 1][1] - arc_tau
             if t_l >= arc_kp1_start:
                 const_addons += size
             elif pt.gap_feasibility[k_in] and (tid, k_in) in e_var_idx:
@@ -842,7 +1488,8 @@ def _solve_milp(
                 # Infeasible gap — no evict can fit, tensor stays.
                 const_addons += size
 
-        # P ≥ const_addons + Σ var_coef · c   ⇒   Σ var_coef · c − P ≤ −const_addons
+        # P ≥ const_addons + Σ var_coef · c + α · L_window_i
+        #   ⇒  Σ var_coef · c − P + α · L_window_i ≤ −const_addons
         rows.append(row)
         cols.append(P_IDX)
         vals.append(-1.0)
@@ -852,6 +1499,10 @@ def _solve_milp(
             rows.append(row)
             cols.append(var_col)
             vals.append(float(coef))
+        _wi = _sample_window_idx(t_l)
+        rows.append(row)
+        cols.append(L_WINDOW_IDX_BASE + _wi)
+        vals.append(float(_bytes_per_ns_late))
         ub_list.append(-float(const_addons))
         row += 1
 
@@ -1007,7 +1658,9 @@ def _solve_milp(
                 ub_list=ub_list,
                 integrality_arr=integrality_arr,
                 time_limit_s=time_limit_s,
+                solver_threads=solver_threads,
                 audit=audit,
+                phase1_time_limit_s=phase1_time_limit_s,
             )
         )
         # If MILP couldn't even start (rare), fall through to scipy fallback.
@@ -1021,6 +1674,62 @@ def _solve_milp(
         else:
             fell_back = lp_only
 
+    # Direct highspy LP-relaxation path. Used when the caller
+    # explicitly requested --lp-relaxation, OR when the MILP path
+    # failed and we need a feasible LP primal. Reads the feasible
+    # primal even on time-limit (scipy's wrapper drops it).
+    if res_x is None and _HIGHSPY_AVAILABLE and lp_relaxation:
+        if audit:
+            print("[ct_milp_lateness:solver] using direct highspy LP")
+        res_x, lp_has_primal, lp_msg = _solve_lp_highspy(
+            total_vars=total_vars,
+            c_obj=c_obj,
+            bounds_list=bounds_list,
+            rows=rows,
+            cols=cols,
+            vals=vals,
+            ub_list=ub_list,
+            time_limit_s=time_limit_s,
+            solver_threads=solver_threads,
+            audit=audit,
+        )
+        res_message = lp_msg
+        res_success = bool(lp_has_primal)
+        fell_back = True
+        if audit:
+            print(
+                f"[ct_milp_lateness:solver] direct LP: "
+                f"has_primal={lp_has_primal} status={lp_msg!r}"
+            )
+
+    # If the two-phase MILP returned nothing and highspy is available,
+    # try the direct LP-relaxation path before falling to scipy. This
+    # is the post-MILP recovery: we get a feasible LP primal that the
+    # scipy wrapper would otherwise hide on time-limit.
+    if res_x is None and _HIGHSPY_AVAILABLE and not lp_relaxation:
+        if audit:
+            print(
+                "[ct_milp_lateness:solver] MILP gave no primal, "
+                "trying direct highspy LP relaxation"
+            )
+        lp_x, lp_has, lp_msg = _solve_lp_highspy(
+            total_vars=total_vars,
+            c_obj=c_obj,
+            bounds_list=bounds_list,
+            rows=rows,
+            cols=cols,
+            vals=vals,
+            ub_list=ub_list,
+            time_limit_s=time_limit_s,
+            solver_threads=solver_threads,
+            audit=audit,
+        )
+        if lp_has:
+            res_x = lp_x
+            res_success = True
+            res_message = lp_msg
+            fell_back = True
+
     if res_x is None:
         # Scipy fallback: when highspy isn't available, or when
         # two-phase reported a fatal model error.
@@ -1029,6 +1738,7 @@ def _solve_milp(
         options: dict[str, Any] = {"disp": False}
         if time_limit_s is not None:
             options["time_limit"] = float(time_limit_s)
+        options["threads"] = int(solver_threads)
         kwargs: dict[str, Any] = {
             "A_ub": A,
             "b_ub": b_ub_arr,
@@ -1049,9 +1759,33 @@ def _solve_milp(
             kwargs.pop("integrality", None)
             res = linprog(c_obj, **kwargs)
             fell_back = True
-        res_x = np.asarray(res.x) if res.success and res.x is not None else None
-        res_success = bool(res.success)
-        res_message = str(getattr(res, "message", ""))
+        # Accept any feasible primal even if the solver reports
+        # success=False due to time-limit. With option-b coupling +
+        # large pool, scipy's HiGHS sometimes returns "TimeLimit
+        # reached but primal_status is Feasible" — the feasible plan
+        # is strictly better than the all-cold hard-fallback below.
+        message_str = str(getattr(res, "message", ""))
+        has_x = res.x is not None
+        primal_feasible = (
+            "primal_status is Feasible" in message_str
+            or "primal_status is feasible" in message_str
+        )
+        accepted_via_timeout = (not res.success) and has_x and primal_feasible
+        if audit and accepted_via_timeout:
+            print(
+                f"[ct_milp_lateness:solver] accepting timeout-feasible "
+                f"primal (has_x={has_x} status={message_str!r})"
+            )
+        res_x = np.asarray(res.x) if has_x and (res.success or accepted_via_timeout) else None
+        res_success = bool(res.success) or accepted_via_timeout
+        res_message = message_str
+        if audit and not res_success:
+            print(
+                f"[ct_milp_lateness:solver] no usable primal: "
+                f"has_x={has_x} success={res.success} "
+                f"primal_feasible_in_msg={primal_feasible} "
+                f"message={message_str!r}"
+            )
 
     if audit:
         tag = "highspy-two-phase" if used_two_phase else "scipy-linprog"
@@ -1084,6 +1818,15 @@ def _solve_milp(
     peak_overrun_bytes = 0
     peak_bytes = 0
     lateness_ns = 0
+    overrun_repair_diag: dict[str, int] = {}
+    per_window_lateness_ns: list[int] = [0] * NUM_LATENESS_WINDOWS
+    window_bounds_ns: list[tuple[int, int]] = [
+        (
+            int(timeline_start + i * window_length),
+            int(timeline_start + (i + 1) * window_length),
+        )
+        for i in range(NUM_LATENESS_WINDOWS)
+    ]
 
     if res.success and res.x is not None:
         x = np.asarray(res.x)
@@ -1103,6 +1846,7 @@ def _solve_milp(
             for i in range(NUM_LATENESS_WINDOWS)
         ]
         lateness_ns = int(sum(window_slacks_ns))
+        per_window_lateness_ns = [int(v) for v in window_slacks_ns]
         if audit:
             nonzero = [
                 (i, v) for i, v in enumerate(window_slacks_ns) if v > 1.0
@@ -1116,20 +1860,81 @@ def _solve_milp(
         if peak_target_bytes is not None:
             peak_overrun_bytes = int(float(x[S_PEAK_IDX]))
             if peak_overrun_bytes > 1:
-                target_infeasible = True
-    else:
-        # Hard-fallback: cold-start everything feasible.
+                overrun_repair_diag = _stream_cold_tensors_to_cover_overrun(
+                    pool,
+                    feasible_tids,
+                    c_solution,
+                    e_solution,
+                    peak_overrun_bytes,
+                )
+                streamed_repair_bytes = int(
+                    overrun_repair_diag["streamed_bytes"]
+                )
+                residual_overrun_bytes = int(
+                    overrun_repair_diag["residual_overrun_bytes"]
+                )
+                peak_bytes = max(0, peak_bytes - streamed_repair_bytes)
+                peak_overrun_bytes = residual_overrun_bytes
+                target_infeasible = peak_overrun_bytes > 1
+                if audit:
+                    print(
+                        f"[ct_milp_lateness:solver] solution exceeds "
+                        f"cap by {float(x[S_PEAK_IDX])/1e6:.1f}MB; "
+                        f"streaming {overrun_repair_diag['streamed_count']} "
+                        f"cold tensors "
+                        f"({streamed_repair_bytes/1e6:.1f}MB) selected by "
+                        f"fewest consumers, then farthest first use. "
+                        f"residual_overrun={peak_overrun_bytes/1e6:.1f}MB"
+                    )
+    if not (res.success and res.x is not None):
+        # Hard-fallback: stream every async-feasible tid (c=0),
+        # cold-load every c_feasibility=False tid (c=1, layout time).
+        # Evict at every feasible gap only for streamed tids (e=1).
+        #
+        # Rationale: streaming c=0 in runtime requires a gpu_runtime
+        # issuer. For c_feasibility=False tids none exists; routing
+        # them via cpu_leaf issuers would storm PCIe at sim_t≈0 and
+        # block GPU work. Cold-start instead: load at layout (no
+        # runtime PCIe contention), evict immediately after first
+        # consumer (e=1 in gap 0 where feasible), refetch later via
+        # gpu_runtime issuer for subsequent consumers.
         for tid in feasible_tids:
-            c_solution[tid] = 1.0
             pt = pool[tid]
+            if not pt.c_feasibility:
+                c_solution[tid] = 1.0
+            else:
+                c_solution[tid] = 0.0
             for k in range(len(pt.consumers) - 1):
-                e_solution[(tid, k)] = 0.0
-        peak_bytes = int(
-            constant_floor + sum(pool[t].size_bytes for t in feasible_tids)
+                if (
+                    c_solution[tid] < 0.5
+                    and (tid, k) in e_var_idx
+                    and pt.gap_feasibility[k]
+                ):
+                    e_solution[(tid, k)] = 1.0
+                else:
+                    e_solution[(tid, k)] = 0.0
+        # Peak estimate: forced_cold + c_feasibility=False bound-cold
+        # tids' total size (loaded at layout). Streamed tids contribute
+        # only during their active residency windows; in fallback
+        # mode the per-sample peak isn't computed precisely.
+        cold_now_bytes = sum(
+            pool[t].size_bytes
+            for t in feasible_tids
+            if c_solution[t] >= 0.5
         )
+        peak_bytes = int(constant_floor + cold_now_bytes)
         lateness_ns = 0
         if peak_target_bytes is not None and peak_bytes > peak_target_bytes:
             target_infeasible = True
+        if audit:
+            n_stream = sum(1 for t in feasible_tids if c_solution[t] < 0.5)
+            n_cold = sum(1 for t in feasible_tids if c_solution[t] >= 0.5)
+            print(
+                f"[ct_milp_lateness:solver] hard-fallback: stream-where-feasible "
+                f"(c=0 for {n_stream} async-feasible tids, c=1 for {n_cold} "
+                f"bound-cold). layout_cold={peak_bytes/1e6:.1f}MB "
+                f"target_infeasible={target_infeasible}"
+            )
 
     diagnostics = {
         "pool_size": len(pool),
@@ -1140,11 +1945,13 @@ def _solve_milp(
         "n_samples": len(samples),
         "solver_success": bool(res.success),
         "solver_status": str(getattr(res, "message", "")),
+        "solver_threads": int(solver_threads),
         "fell_back_to_lp": bool(fell_back),
         "target_infeasible": bool(target_infeasible),
         "peak_overrun_bytes": int(peak_overrun_bytes),
         "lateness_ns": int(lateness_ns),
         "lp_relaxation": bool(lp_relaxation),
+        "overrun_repair": overrun_repair_diag,
     }
 
     return _LPResult(
@@ -1158,6 +1965,8 @@ def _solve_milp(
         target_infeasible=bool(target_infeasible),
         solver_status=str(getattr(res, "message", "")),
         diagnostics=diagnostics,
+        per_window_lateness_ns=per_window_lateness_ns,
+        window_bounds_ns=window_bounds_ns,
     )
 
 
@@ -1320,7 +2129,13 @@ def _emit_neutral(
         is_cold = is_forced or float(cv) >= KEEP_THRESHOLD
 
         # Emit cold-start or initial prefetch, depending on c_t.
-        # (Per-gap evicts emit below independently of c_t.)
+        # c-feasible cold tids must not get runtime refetches — the
+        # MILP's c+e<=1 coupling rules that out, and the injector
+        # would silently demote them anyway.
+        # c-infeasible cold tids (pinned c=1) ARE allowed to emit
+        # per-gap evict+refetch when the LP picks e_{t,k}=1 — that's
+        # the hybrid pattern this scheduler now supports for the
+        # cold-pinned set.
         if is_cold:
             cold_starts.append(NeutralColdStart(
                 tensor_uid=uid,
@@ -1369,12 +2184,17 @@ def _emit_neutral(
                 iter_mask=[],
             ))
 
-        # Per-gap evict + refetch — INDEPENDENT of c_t. A cold tid
-        # (c=1) may still be evicted mid-run if the LP found that
-        # freeing the dst pages during a gap reduces per-sample VRAM
-        # below the cap, then refetched from RAM before the next
-        # consumer. This is the "hybrid" pattern the old e = 1 − c
-        # coupling foreclosed.
+        # Skip per-gap emit only for c-feasible cold tids — the
+        # MILP's coupling guarantees e=0 for them. c-infeasible cold
+        # tids (forced or pinned) fall through to the per-gap loop
+        # so their hybrid evict+refetch can be emitted when e=1.
+        if is_cold and pt.c_feasibility:
+            continue
+
+        # Per-gap evict + refetch. For c=0 (streamed) tids this is the
+        # standard prefetch+evict cycle. For c=1 c-pinned tids it's
+        # the hybrid `cold-at-layout + mid-run evict + refetch`
+        # pattern (see Coupling section in _solve_milp).
         for k in range(len(pt.consumers) - 1):
             if not pt.gap_feasibility[k]:
                 continue
@@ -1476,7 +2296,12 @@ def solve_neutral(
     safety_margin_frac: float = 0.07,
     max_peak_samples: int = 256,
     time_limit_s: float | None = 240.0,
+    phase1_time_limit_s: float | None = None,
+    solver_threads: int | None = None,
     lp_relaxation: bool = False,
+    backpressure_edges: bool = False,
+    backpressure_lateness_threshold_ns: int = 100_000,  # 100 us
+    arc_queue_factor: float = 1.0,
     audit: bool = False,
     sidecars: Any = None,                 # accepted but ignored
     **_legacy_kwargs: Any,
@@ -1496,6 +2321,8 @@ def solve_neutral(
                                 for peak/lateness rows. ~256 is a sweet
                                 spot for sd3-med scale (10k events).
       ``time_limit_s``        — HiGHS time limit. None ⇒ no limit.
+      ``solver_threads``      — CPU threads for HiGHS. None ⇒ all
+                                detected CPU cores.
       ``lp_relaxation``       — Skip integrality, solve continuous LP
                                 (debug aid).
       ``audit``               — Print pool/LP/solver diagnostics.
@@ -1512,16 +2339,28 @@ def solve_neutral(
     sim_times: dict[int, tuple[int, int]] | None = None
     if baseline_sim_result_path is not None:
         sim_times = _load_baseline_sim_times(baseline_sim_result_path)
-        if audit:
-            n_total = sum(
-                1 for _nid, n in trace.node_map.items()
-                if str((n.args or {}).get("resource_kind") or "")
-                   in _GPU_RESOURCE_KINDS
-                and int((n.args or {}).get("start_ns") or 0) > 0
+        gpu_trace_nids = [
+            int(nid) for nid, n in trace.node_map.items()
+            if str((n.args or {}).get("resource_kind") or "")
+               in _GPU_RESOURCE_KINDS
+            and int((n.args or {}).get("start_ns") or 0) > 0
+        ]
+        n_total = len(gpu_trace_nids)
+        n_matched = sum(1 for nid in gpu_trace_nids if nid in sim_times)
+        if n_matched < n_total:
+            coverage = (n_matched / n_total) if n_total else 1.0
+            raise RuntimeError(
+                "[ct_milp_lateness] baseline sim_result does not match "
+                "this trace closely enough: loaded sim times for "
+                f"{n_matched} / {n_total} gpu trace nodes "
+                f"({coverage:.1%}) from {baseline_sim_result_path}. "
+                "Use the matching workload's baseline sim_result, or omit "
+                "--baseline-sim-result to use trace times."
             )
+        if audit:
             print(
                 f"[ct_milp_lateness:audit] loaded baseline sim times "
-                f"for {len(sim_times)} / {n_total} gpu trace nodes "
+                f"for {n_matched} / {n_total} gpu trace nodes "
                 f"from {baseline_sim_result_path}"
             )
 
@@ -1553,6 +2392,33 @@ def solve_neutral(
             f"= {extra_static_bytes/1e6:.1f}MB"
         )
 
+    # Unschedulable tensor mass: tensors in the compile-side sidecar that
+    # couldn't be matched to trace tids. The MILP can't plan for these,
+    # but they still consume VRAM at runtime. Add to extra_static_bytes
+    # so the MILP knows the true available budget.
+    if sidecars is not None:
+        try:
+            from graph_modifiers.common import build_unified_timeline
+            tl = build_unified_timeline(
+                trace, sidecars, cpu_per_launch_ns=hw.cpu_per_launch_ns,
+            )
+            unschedulable_bytes = sum(
+                t.size_bytes for t in tl.tensors if not t.trace_tids
+            )
+            if unschedulable_bytes > 0:
+                extra_static_bytes += unschedulable_bytes
+                if audit:
+                    n_unsch = sum(1 for t in tl.tensors if not t.trace_tids)
+                    print(
+                        f"[ct_milp_lateness:audit] unschedulable sidecar tensors: "
+                        f"{n_unsch} ({unschedulable_bytes/1e6:.1f}MB) — "
+                        f"added to static overhead"
+                    )
+        except Exception as e:
+            if audit:
+                print(f"[ct_milp_lateness:audit] sidecars provided but timeline "
+                      f"build failed: {e}")
+
     result = _solve_milp(
         pool, trace, hw,
         sim_times=sim_times,
@@ -1561,7 +2427,10 @@ def solve_neutral(
         safety_margin_frac=safety_margin_frac,
         max_peak_samples=max_peak_samples,
         time_limit_s=time_limit_s,
+        phase1_time_limit_s=phase1_time_limit_s,
+        solver_threads=solver_threads,
         lp_relaxation=lp_relaxation,
+        arc_queue_factor=arc_queue_factor,
         audit=audit,
     )
 
@@ -1583,8 +2452,27 @@ def solve_neutral(
         for (t, k), v in result.e_solution.items() if v >= 0.5
     )
 
+    # ---- Backpressure edges: derive synthetic GPU→CPU control edges
+    # from the LP's per-window lateness. For each window with stall
+    # above threshold, find the gpu_runtime node at window's end
+    # (in LP time axis) and the cpu_leaf node that, without the edge,
+    # would fire during the stall. Adding (gpu, cpu) as a dependency
+    # in the trace caps sim's CPU race-ahead, modeling the real
+    # CachingAllocator's wait-on-stream-event under tight memory.
+    bp_edges: list[tuple[int, int]] = []
+    bp_diag: dict[str, Any] = {"enabled": bool(backpressure_edges)}
+    if backpressure_edges and result.per_window_lateness_ns:
+        bp_edges, bp_diag_extra = _derive_backpressure_edges(
+            trace, result, hw, sim_times=sim_times,
+            lateness_threshold_ns=backpressure_lateness_threshold_ns,
+            audit=audit,
+        )
+        bp_diag.update(bp_diag_extra)
+
     neutral.meta = {
         "io_model": "ct_milp_lateness_simtime",
+        "backpressure_edges": bp_edges,
+        "backpressure_diagnostics": bp_diag,
         "graph_order": neutral.graph_order,
         "milp_peak_mb": round(result.peak_bytes / 1e6, 2),
         "milp_lateness_ms": round(result.lateness_ns / 1e6, 3),
