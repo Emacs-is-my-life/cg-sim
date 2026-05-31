@@ -69,6 +69,18 @@ _GPU_RESOURCE_KINDS = ("gpu_stream", "gpu", "gpu_runtime")
 _POOL_TENSOR_TYPES = ("WEIGHT", "LEAF", "INPUT")
 PEAK_SLACK_PENALTY = 1.0e6
 
+# Numerical scaling. The model is solved in MB (bytes / S) and ms (ns / S)
+# rather than raw bytes/ns. Raw units give HiGHS a ~1e16 objective dynamic
+# range (sizes ~7e8, RHS ~2e10, slack penalty 1e6) → its simplex fails with
+# model_status Unknown / "Solve error" on some models/caps even though the LP
+# is provably feasible. Because bytes and ns are scaled by the SAME factor,
+# every ratio coefficient (e.g. bytes/ns PCIe rate) is invariant and all
+# objective weights stay identical, so the optimum is unchanged — only the
+# conditioning improves (Matrix/Cost ~[1e-2,1e6], RHS ~[1,1e4]). P, s_P and
+# the per-window slacks are converted back to bytes/ns at decode, so all
+# downstream code (emit, diagnostics, sim) is untouched.
+MODEL_SCALE = 1.0e6
+
 
 def _default_solver_threads() -> int:
     return max(1, os.cpu_count() or 1)
@@ -730,11 +742,13 @@ def _stream_cold_tensors_to_cover_overrun(
             batch_bytes += size
         cur_peak = float(peak_fn(c_solution, e_solution))
 
+    # peak_fn returns model units (MB); streamed_bytes is raw bytes (for
+    # display). Caller multiplies the *_model fields by MODEL_SCALE.
     return {
         "streamed_count": streamed_count,
         "streamed_bytes": streamed_bytes,
-        "final_peak_bytes": int(cur_peak),
-        "residual_overrun_bytes": max(0, int(cur_peak - target_adj_bytes)),
+        "final_peak_model": float(cur_peak),
+        "residual_overrun_model": max(0.0, float(cur_peak - target_adj_bytes)),
     }
 
 
@@ -769,18 +783,9 @@ def _solve_lp_highspy(
 
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
-    # Numerical conditioning. The model is built in raw bytes: sizes ~7e8,
-    # peak/RHS ~2e10, mixed with the 1e6 peak-slack penalty — a ~1e16
-    # objective dynamic range. On large-weight models (llama8b) HiGHS'
-    # simplex then fails (model_status Unknown/Infeasible, or "Solve error"
-    # with presolve off) even though the LP is provably feasible (s_P /
-    # L_window slacks absorb any peak/lateness). These are HiGHS' own
-    # recommended scale exponents (power-of-2 on cost / bound): they rescale
-    # the offending ranges into a solvable window WITHOUT changing the
-    # optimum (uniform scaling). Verified: llama8b 8g goes from
-    # Unknown→Optimal in ~10 s. See IMPROVEMENTS.md §1bis.
-    h.setOptionValue("user_bound_scale", -14)
-    h.setOptionValue("user_objective_scale", -7)
+    # Conditioning is handled by building the model in MB/ms (see
+    # MODEL_SCALE), so no HiGHS user_bound_scale / user_objective_scale
+    # hacks are needed.
     _set_highs_threads(h, solver_threads)
     if time_limit_s is not None:
         h.setOptionValue("time_limit", float(time_limit_s))
@@ -849,18 +854,9 @@ def _build_highspy_model(
 
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
-    # Numerical conditioning. The model is built in raw bytes: sizes ~7e8,
-    # peak/RHS ~2e10, mixed with the 1e6 peak-slack penalty — a ~1e16
-    # objective dynamic range. On large-weight models (llama8b) HiGHS'
-    # simplex then fails (model_status Unknown/Infeasible, or "Solve error"
-    # with presolve off) even though the LP is provably feasible (s_P /
-    # L_window slacks absorb any peak/lateness). These are HiGHS' own
-    # recommended scale exponents (power-of-2 on cost / bound): they rescale
-    # the offending ranges into a solvable window WITHOUT changing the
-    # optimum (uniform scaling). Verified: llama8b 8g goes from
-    # Unknown→Optimal in ~10 s. See IMPROVEMENTS.md §1bis.
-    h.setOptionValue("user_bound_scale", -14)
-    h.setOptionValue("user_objective_scale", -7)
+    # Conditioning is handled by building the model in MB/ms (see
+    # MODEL_SCALE), so no HiGHS user_bound_scale / user_objective_scale
+    # hacks are needed.
     _set_highs_threads(h, solver_threads)
     if time_limit_s is not None:
         h.setOptionValue("time_limit", float(time_limit_s))
@@ -1217,16 +1213,21 @@ def _solve_milp(
     # (stalls cascade physically). With independent slacks the LP
     # can't shift PCIe load across windows to "hide" per-iter
     # saturation.
+    # Objective weights are UNCHANGED from the byte/ns formulation — because
+    # bytes→MB and ns→ms both divide by MODEL_SCALE, every objective term
+    # (lateness, streaming, peak-slack) shrinks by the same factor, so the
+    # argmin is identical. We just express size in MB so the cost vector
+    # sits in [1, 1e6] instead of [1, 1e8].
     for i in range(NUM_LATENESS_WINDOWS):
-        c_obj[L_WINDOW_IDX_BASE + i] = 1.0
+        c_obj[L_WINDOW_IDX_BASE + i] = 1.0          # per ms of stall
     if peak_target_bytes is not None:
-        c_obj[S_PEAK_IDX] = PEAK_SLACK_PENALTY
+        c_obj[S_PEAK_IDX] = PEAK_SLACK_PENALTY      # per MB over cap
     for tid in feasible_tids:
-        size = pool[tid].size_bytes
-        c_obj[c_var_idx[tid]] = -float(size) * epsilon_per_byte
+        size_mb = pool[tid].size_bytes / MODEL_SCALE
+        c_obj[c_var_idx[tid]] = -float(size_mb) * epsilon_per_byte
     for (tid, k), col in e_var_idx.items():
-        size = pool[tid].size_bytes
-        c_obj[col] = float(size) * epsilon_per_byte
+        size_mb = pool[tid].size_bytes / MODEL_SCALE
+        c_obj[col] = float(size_mb) * epsilon_per_byte
 
     # ---- 5. Coupling: forbid cold-start + runtime refetch hybrid ----
     #
@@ -1454,7 +1455,8 @@ def _solve_milp(
     #       gap infeasible:          always alive (no evict can fit)
     #   T_i within a consumer's [start, end]: always alive (currently consumed)
     forced_cold_bytes = sum(pool[t].size_bytes for t in forced_cold)
-    constant_floor = float(forced_cold_bytes) + float(extra_static_bytes)
+    # Model is in MB: constant_floor (and every size/const below) is bytes/S.
+    constant_floor = (float(forced_cold_bytes) + float(extra_static_bytes)) / MODEL_SCALE
 
     # Intermediates: fixed (non-variable) VRAM residency per sample.
     _intermediates = _build_intermediate_residencies(trace, sim_times)
@@ -1518,16 +1520,16 @@ def _solve_milp(
                 flush=True,
             )
         const_addons = constant_floor
-        # Intermediate residency at this sample.
+        # Intermediate residency at this sample (bytes → MB).
         for s_, e_, sz_ in _intermediates:
             if s_ > t_l:
                 break
             if t_l <= e_:
-                const_addons += sz_
+                const_addons += sz_ / MODEL_SCALE
         var_coefs: dict[int, float] = {}
         for tid in feasible_tids:
             pt = pool[tid]
-            size = pt.size_bytes
+            size = pt.size_bytes / MODEL_SCALE  # MB; every use below is MB
             # Currently consumed at this exact node? O(1) via precomputed
             # frozenset of consumer node ids.
             if nid_sample in _pt_consumer_nids_set[tid]:
@@ -1610,10 +1612,17 @@ def _solve_milp(
             rows.append(row)
             cols.append(var_col)
             vals.append(float(coef))
-        _wi = _sample_window_idx(t_l)
-        rows.append(row)
-        cols.append(L_WINDOW_IDX_BASE + _wi)
-        vals.append(float(_bytes_per_ns_late))
+        # Lateness→peak coupling (option-b): add bw·L_window to this
+        # sample's peak. Mis-calibrated — it injects ~bw·L of *phantom*
+        # peak into every sample of a high-stall window (conflating stall
+        # time with resident bytes), which over-predicts the modeled peak
+        # and makes the LP under-fill VRAM at loose caps. Gate-off for the
+        # experiment via MILP_DISABLE_LP_COUPLING=1.
+        if os.environ.get("MILP_DISABLE_LP_COUPLING") != "1":
+            _wi = _sample_window_idx(t_l)
+            rows.append(row)
+            cols.append(L_WINDOW_IDX_BASE + _wi)
+            vals.append(float(_bytes_per_ns_late))
         ub_list.append(-float(const_addons))
         row += 1
 
@@ -1631,24 +1640,24 @@ def _solve_milp(
     # sample; the cut was only a relaxation-tightener, not a soundness
     # constraint.
 
-    # ---- 7b. Soft peak cap: P − s_P ≤ target·(1 − margin) ----
+    # ---- 7b. Soft peak cap: P − s_P ≤ target·(1 − margin) ----  (MB)
     if peak_target_bytes is not None:
-        target_adj = max(
+        target_adj_mb = max(
             0.0,
             float(peak_target_bytes) * (1.0 - float(safety_margin_frac)),
-        )
+        ) / MODEL_SCALE
         rows.append(row)
         cols.append(P_IDX)
         vals.append(1.0)
         rows.append(row)
         cols.append(S_PEAK_IDX)
         vals.append(-1.0)
-        ub_list.append(target_adj)
+        ub_list.append(target_adj_mb)
         row += 1
         if audit:
             print(
                 f"[ct_milp_lateness:audit] peak cap: target={peak_target_bytes/1e6:.1f}MB "
-                f"margin={safety_margin_frac*100:.1f}% → P ≤ {target_adj/1e6:.1f}MB"
+                f"margin={safety_margin_frac*100:.1f}% → P ≤ {target_adj_mb:.1f}MB"
             )
 
     # ---- 8. Per-window lateness rows ----
@@ -1699,23 +1708,25 @@ def _solve_milp(
         e_i = timeline_start + (i + 1) * window_length
         is_last = (i == NUM_LATENESS_WINDOWS - 1)
 
-        const_lhs = 0.0
+        # Coefficients/RHS are in ms (ns / S); the window-membership
+        # comparisons stay in ns (deadlines, s_i, e_i are ns).
+        const_lhs = 0.0  # ms
         rows.append(row)
         cols.append(L_WINDOW_IDX_BASE + i)
         vals.append(-1.0)
         for tid in feasible_tids:
             pt = pool[tid]
-            delta = pt.tau_h2d_ns
+            delta_ms = pt.tau_h2d_ns / MODEL_SCALE
             first_dl = pt.consumers[0][1]
             in_window_first = (
                 s_i <= first_dl < e_i if not is_last
                 else s_i <= first_dl <= e_i
             )
             if in_window_first:
-                const_lhs += delta
+                const_lhs += delta_ms
                 rows.append(row)
                 cols.append(c_var_idx[tid])
-                vals.append(-float(delta))
+                vals.append(-float(delta_ms))
             for k in range(len(pt.consumers) - 1):
                 if (tid, k) not in e_var_idx:
                     continue
@@ -1727,8 +1738,8 @@ def _solve_milp(
                 if in_window:
                     rows.append(row)
                     cols.append(e_var_idx[(tid, k)])
-                    vals.append(float(delta))
-        ub_list.append(window_length - const_lhs)
+                    vals.append(float(delta_ms))
+        ub_list.append(window_length / MODEL_SCALE - const_lhs)
         row += 1
 
     nb = row
@@ -1775,15 +1786,18 @@ def _solve_milp(
                 feasible_warm_start[e_var_idx[(tid, k)]] = (
                     1.0 if c_val < 0.5 else 0.0
                 )
-    _total_feasible_bytes = float(
+    # Continuous slacks (MB / ms) set to safe over-estimates so the seed
+    # is a valid feasible point (slacks have no upper bound). constant_floor
+    # is already MB; sizes are bytes → MB.
+    _total_feasible_mb = float(
         sum(pool[t].size_bytes for t in feasible_tids)
-    ) + float(constant_floor)
-    feasible_warm_start[P_IDX] = _total_feasible_bytes
+    ) / MODEL_SCALE + float(constant_floor)
+    feasible_warm_start[P_IDX] = _total_feasible_mb
     if peak_target_bytes is not None:
-        feasible_warm_start[S_PEAK_IDX] = _total_feasible_bytes
-    _big_L = float(sum(pool[t].tau_h2d_ns for t in feasible_tids))
+        feasible_warm_start[S_PEAK_IDX] = _total_feasible_mb
+    _big_L_ms = float(sum(pool[t].tau_h2d_ns for t in feasible_tids)) / MODEL_SCALE
     for i in range(NUM_LATENESS_WINDOWS):
-        feasible_warm_start[L_WINDOW_IDX_BASE + i] = _big_L
+        feasible_warm_start[L_WINDOW_IDX_BASE + i] = _big_L_ms
 
     if _HIGHSPY_AVAILABLE and integrality_arr is not None and not lp_relaxation:
         used_two_phase = True
@@ -2003,46 +2017,49 @@ def _solve_milp(
                     e_solution[(tid, k)] = float(x[e_var_idx[(tid, k)]])
                 else:
                     e_solution[(tid, k)] = 0.0
-        peak_bytes = int(_alive_peak(c_solution, e_solution))
-        # Total lateness = sum across all window slacks (physically:
-        # cascading stalls add to wall-clock).
-        window_slacks_ns = [
+        peak_bytes = int(_alive_peak(c_solution, e_solution) * MODEL_SCALE)
+        # Slacks are in ms (model units); convert back to ns. Total
+        # lateness = sum across windows (cascading stalls add up).
+        window_slacks_ms = [
             float(x[L_WINDOW_IDX_BASE + i])
             for i in range(NUM_LATENESS_WINDOWS)
         ]
-        lateness_ns = int(sum(window_slacks_ns))
-        per_window_lateness_ns = [int(v) for v in window_slacks_ns]
+        lateness_ns = int(sum(window_slacks_ms) * MODEL_SCALE)
+        per_window_lateness_ns = [int(v * MODEL_SCALE) for v in window_slacks_ms]
         if audit:
             nonzero = [
-                (i, v) for i, v in enumerate(window_slacks_ns) if v > 1.0
+                (i, v) for i, v in enumerate(window_slacks_ms) if v > 1e-3
             ]
             print(
                 f"[ct_milp_lateness:audit] per-window stalls (ms): "
-                f"total={lateness_ns/1e6:.2f}, "
+                f"total={sum(window_slacks_ms):.2f}, "
                 f"nonzero windows: "
-                f"{[(i, round(v/1e6, 2)) for i, v in nonzero]}"
+                f"{[(i, round(v, 2)) for i, v in nonzero]}"
             )
         if peak_target_bytes is not None:
-            target_adj = max(
+            # Repair works in model units (MB): _alive_peak and target_adj_mb
+            # are both MB. Convert the results back to bytes for reporting.
+            target_adj_mb = max(
                 0.0,
                 float(peak_target_bytes) * (1.0 - float(safety_margin_frac)),
-            )
-            # x[S_PEAK_IDX] is the solver's own overrun slack; the TRUE
-            # peak is peak_bytes (recomputed above). Repair against the
-            # true peak so the reported number is what sim will actually
-            # hit — not the old `peak − streamed_bytes` under-credit.
-            if peak_bytes > target_adj + 1:
+            ) / MODEL_SCALE
+            # The TRUE peak is peak_bytes (recomputed above), not the
+            # solver's s_P slack. Repair against it so the reported number
+            # is what sim will actually hit — not the old under-credit.
+            if peak_bytes > target_adj_mb * MODEL_SCALE + 1:
                 overrun_repair_diag = _stream_cold_tensors_to_cover_overrun(
                     pool,
                     feasible_tids,
                     c_solution,
                     e_solution,
-                    target_adj,
+                    target_adj_mb,
                     _alive_peak,
                 )
-                peak_bytes = int(overrun_repair_diag["final_peak_bytes"])
+                peak_bytes = int(
+                    overrun_repair_diag["final_peak_model"] * MODEL_SCALE
+                )
                 peak_overrun_bytes = int(
-                    overrun_repair_diag["residual_overrun_bytes"]
+                    overrun_repair_diag["residual_overrun_model"] * MODEL_SCALE
                 )
                 target_infeasible = peak_overrun_bytes > 1
                 if audit:
@@ -2087,9 +2104,8 @@ def _solve_milp(
                 else:
                     e_solution[(tid, k)] = 0.0
         # Honest peak: recompute the true max-over-samples alive set for
-        # the stream-everything assignment (same arithmetic as the peak
-        # rows), not just the layout cold floor.
-        peak_bytes = int(_alive_peak(c_solution, e_solution))
+        # the stream-everything assignment (model units MB → bytes).
+        peak_bytes = int(_alive_peak(c_solution, e_solution) * MODEL_SCALE)
         lateness_ns = 0
         if peak_target_bytes is not None:
             target_adj = max(

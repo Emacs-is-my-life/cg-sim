@@ -84,10 +84,14 @@ as "demote candidate": consumers BEFORE the first refetch are
 un-gated (cold-start residency doesn't count as a gate), so the
 tid gets silently patched back to fully resident. This means the
 LP's dead-zone savings (the `size · (1 − e)` term in the peak row)
-won't fully materialize in sim. On sd3med 8g this gap was
-measured around 1 GB. Bump ``safety_margin_frac`` (default 0.05)
-to absorb it on tight caps, or fix the injector to recognize
-cold-start as a gate within `[layout, first_evict_node]`.
+won't fully materialize in sim. Empirically this gap is small
+(``coverage_repair`` silent-patch overhead measured at 0 MB on the
+validated grid). The dominant LP↔sim peak driver is instead the
+streamed-residency working set, which the per-sample peak rows
+model directly. ``safety_margin_frac`` (default 0.05) pads the
+residual. The honest overrun-repair (see *Overrun repair* below)
+makes the reported peak and ``target_infeasible`` truthful, so a
+plan that overruns is flagged rather than silently shipped.
 
 Infeasible gaps have no `e` variable (implicit `e ≡ 0`).
 
@@ -293,24 +297,69 @@ P − s_P  ≤  cap · (1 − margin)
 "what the LP modeled at sample points" and "what sim actually does
 at unsampled moments" — see *Sampling* below.
 
-## Sampling
+## Sampling (event-aligned, capped)
 
-The LP can't write peak + lateness rows at every nanosecond. Instead
-it picks `max_peak_samples = 256` evenly-spaced gpu compute events
-from the trace and writes constraints at each:
+The LP can't write peak + lateness rows at every nanosecond. The grid
+is **event-aligned**: the peak alive-set is piecewise-constant and only
+transitions at (a) gpu consumer starts, (b) arc-start events
+`consumer.start − τ·arc_queue_factor` (when a streamed tid's prefetch
+window opens), and (c) producer events of large transient intermediates
+(≥ 64 MB). Sampling at the union of those makes the modeled peak its
+true peak under the residency model.
 
-```
-gpu_events:  ──┬──┬──┬──┬──┬─...─┬──┬──┬──>     ~10,000 events total
-sample at:    ↑       ↑       ↑       ↑         every ~40th
-              T₀      T₁     ...     T₂₅₅
-```
+**Capping (critical).** On multi-iter workloads the arc-start events
+dominate — one per consumer of every streamed tid (e.g. llama8b ≈ 22 k
+arc vs 9 k consumer events, sd3-med ≈ 69 k arc). A naive grid that kept
+them all made `--max-peak-samples` a no-op and the LP relaxation itself
+time out. So **arc samples are thinned too**: keep the arcs of the
+largest-`size` tids (they dominate peak) plus a uniform time-spread of
+the rest, capped at `2 × max_peak_samples`; consumer/intermediate
+samples are uniformly thinned to `max_peak_samples`. Typical post-cap
+grid ≈ 768 rows regardless of trace size. `--max-peak-samples 256` is
+the sweet spot.
 
-The peak alive-set evolves between samples; moments not sampled are
-not directly constrained. The 7% safety margin on the soft cap row
-absorbs this sampling-induced slack. (The margin is empirical — at
-256 samples, every workload in the validated matrix passes; at 128
-samples some workloads fail, at 512 samples the LP becomes slower
-and tighter without a meaningful safety gain.)
+The peak alive-set is exact at sampled moments; the `safety_margin_frac`
+pad (default 0.05) absorbs unsampled transients.
+
+## Numerical scaling (MB / ms)
+
+The model is **solved in MB and ms** — every byte quantity (sizes, peak,
+RHS, cap) and every ns quantity (δ, window, lateness) is divided by
+`MODEL_SCALE = 1e6` at build time. In raw bytes/ns the problem had a
+~1e16 objective dynamic range (sizes ~7e8, RHS ~2e10, slack penalty
+1e6), which made HiGHS' simplex fail with `model_status = Unknown` /
+"Solve error" on some models/caps even though the LP is provably
+feasible. Because bytes and ns scale by the *same* factor, every ratio
+coefficient (e.g. the bytes/ns PCIe rate in the lateness→peak coupling)
+and all objective weights are invariant — the optimum is unchanged,
+only conditioning improves (Matrix/Cost ~[1e-2, 1e6], RHS ~[1, 1e4]).
+`P`, `s_P` and the per-window slacks are converted back to bytes/ns at
+decode, so the emit path and diagnostics are untouched. (This replaced
+an earlier brittle approach using HiGHS `user_bound_scale` /
+`user_objective_scale` exponents, which weren't robust across caps.)
+
+## `arc_queue_factor`
+
+Widens each streamed tid's residency arc to `arc_queue_factor × τ_h2d`
+in the peak rows. The intent was to model queued prefetches all holding
+dst VRAM, but with `h2d_streams = 1` the simulator claims dst **at
+issue, one at a time** (`_issue_prefetch`), so there is no
+claim-at-enqueue pile-up. `arc_queue_factor = 1` (the default) matches
+sim; values > 1 over-model peak and push the LP toward needless
+stream-everything plans. Leave it at 1.
+
+## Overrun repair
+
+When the solved plan's true peak (recomputed over the sample grid with
+`_alive_peak`) exceeds `cap·(1 − margin)`, the injector-bound emit would
+overflow sim. The repair flips cold tids → streamed in priority order
+(fewest consumers, farthest first use), **recomputing the true peak
+after each batch** and stopping once it fits — converging toward the
+stream-everything floor. The reported `peak_bytes` is this recomputed
+value and `target_infeasible` is set truthfully when even
+stream-everything overruns (cap below the streaming floor). It does
+*not* under-credit by subtracting streamed bytes (the earlier bug that
+silently shipped aborting plans).
 
 ## Emit: schedule entries with cgsim_tid pre-resolved
 
@@ -352,10 +401,21 @@ etc. and skips the shape-disambiguation resolver entirely — no
    returns a proven-integer incumbent at time limit
    (`fell_back=False`, status `Time limit reached`); either way the
    plan is a real integer solution, not a rounded relaxation.
-4. **Fallback**: if highspy isn't installed, the implementation falls
+4. **Feasibility-aware warm-start**: if Phase 1 does **not** reach
+   Optimal (e.g. a numerical stall), Phase 2 is seeded with the
+   *stream-everything* assignment (`c=0` for c-feasible tids, `c=1`
+   for c-infeasible, `e=1` on feasible gaps), with its continuous
+   slacks set to safe over-estimates so it is a valid feasible point.
+   This guarantees the MILP returns a feasible incumbent rather than a
+   garbage high-peak one, instead of running cold. With the MB/ms
+   rescale (above) Phase 1 now reaches Optimal on every validated
+   config, so this path is rarely taken — but it bounds the worst case.
+5. **Fallback**: if highspy isn't installed, the implementation falls
    back to `scipy.optimize.linprog` with `method='highs'` — same
    warm-start logic isn't exposed there, so it just runs MILP cold
    and may time out / fall back to LP relaxation rounded at 0.5.
 
-Default time limit: 240 s. The `--audit` flag prints the c-value
-distribution, MILP success status, and per-window stall breakdown.
+Default time limit: 240 s (`solve_neutral`); the CLI sets its own.
+Use `--phase1-time-limit-s` to bound the LP relaxation separately. The
+`--audit` flag prints the sample-grid breakdown, c-value distribution,
+MILP success status, and per-window stall breakdown.

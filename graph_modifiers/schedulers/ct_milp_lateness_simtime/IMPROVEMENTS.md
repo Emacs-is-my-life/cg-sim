@@ -68,7 +68,34 @@ already show sporadic `Solve error` on llama3b — same cause.
   Fixes Matrix, Cost, AND RHS ranges uniformly, model-independent. More edit
   surface but no magic constants.
 
-**This is now the #1 prerequisite for everything else** — without it the
+**LANDED (bytes→MB rescale, replaces the brittle exponents).** The model is now
+built in MB and ms (every byte and ns quantity ÷ `MODEL_SCALE=1e6`); because
+both axes scale by the same factor, every ratio coefficient and all objective
+weights are invariant, so the optimum is unchanged and only conditioning
+improves (Matrix/Cost ~[1e-2,1e6], RHS ~[1,1e4]). The HiGHS `user_*_scale`
+hacks are removed. P/s_P/L are converted back to bytes/ns at decode.
+
+Validated (rescale + arc=1, full grid, sched+sim):
+
+| cfg | phase-1 | feasible | sim | e2e | vs arc=2-masked |
+|-----|---------|----------|-----|----:|-----------------|
+| sd3-med 8g  | **Optimal** | yes | OK | **2229 ms** | 7279 → −69% |
+| sd3-med 11g | Optimal | yes | OK | 1927 ms | 7279 → −74% |
+| llama8b 10g | Optimal | yes | OK | 6172 ms | 6714 → −8% |
+| llama8b 12g | **Optimal** | yes | OK | **4372 ms** | 6714 → −35% |
+| sd3-med 5g  | Optimal | no  | abort | — | genuinely infeasible (stream-everything peak 5183 > margined 4832) |
+| llama8b 6g/8g | Optimal | no | abort | — | cold floor 5054 + working set > cap |
+| llama3b 2g/3g | Optimal | no | abort | — | weights ≈ 4977 MB; 3g marginal |
+
+**Phase-1 LP reaches Optimal on all 9 configs** (was Unknown/Solve-error on
+sd3-med 8/11, llama8b 10, etc.) → reliable warm-start → no degenerate
+stream-everything fallbacks. **Every config flagged `feasible` sims clean
+(no false-positives); every aborting config is flagged `target_infeasible`.**
+The sd3-med 8g case that motivated this — phase-1 "Unknown" → degenerate
+7279 ms — is now phase-1 Optimal → real 2229 ms plan.
+
+**Earlier brittle attempt (kept for history):**
+**This was the #1 prerequisite for everything else** — without it the
 warm-start path is dead: phase-1 LP can't reach Optimal, so phase-2 MILP runs
 cold and (verified) returns a junk incumbent that overruns the cap by ~7.9 GB,
 rescued only by `overrun_repair`. With scaling on, phase-1 reaches Optimal
@@ -258,6 +285,58 @@ the sweep scripts should drop the `2`.
 **Residual (separate accuracy item, not feasibility):** 10g e2e is still ~6.2 s
 — the per-window lateness model under-predicts real serial-PCIe stall (§3a).
 Feasibility/abort is fixed; e2e *accuracy* is the next formulation item.
+
+### ⟫⟫⟫ The lateness→peak coupling is HARMFUL — disabling it is a big e2e win
+
+The peak rows add `bw · L_window` to P at every sample (the "option-b"
+coupling). In a high-stall window this injects ~`bw·L` of **phantom peak**
+(e.g. sd3-med 11g: window-1 stall 169 ms × 25 MB/ms ≈ 4.2 GB) that conflates
+*stall time* with *resident bytes*. Effect: modeled peak over-predicts the true
+sim peak by ~3 GiB, so the LP believes it's at the cap and **under-fills VRAM**;
+worse, to satisfy `P ≤ cap` against the inflated term the LP must *reduce* cold
+residency in exactly the high-stall windows → more streaming → more stall (a
+vicious feedback).
+
+Disabling the coupling (gate `MILP_DISABLE_LP_COUPLING=1`, arc=1) — validated
+sched+sim:
+
+| sd3-med | coupling ON | coupling OFF | swapadvisor |
+|---------|------------:|-------------:|------------:|
+| 8 GiB   | 2.254 s | **1.570 s** (−30%) | 3.068 s |
+| 11 GiB  | 2.021 s (lost) | **1.363 s** (−33%) | 1.826 s |
+| 14 GiB  | 1.356 s | **1.167 s** (−14%) | 1.603 s |
+
+At 11g, cold residency rose 5516→7731 MB, streamed fell 12040→9825 MB, PCIe
+traffic 36→13 GB, modeled lateness 672→370 ms — all sims clean, under cap.
+**sd3-med 11g flips from losing to swapadvisor to beating it by 25%**, and
+ct_milp now wins at every sd3-med cap.
+
+The coupling's original purpose ("can't escape peak by accepting lateness") is
+now redundant: the honest overrun-repair catches any real overrun. **Recommend
+removing the coupling (or defaulting it off)**, after a full-grid re-run
+confirms no new aborts at tight caps.
+
+**⚠ UPDATE — tight-cap test: do NOT default coupling-off.** Re-ran the lowest
+cap per model with coupling off:
+
+| config | coupling ON | coupling OFF | verdict |
+|--------|-------------|--------------|---------|
+| sdxl-turbo 4g | OK 848 ms | OK **624 ms** | win |
+| llama8b 6g | ABORT (infeasible) | ABORT (infeasible) | unchanged |
+| llama3b 4g | **OK 2.261 s** | **ABORT @1240 ms** | **regression** |
+| sd3-med 5g | ABORT (honestly infeasible) | ABORT but **`target_infeasible=False`** | **false-feasible** |
+
+So the coupling is doing **two** jobs: (a) [harmful] over-conservatism at
+loose caps → VRAM underuse → slow; (b) [load-bearing] a de-facto safety pad at
+tight caps, where `_alive_peak` (the arc/intermediate residency model, which the
+honest-repair also uses) **under-predicts** the true sim peak. Removing it lets
+the LP over-commit residency → sim overruns the cap (llama3b 4g) and the
+honest-repair wrongly reports feasible (sd3-med 5g). The coupling's
+stall-proportional inflation happened to track the under-prediction at tight
+caps. **Conclusion:** the real fix is an accurate streamed-residency peak model
+(§3) so `_alive_peak` matches sim — *then* the coupling can be dropped and the
+LP fills VRAM safely at every cap. Until then, coupling-off is a loose-cap-only
+win, not a safe global default.
 
 ### Class A — modeled < cap but sim aborts → the LP↔sim peak gap (was the hypothesis; DISPROVEN, see above)
 - llama8b 8g: modeled 7703 < cap 8590; sim aborts.
