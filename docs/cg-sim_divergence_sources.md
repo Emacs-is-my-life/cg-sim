@@ -10,6 +10,21 @@ the bandwidth-calibration compromise are documented separately in
 `docs/cg-sim_bandwidth_calibration.md` and the verification table in
 `CLAUDE.md`.
 
+> **DIRECTION DECISION (current): approach A, trace-driven.** We have stopped
+> trying to make the scheduler *synthesize* offload behavior from the eager
+> trace (approach B). Two evidence-backed reasons: (1) the accelerate/diffusers
+> documentation is inaccurate (record_stream, matched-block eviction D6, the
+> stream split), so a doc-derived policy is wrong; (2) e2e time is dominated by
+> microscopic CPU/sync overhead (~1 ms/leaf, D1/D2) that simply isn't in the
+> eager trace. **Conclusion: without the offload run's own trace — the most
+> accurate description of the scheduler's real behavior — the simulator cannot
+> match the real run's e2e time.** So we feed the simulator the offload trace
+> and have the loader recognize+mark its real transfers (approach A), which
+> turns most of D1-D8 from "guess the policy" into "read the policy." The full
+> A plan, design options, and first steps are in `TODO.md` ("DIRECTION
+> CHANGE"). The 4-step hierarchy and the profile-setup recipe below remain
+> valid reference but describe the superseded B path.
+
 ## D1–D8: divergence sources
 
 | ID | Source | Affects | Status |

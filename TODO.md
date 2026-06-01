@@ -10,6 +10,8 @@
 4. **This file** — current state snapshot, active work, next concrete action
 
 Once those four are read, you should be on the same page as the prior session.
+NOTE: the "DIRECTION CHANGE" section immediately below supersedes the older
+"Active work / next action" further down (which described approach B).
 
 ---
 
@@ -23,7 +25,104 @@ at −54.5%. We've decided the next step is to re-profile diffusers with
 upstream (at the profile-setup level) rather than continuing to
 compensate downstream.
 
-## Current verification state (as of commit `7ed0fa3` on `sim-test`)
+## DIRECTION CHANGE (current) — approach A, trace-driven
+
+**Decision (supersedes approach B below).** We are NOT continuing to make the
+scheduler synthesize offload behavior from the eager trace (approach B). That
+path proved unviable for matching e2e time, for two evidence-backed reasons
+discovered this session:
+
+1. **The accelerate/diffusers documentation is not accurate** — `record_stream`
+   semantics, matched-block eviction (docs imply pointer-swap; real traces show
+   real D2H bytes, see D6), and the matched/unmatched stream split all differ
+   from what the docs describe. Synthesizing a policy from docs alone produces
+   the wrong behavior.
+2. **e2e time is dominated by microscopic events** — per-leaf CPU hook overhead
+   (~1 ms/leaf), `cudaStreamSynchronize`, `cuMem*` driver calls — far more than
+   transfer bytes/bandwidth. These are invisible in the eager trace (D1, D2), so
+   no scheduler synthesis on the eager trace can recover them.
+
+**Conclusion (a real finding, not a retreat):** without the *same* trace — the
+offload run's own trace, which is the most accurate description of the
+scheduler's actual behavior — the simulator cannot match the real run's e2e
+time. So we feed the simulator that trace.
+
+**Approach A: trace-driven.** Feed the *offload* trace (not eager). Modify the
+loader (`sim/load/pytorch_profile/`) to recognize the real transfer events and
+mark them so the engine/DAV reproduces the run; let cg-sim's hardware model
+compute timing.
+
+Why A dissolves most of D1-D8 (the policy becomes ground truth, not a guess):
+- D1 hook CPU chain — present in the trace as real `cpu_leaf` nodes. Solved.
+- D2 Python frames — named CPU ops present; residual slivers small (with_stack
+  bottom-edge reconstruction can close the rest later).
+- D5 batching — each Memcpy is its own event → per-tensor transfers, ~1:1.
+- D6 matched-block D2H — the D2H events are in the trace; no guessing.
+- D8 tied weights — both transfers recorded separately; no tid-collapse guess.
+- D3/D4 (single bandwidth knob vs concurrent H2D∥D2H streams) — the only
+  residual; access pattern is exact, timing model still imperfect if recomputing.
+
+What A trades away: it does NOT predict offload behavior for a model you only
+have an *eager* trace of. You must already have the offload trace. That's the
+accepted cost (per the decision above).
+
+What A means for the offload schedulers: `AccelerateCpuOffload` and
+`DiffusersGroupOffload` (synthesis logic) become largely unnecessary — the
+transfers are explicit in the trace. The phantom-node compensation can be
+removed once A lands (the real CPU overhead is in the trace).
+
+### Concrete A plan (grounded in the current loader)
+
+The building blocks already exist; this is extension, not from-scratch:
+- The loader already handles HtoD-memcpy `gpu_runtime` nodes, device-crossing,
+  storage aliasing, and "transfer-on-input-mismatch" firing
+  (`pytorch_profile.py` ~L530, 830-880, 1054).
+- There is already an `inject_schedule_path` hook (L1054+) that makes DAV
+  replay a weight-streaming schedule via transfer-on-input-mismatch, **without**
+  a bespoke replay scheduler. This is the most promising integration point.
+
+Two viable designs (decide after reading the loader's node/tensor construction
+path in full — NOT yet verified at line level):
+
+  D-1. **Explicit transfer nodes.** Loader re-types `Memcpy HtoD`/`DtoH`
+       `gpu_runtime` nodes into transfer operations (src/dst tensors resolved
+       from data edges + device fields — done manually this session in Test E/F),
+       preserving submit/wait/data deps. Engine runs them as `TransferJob`s.
+       Most faithful to the recorded schedule.
+
+  D-2. **Residency-driven (reuse `inject_schedule_path`/transfer-on-mismatch).**
+       Loader marks offloaded weights RAM-resident initially (signal: any tensor
+       that is the *source* of an H2D Memcpy) + extracts the eviction schedule
+       (when each weight leaves VRAM, from DtoH event timing). DAV's existing
+       transfer-on-input-mismatch recreates the H2D; eviction hints drive the
+       D2H. Less new code; reuses DAV machinery; slight risk of re-introducing
+       policy-guessing for eviction timing.
+
+Recommended: prototype D-2 first (least new code, reuses `inject_schedule_path`),
+fall back to D-1 if eviction fidelity is insufficient.
+
+### First steps for the next session (approach A)
+
+1. Read `sim/load/pytorch_profile/pytorch_profile.py` node/tensor construction
+   end-to-end; confirm the line-level integration point for marking transfers.
+   (I only spot-read it; the "X lines" estimate is NOT yet grounded.)
+2. Pick a small offload trace to start: `examples/trace/llama3b_offload_model/`
+   (accelerate, single pageable path — simplest; no stream concurrency, so D3/D4
+   don't bite). Get A working there first before diffusers.
+3. Verify: trace-driven sim e2e + peak VRAM vs the same trace's recorded span.
+   Target tighter than B (±10%?) since the policy is now ground truth.
+4. Then diffusers (where D3/D4 concurrent-stream timing is the open question).
+
+### Methodological bonus to keep in mind
+
+Once A works, it can validate B retroactively: A-sim vs real validates the
+*timing model*; B-sim vs A-sim validates *policy synthesis*. Splitting the two
+halves tells us exactly where residual error lives (today they're conflated,
+which is why SDXL "passes by accident").
+
+---
+
+## (SUPERSEDED — approach B) Current verification state (as of commit `7ed0fa3` on `sim-test`)
 
 | Workload | Sim e2e | Real e2e | Δ e2e | Δ VRAM | Bound (±20% e2e, ±10% VRAM) |
 |---|---|---|---|---|---|
@@ -37,7 +136,13 @@ Compensations applied (all in `sim/sched/`, no `sim/core/` changes):
 - Tied-weight fix in `_resolve_paged_leaves` (Llama embed/lm_head)
 - PCIe bandwidth compromise (13 GB/s flat for SDXL/SD3, documented in `docs/cg-sim_bandwidth_calibration.md`)
 
-## Active work / next action
+## Active work / next action  (SUPERSEDED by "DIRECTION CHANGE" at top — kept for context)
+
+> The approach-B plan below is no longer the active direction. We chose
+> approach A (trace-driven). This section remains only to document what
+> approach B would have entailed and why we know its specific flag choices.
+> If approach A stalls and B is revisited, the leaf_level re-profile recipe
+> here is still the right B recipe.
 
 **Re-profile diffusers SDXL and SD3** with the configuration spelled out
 in `docs/cg-sim_divergence_sources.md` ("Profiling-setup recommendation
