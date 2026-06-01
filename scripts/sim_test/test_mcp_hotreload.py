@@ -1,24 +1,27 @@
-"""End-to-end test for hot-reload via `restart_simulation(reload=True)`.
+"""End-to-end test for full-simulator hot-reload via
+`restart_simulation(reload=True)`.
 
-Workflow:
-  1. Start MCP server with BREAK_BEFORE_COMPILE_STAGE pre-enabled.
-  2. start_simulation → record class identity + confirm marker absent.
-  3. Drive to simulation_finished.
-  4. Append a marker class attribute to `sim/sched/flexinfer/flexinfer.py`
-     on disk.
-  5. restart_simulation(reload=True) → expect `reloaded_modules > 0`.
-  6. start_simulation → record class identity + check marker.
-     - Class id MUST differ from step 2 (fresh import happened).
-     - Marker MUST be present (the modified source was loaded).
-  7. Drive to simulation_finished.
-  8. Revert source file (always, in a `finally`).
-  9. restart_simulation(reload=True) so the agent doesn't carry the
-     marker-bearing class into any later use.
- 10. shutdown.
+The MCP daemon reloads the ENTIRE `sim.*` tree on reload=True — user
+code (schedulers / hardware / loaders) AND framework core
+(engine / system / job / trace / ...), sparing only the live daemon
+harness (`agent_runner`, `agent_server`). This test verifies all of:
 
-Also runs a control: `restart_simulation(reload=False)` between runs 1
-and 2 to confirm that the class identity is *preserved* when reload is
-disabled.
+  * USER-CODE reload: an edit to the scheduler source
+    (sim/sched/llamacpp_flexinfer/flexinfer.py) is picked up, and the
+    scheduler class object identity changes.
+  * CORE reload (the capability this change adds): an edit to a core
+    file (sim/core/engine/engine.py) is picked up, and the Engine class
+    object identity changes.
+  * Identity consistency (regression guard): the `DataRegionAccess`
+    enum imported by core mutation code is the SAME object the hardware
+    layer defines. A partial reload (core spared, hw reloaded) split
+    this enum across two module instances and deadlocked the scheduler
+    on its own regions; reloading core together with hw closes the gap.
+  * reload=False control: nothing is evicted and class identities are
+    preserved.
+  * The reloaded common base class still satisfies isinstance.
+
+Both edited files are restored in a `finally`.
 
 Run from repo root:  python scripts/sim_test/test_mcp_hotreload.py
 """
@@ -37,8 +40,14 @@ from mcp.client.stdio import stdio_client
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 INPUT_YAML = REPO_ROOT / "examples" / "run" / "llamacpp__llama-3-8B__flexinfer.yaml"
-SCHED_FILE = REPO_ROOT / "sim" / "sched" / "flexinfer" / "flexinfer.py"
-MARKER_SUFFIX = "\n\nFlexInfer.HOT_RELOAD_MARKER = 'hot-reload-ok'\n"
+
+# User-editable scheduler source (renamed llamacpp_flexinfer / LlamaCppFlexInfer).
+SCHED_FILE = REPO_ROOT / "sim" / "sched" / "llamacpp_flexinfer" / "flexinfer.py"
+SCHED_MARKER_SUFFIX = "\n\nLlamaCppFlexInfer.HOT_RELOAD_MARKER = 'sched-reload-ok'\n"
+
+# Framework core source — now in the reload scope.
+CORE_FILE = REPO_ROOT / "sim" / "core" / "engine" / "engine.py"
+CORE_MARKER_SUFFIX = "\n\nEngine.HOT_RELOAD_CORE_MARKER = 'core-reload-ok'\n"
 
 
 def _unwrap(result) -> dict:
@@ -55,19 +64,35 @@ def _check(condition: bool, label: str) -> None:
         raise SystemExit(f"FAIL: {label}")
 
 
-async def _start_and_capture(session: ClientSession) -> tuple[str, str]:
-    """start_simulation, then read class id + marker via execute. Returns
-    (id_str, marker_str). marker_str is 'NoneType' if marker absent."""
+async def _exec_str(session: ClientSession, code: str) -> str:
+    r = _unwrap(await session.call_tool("execute", {"code": code}))
+    _check(r.get("ok"), f"execute ok: {code.splitlines()[0]!r} (got {r})")
+    return r["output"].strip()
+
+
+async def _probe(session: ClientSession) -> dict:
+    """start_simulation, then capture identity / marker / enum probes at
+    the break_before_compile_stage breakpoint."""
     r = _unwrap(await session.call_tool("start_simulation", {}))
     _check(r["at_breakpoint"], f"parked at breakpoint (got {r})")
-    r = _unwrap(await session.call_tool("execute",
-        {"code": "print(id(type(engine.sched)))"}))
-    id_str = r["output"].strip()
-    r = _unwrap(await session.call_tool("execute", {"code": (
-        "print(getattr(type(engine.sched), 'HOT_RELOAD_MARKER', None))"
-    )}))
-    marker_str = r["output"].strip()
-    return id_str, marker_str
+    sched_id = await _exec_str(session, "print(id(type(engine.sched)))")
+    sched_marker = await _exec_str(
+        session, "print(getattr(type(engine.sched), 'HOT_RELOAD_MARKER', None))")
+    engine_id = await _exec_str(session, "print(id(type(engine)))")
+    core_marker = await _exec_str(
+        session, "print(getattr(type(engine), 'HOT_RELOAD_CORE_MARKER', None))")
+    # The enum-split regression guard: the DataRegionAccess that core
+    # mutation code holds must be the very object the hw layer defines.
+    enum_consistent = await _exec_str(session, (
+        "import sim.core.job.mutation.transfer_mutation as _m\n"
+        "from sim.hw.common.data_region import DataRegionAccess as _dra\n"
+        "print(getattr(_m, 'DataRegionAccess', None) is _dra)"
+    ))
+    return {
+        "sched_id": sched_id, "sched_marker": sched_marker,
+        "engine_id": engine_id, "core_marker": core_marker,
+        "enum_consistent": enum_consistent,
+    }
 
 
 async def _drive_to_finish(session: ClientSession) -> None:
@@ -90,94 +115,96 @@ async def main() -> int:
         env=env, cwd=str(REPO_ROOT),
     )
 
-    original_source = SCHED_FILE.read_text()
+    sched_original = SCHED_FILE.read_text()
+    core_original = CORE_FILE.read_text()
     try:
         async with stdio_client(server) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
 
-                # --- Run 1: baseline ----------------------------------
+                # --- Run 1: baseline ------------------------------------
                 print("=== Run 1: baseline ===", file=sys.stderr)
-                id1, marker1 = await _start_and_capture(session)
-                print(f"  class id: {id1}, marker: {marker1}", file=sys.stderr)
-                _check(marker1 == "None",
-                       f"baseline: no HOT_RELOAD_MARKER yet (got {marker1!r})")
+                p1 = await _probe(session)
+                print(f"  {p1}", file=sys.stderr)
+                _check(p1["sched_marker"] == "None", "baseline: no scheduler marker")
+                _check(p1["core_marker"] == "None", "baseline: no core marker")
+                _check(p1["enum_consistent"] == "True",
+                       "baseline: DataRegionAccess identity consistent (core<->hw)")
                 await _drive_to_finish(session)
 
-                # --- Control: reload=False preserves class identity ---
-                print("\n=== Control: restart with reload=False ===",
-                      file=sys.stderr)
+                # --- Control: reload=False preserves identity -----------
+                print("\n=== Control: restart reload=False ===", file=sys.stderr)
                 r = _unwrap(await session.call_tool(
                     "restart_simulation", {"reload": False}))
-                _check(r["ok"], f"restart_simulation reload=False ok (got {r})")
-                _check(r.get("reloaded_modules", 0) == 0,
+                _check(r["ok"], f"restart reload=False ok (got {r})")
+                _check(r.get("reloaded_modules", -1) == 0,
                        f"reload=False evicts nothing (got {r.get('reloaded_modules')})")
-                id_ctrl, marker_ctrl = await _start_and_capture(session)
-                print(f"  class id: {id_ctrl}, marker: {marker_ctrl}",
-                      file=sys.stderr)
-                _check(id_ctrl == id1,
-                       f"reload=False preserves class identity ({id1} vs {id_ctrl})")
-                _check(marker_ctrl == "None",
-                       "reload=False: marker still absent")
+                pc = await _probe(session)
+                _check(pc["sched_id"] == p1["sched_id"],
+                       "reload=False preserves scheduler class identity")
+                _check(pc["engine_id"] == p1["engine_id"],
+                       "reload=False preserves Engine (core) class identity")
+                _check(pc["enum_consistent"] == "True",
+                       "reload=False: enum identity still consistent")
                 await _drive_to_finish(session)
 
-                # --- Edit source on disk -----------------------------
-                print(f"\n=== Editing {SCHED_FILE.name} ===", file=sys.stderr)
-                SCHED_FILE.write_text(original_source + MARKER_SUFFIX)
-                print(f"  appended marker (file size now "
-                      f"{SCHED_FILE.stat().st_size} bytes)", file=sys.stderr)
+                # --- Edit BOTH a user file and a core file --------------
+                print("\n=== Editing scheduler + core source ===", file=sys.stderr)
+                SCHED_FILE.write_text(sched_original + SCHED_MARKER_SUFFIX)
+                CORE_FILE.write_text(core_original + CORE_MARKER_SUFFIX)
 
-                # --- Run 2: with reload=True -------------------------
-                print("\n=== Run 2: restart with reload=True ===",
-                      file=sys.stderr)
+                # --- Run 2: reload=True picks up BOTH edits --------------
+                print("\n=== Run 2: restart reload=True ===", file=sys.stderr)
                 r = _unwrap(await session.call_tool(
                     "restart_simulation", {"reload": True}))
-                _check(r["ok"], f"restart_simulation reload=True ok (got {r})")
+                _check(r["ok"], f"restart reload=True ok (got {r})")
                 _check(r.get("reloaded_modules", 0) > 0,
-                       f"reload=True evicted some modules (got {r.get('reloaded_modules')})")
-                print(f"  reloaded_modules: {r['reloaded_modules']}",
-                      file=sys.stderr)
-                id2, marker2 = await _start_and_capture(session)
-                print(f"  class id: {id2}, marker: {marker2}", file=sys.stderr)
-                _check(id2 != id1,
-                       f"reload=True yields a NEW class object ({id1} vs {id2})")
-                _check(marker2 == "hot-reload-ok",
-                       f"reload=True applied source edit (marker={marker2!r})")
+                       f"reload=True evicted modules (got {r.get('reloaded_modules')})")
+                print(f"  reloaded_modules: {r['reloaded_modules']}", file=sys.stderr)
+                p2 = await _probe(session)
+                print(f"  {p2}", file=sys.stderr)
+                _check(p2["sched_id"] != p1["sched_id"],
+                       "reload=True: NEW scheduler class object")
+                _check(p2["sched_marker"] == "sched-reload-ok",
+                       f"reload=True applied scheduler edit (got {p2['sched_marker']!r})")
+                _check(p2["engine_id"] != p1["engine_id"],
+                       "reload=True: NEW Engine class object — CORE was reloaded")
+                _check(p2["core_marker"] == "core-reload-ok",
+                       f"reload=True applied CORE edit (got {p2['core_marker']!r})")
+                _check(p2["enum_consistent"] == "True",
+                       "reload=True: DataRegionAccess identity consistent (no split)")
                 await _drive_to_finish(session)
 
-                # --- Run 3: revert source, reload, verify ------------
-                print(f"\n=== Reverting {SCHED_FILE.name} ===", file=sys.stderr)
-                SCHED_FILE.write_text(original_source)
-
+                # --- Run 3: revert, reload, verify clean ----------------
+                print("\n=== Reverting source; Run 3 ===", file=sys.stderr)
+                SCHED_FILE.write_text(sched_original)
+                CORE_FILE.write_text(core_original)
                 r = _unwrap(await session.call_tool(
                     "restart_simulation", {"reload": True}))
                 _check(r["ok"], "restart after revert ok")
-                id3, marker3 = await _start_and_capture(session)
-                print(f"  class id: {id3}, marker: {marker3}", file=sys.stderr)
-                _check(marker3 == "None",
-                       f"reverted source: marker absent again (got {marker3!r})")
-                _check(id3 != id2,
-                       f"another reload yields another fresh class ({id2} vs {id3})")
-
-                # --- Sanity: common base class identity preserved ----
-                # Done at the run-3 breakpoint (before drive_to_finish)
-                # so `execute` is still callable.
-                print("\n=== Sanity: common base class identity preserved ===",
-                      file=sys.stderr)
-                r = _unwrap(await session.call_tool("execute", {"code": (
-                    "from sim.sched.common import BaseScheduler;"
-                    " print(isinstance(engine.sched, BaseScheduler))"
-                )}))
-                _check(r.get("ok") and r.get("output", "").strip() == "True",
-                       f"isinstance against BaseScheduler still True (got {r})")
-
+                p3 = await _probe(session)
+                _check(p3["sched_marker"] == "None", "reverted: scheduler marker gone")
+                _check(p3["core_marker"] == "None", "reverted: core marker gone")
+                _check(p3["sched_id"] != p2["sched_id"],
+                       "another reload yields another fresh scheduler class")
+                _check(p3["enum_consistent"] == "True",
+                       "reverted: enum identity consistent")
+                # The common base class was reloaded too, so isinstance holds.
+                out = await _exec_str(session, (
+                    "from sim.sched.common import BaseScheduler\n"
+                    "print(isinstance(engine.sched, BaseScheduler))"))
+                _check(out == "True",
+                       f"isinstance against (reloaded) BaseScheduler True (got {out!r})")
                 await _drive_to_finish(session)
                 await session.call_tool("shutdown", {})
     finally:
-        # Always restore the source, even if the test crashed.
-        if SCHED_FILE.read_text() != original_source:
-            SCHED_FILE.write_text(original_source)
+        # Always restore both sources, even if the test crashed.
+        if SCHED_FILE.read_text() != sched_original:
+            SCHED_FILE.write_text(sched_original)
             print(f"\n[teardown] restored {SCHED_FILE.name}", file=sys.stderr)
+        if CORE_FILE.read_text() != core_original:
+            CORE_FILE.write_text(core_original)
+            print(f"[teardown] restored {CORE_FILE.name}", file=sys.stderr)
 
     print("\nALL HOT-RELOAD CHECKS PASSED", file=sys.stderr)
     return 0

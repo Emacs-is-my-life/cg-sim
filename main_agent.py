@@ -21,6 +21,7 @@ tool call (before the initial `_construct_and_bind` had completed).
 """
 
 import argparse
+import importlib
 import sys
 import traceback
 
@@ -53,7 +54,18 @@ def _construct(session: AgentSession) -> Simulator | None:
     error.
     """
     try:
-        sim = Simulator(session.next_input_path, session.next_overrides)
+        # Re-fetch Simulator fresh on every construction. With
+        # restart_simulation(reload=True) the whole `sim.*` tree —
+        # including `sim.core.simulator` and its transitive core imports —
+        # has just been evicted from sys.modules, but this module's
+        # `Simulator` binding (from the top-level import) still points at
+        # the stale pre-reload class. Importing here re-executes the
+        # evicted core subtree so edits to engine/system/job/trace/etc.
+        # take effect. With reload=False (no eviction) import_module
+        # returns the cached class, so identity is preserved — matching
+        # the documented reload=False semantics.
+        sim_class = importlib.import_module("sim.core.simulator").Simulator
+        sim = sim_class(session.next_input_path, session.next_overrides)
     except BaseException:
         traceback.print_exc(file=sys.stderr)
         return None

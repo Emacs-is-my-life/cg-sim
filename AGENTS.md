@@ -67,10 +67,11 @@ The server exposes eight tools:
   sticky otherwise). Pass `overrides` (a list of Hydra-style strings
   like `["scheduler.args.prefetch_window=8"]`) to apply CLI-equivalent
   config overrides — see *Config overrides at restart* below for the
-  full semantics. With `reload=True` (default), drops user-editable
-  modules from `sys.modules` so source edits are picked up — see
-  *Hot-reloading user code* below. **Blocking**: returns once the new
-  Simulator is constructed.
+  full semantics. With `reload=True` (default), drops the whole
+  `sim.*` tree (except the MCP daemon harness) from `sys.modules` so
+  source edits anywhere — schedulers, hardware, loaders, and framework
+  core — are picked up; see *Hot-reloading code* below. **Blocking**:
+  returns once the new Simulator is constructed.
 - `shutdown` — end the agent session and exit the process. If the simulator is
   parked at a breakpoint, releases it first so the current run drains cleanly.
 
@@ -410,41 +411,58 @@ agent can verify. Invalid override strings raise during construction
 session lands in `CONSTRUCT_FAILED`; recover by calling
 `restart_simulation` again with corrected `overrides`.
 
-## Hot-reloading user code
+## Hot-reloading code (entire simulator, including core)
 
-`restart_simulation(reload=True)` (the default) drops user-editable modules
-from `sys.modules` before rebuilding the Simulator, so the agent can edit
-source files on disk and pick up the changes on the next run without
-restarting the process.
+`restart_simulation(reload=True)` (the default) drops the simulator's
+modules from `sys.modules` before rebuilding the Simulator, so the agent
+can edit source files on disk and pick up the changes on the next run
+without restarting the process.
 
-In scope (reloaded):
+In scope (reloaded) — **the entire `sim.*` tree**:
 - `sim/sched/<impl>/...` — scheduler implementations.
 - `sim/hw/<type>/<impl>/...` — compute, memory, storage models.
 - `sim/load/<impl>/...` — trace loaders.
+- `sim/.../common/...` — base classes / ABCs.
+- `sim/core/...` — framework core: engine, system, job, trace, log,
+  simulator, and the Debugger.
 
-Out of scope (preserved across reload, by design):
-- `sim/.../common/...` — base classes / ABCs. These keep their identity
-  so `isinstance(...)` checks in framework code (e.g. `sim/core/engine/`)
-  remain consistent against freshly-built instances.
-- `sim/core/...` — framework code. Edits here will *not* take effect on
-  reload; restart the agent process instead.
+Out of scope (spared — restart the agent process to pick up edits here):
+- `sim/core/debug/agent_runner.py` and `sim/core/debug/agent_server.py`
+  — the live MCP daemon harness. The running process *is* executing this
+  code and holds a live `AgentSession`/`Phase` across the reload
+  boundary, so it cannot reload itself out from under its own stack.
+- `main_agent.py` — the entry point (not a `sim.*` module).
+
+**Why reload core at all?** Reloading core *together* with everything
+else keeps class and enum identities consistent. A partial reload — core
+spared, hw/sched reloaded — splits a shared identity such as the
+`DataRegionAccess` enum across two module instances: un-reloaded core
+mutation code stamps regions with one enum object while a
+freshly-reloaded scheduler compares against another, so
+`region.access_status == DataRegionAccess.IDLE` is silently `False` and
+the scheduler deadlocks on its own regions. Reloading the whole tree
+removes the split by construction. (Base classes reload alongside their
+subclasses, so `isinstance` stays correct without the `*.common`
+carve-out earlier versions needed.)
 
 Mechanism: the `LOAD_*_CLASS` functions in `sim/core/init/` do live
-`importlib.import_module` lookups, so the next call after `sys.modules`
-invalidation re-executes each subtree's `__init__.py` (the pkgutil
-aggregator) and the user-edited leaf files.
+`importlib.import_module` lookups for sched/hw/load; `main_agent._construct`
+re-fetches `Simulator` via `importlib.import_module("sim.core.simulator")`
+so the core subtree re-executes too. Both rely on the `sys.modules`
+eviction performed by `agent_server._hot_reload_user_modules`.
 
 The response includes `reloaded_modules` (count of evicted `sys.modules`
-entries) so the agent can confirm the reload happened. Pass `reload=False`
-to compare back-to-back runs of identical code without paying the
-re-import cost.
+entries) so the agent can confirm the reload happened — expect a larger
+count than pre-core-reload builds, since core modules are now included.
+Pass `reload=False` to preserve current class identities (compare
+back-to-back runs of identical code without paying the re-import cost).
 
 Example:
 ```python
-# 1. Edit sim/sched/llamacpp_flexinfer/flexinfer.py on disk.
+# 1. Edit sim/sched/llamacpp_flexinfer/flexinfer.py — or sim/core/engine/engine.py.
 # 2. From the agent loop, after simulation_finished:
 restart_simulation(reload=True)
-# 3. The next start_simulation runs against the freshly-imported LlamaCppFlexInfer.
+# 3. The next start_simulation runs against the freshly-imported code.
 ```
 
 ## Environment knobs
@@ -509,7 +527,8 @@ restart_simulation()   # reload=True is the default
 start_simulation       # runs the freshly-imported class
 ```
 No need to disconnect or re-add the MCP server. See *Hot-reloading
-user code* above for the spared `*.common.*` invariant.
+code* above for what reloads (the whole `sim.*` tree, including core)
+and what's spared (the MCP daemon harness).
 
 ## 4. Trace a single node through runtime
 
@@ -799,7 +818,10 @@ Two patterns to note:
   trace,scheduler}.py` each define a single `LOAD_*_CLASS(name)`
   that calls `importlib.import_module("sim.X")` then `getattr`.
   Intentionally re-imports every call so `restart_simulation(reload=True)`
-  picks up source edits without restarting the agent process.
+  picks up source edits to sched/hw/load without restarting the agent
+  process. The core subtree is refreshed the same way — `main_agent._construct`
+  re-fetches `Simulator` via `importlib.import_module("sim.core.simulator")`
+  after the eviction — so core edits take effect on the next run too.
 
 ## Discrete-event engine: how time moves
 
@@ -1311,13 +1333,17 @@ day to each.
    batched. The Chrome-trace log shows them as instant events with
    `ph: "i"`. They never appear in `job_waiting`/`job_running`.
 
-6. **Hot reload spares framework base classes.** Editing a base
-   class (`sim/sched/common/base_scheduler.py`,
-   `sim/hw/<type>/common/base_*.py`) doesn't take effect on
-   `restart_simulation(reload=True)`. The spared subtrees are
-   listed explicitly in `agent_server.py:_HOT_RELOAD_SPARED_PREFIXES`:
-   `sim.sched.common`, `sim.hw.{compute,memory,storage}.common`.
-   Restart the agent process for base-class edits.
+6. **Hot reload covers the whole `sim.*` tree, including core.**
+   `restart_simulation(reload=True)` reloads schedulers, hardware,
+   loaders, base classes, AND `sim/core/...` (engine, system, job,
+   trace, log, Debugger). The only spared modules are the live MCP
+   daemon harness, listed in
+   `agent_server.py:_HOT_RELOAD_SPARED_PREFIXES`:
+   `sim.core.debug.agent_runner` and `sim.core.debug.agent_server` —
+   plus `main_agent.py` itself. Edits to *those* need an agent-process
+   restart; everything else takes effect on the next run. Reloading
+   core together with hw/sched is what keeps shared class/enum
+   identities consistent (see *Hot-reloading code* above).
 
 7. **Initial-placement storage is the first `BaseStorage` in
    YAML order**, not the first hw of any type

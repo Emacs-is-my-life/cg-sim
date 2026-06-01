@@ -254,17 +254,21 @@ _SERVER_INSTRUCTIONS = (
     "  and the session lands in CONSTRUCT_FAILED — recover with another\n"
     "  `restart_simulation` call.\n"
     "\n"
-    "== Hot-reloading user code ==\n"
-    "  `restart_simulation(reload=True)` (the default) drops user-editable\n"
-    "  modules from `sys.modules` before rebuilding the Simulator, so\n"
-    "  source edits to schedulers (`sim/sched/<impl>/...`), hardware\n"
-    "  (`sim/hw/<type>/<impl>/...`), and trace loaders (`sim/load/<impl>`)\n"
-    "  are picked up without restarting the agent process.\n"
+    "== Hot-reloading code (entire simulator, incl. core) ==\n"
+    "  `restart_simulation(reload=True)` (the default) drops the\n"
+    "  simulator's modules from `sys.modules` before rebuilding, so source\n"
+    "  edits are picked up without restarting the agent process. The whole\n"
+    "  `sim.*` tree is reloaded — schedulers (`sim/sched/<impl>/`), hardware\n"
+    "  (`sim/hw/<type>/<impl>/`), trace loaders (`sim/load/<impl>/`), AND\n"
+    "  framework core (`sim/core/engine`, `system`, `job`, `trace`, `log`,\n"
+    "  the Debugger, …). Reloading core together with everything else keeps\n"
+    "  class/enum identities consistent across the run, so edits anywhere\n"
+    "  in `sim/core/...` now take effect on restart.\n"
     "\n"
-    "  Base classes in `sim/.../common/` are spared so isinstance checks\n"
-    "  in framework code keep working. Don't edit base classes or core\n"
-    "  framework code (`sim/core/...`) between runs — those changes will\n"
-    "  not take effect.\n"
+    "  Only the live MCP daemon harness (`sim/core/debug/agent_runner.py`\n"
+    "  and `agent_server.py`) is spared — the running process is executing\n"
+    "  that code, so it cannot reload itself. Edits to those two files (and\n"
+    "  to `main_agent.py`) require restarting the agent process.\n"
     "\n"
     "  Pass `reload=False` if you want to preserve the current class\n"
     "  identities (e.g. to compare two runs with the exact same code).\n"
@@ -331,33 +335,46 @@ def _bound_or_error(session: "AgentSession") -> dict[str, Any] | None:
     return dict(_NO_BOUND_DEBUGGER)
 
 
-# Subtrees of `sim.*` whose modules are dropped from sys.modules on a
-# hot-reload. The LOAD_*_CLASS functions in `sim/core/init/` do live
-# `importlib.import_module` lookups against these, so after invalidation
-# the next call re-executes the package's `__init__.py` (which walks
-# subpackages via pkgutil) and the user-edited leaf files.
-_HOT_RELOAD_ROOTS = ("sim.sched", "sim.hw", "sim.load")
-
-# Framework base-class subtrees spared from hot reload. They must keep
-# their identity because framework code (e.g. `sim/core/engine/engine.py`)
-# holds them in `isinstance` checks and as superclasses.
+# Hot reload drops modules from sys.modules so the next Simulator
+# construction re-imports them fresh. We reload the ENTIRE simulator —
+# the user-editable subtrees (`sim.sched.*`, `sim.hw.*`, `sim.load.*`)
+# AND the framework core (`sim.core.engine`, `system`, `job`, `trace`,
+# `log`, `simulator`, the Debugger, …).
 #
-# This is an explicit allowlist of *exact* package paths, not a substring
-# match on the segment `common`. A previous implementation
-# (`"common" not in module_name.split(".")`) accidentally spared any
-# user-edited module whose own directory was named `common` — e.g.
-# `sim.sched.<myimpl>.common.utils` — even though such a module is user
-# code, not a framework base class.
+# Reloading core *together* with everything else is what keeps class and
+# enum identities consistent. A partial reload (core spared, hw/sched
+# reloaded) splits a shared identity like `DataRegionAccess` across two
+# module instances: the un-reloaded core mutation code stamps regions
+# with enum-v1 while a freshly-reloaded scheduler compares against
+# enum-v2, so `region.access_status == DataRegionAccess.IDLE` is silently
+# False and the scheduler deadlocks on its own regions. Reload-everything
+# closes that gap by construction.
+#
+# Re-import triggers: `sim/core/init/LOAD_*_CLASS` do live
+# `import_module` lookups for sched/hw/load; `main_agent._construct`
+# re-fetches `Simulator` via `import_module("sim.core.simulator")` so the
+# core subtree re-executes too. Both depend on the eviction below.
+_HOT_RELOAD_ROOTS = ("sim",)
+
+# The only modules spared from reload: the live MCP daemon harness. The
+# running process *is* this code — `main_agent.main()` and the FastMCP
+# server thread hold a live `AgentSession`/`Phase` and compare
+# `session.phase == Phase.X` every iteration, so reloading these would
+# split the control-plane enum out from under the running stack (the same
+# identity bug, but fatal here). They hold no reloadable model class
+# across the boundary — the Debugger is reached duck-typed via
+# `session.debugger`, and neither module imports core model classes — so
+# sparing exactly these two while reloading everything else (including the
+# Debugger and all core base classes) is split-free. Editing the harness
+# itself (or `main_agent.py`) still requires restarting the agent process.
 _HOT_RELOAD_SPARED_PREFIXES = (
-    "sim.sched.common",
-    "sim.hw.compute.common",
-    "sim.hw.memory.common",
-    "sim.hw.storage.common",
+    "sim.core.debug.agent_runner",
+    "sim.core.debug.agent_server",
 )
 
 
 def _is_reloadable(module_name: str) -> bool:
-    """True if `module_name` is in a user-editable subtree and not a framework base class."""
+    """True if `module_name` is part of the simulator and not the spared MCP daemon harness."""
     in_root = any(
         module_name == r or module_name.startswith(r + ".")
         for r in _HOT_RELOAD_ROOTS
@@ -517,12 +534,12 @@ def build_mcp_server(session: "AgentSession") -> FastMCP:
             "fail — the response reports the failure and the session "
             "lands in `CONSTRUCT_FAILED`; recover by calling "
             "`restart_simulation` again with corrected `overrides`.\n"
-            "  reload — when True (default), drop user-editable modules "
-            "(`sim.sched.*`, `sim.hw.*`, `sim.load.*`, except `*.common.*` "
-            "base classes) from `sys.modules` so source edits to "
-            "schedulers / hardware / loaders are picked up. Set False to "
-            "preserve current class identities (e.g. for back-to-back "
-            "runs of identical code).\n\n"
+            "  reload — when True (default), drop the simulator's modules "
+            "(the whole `sim.*` tree except the MCP daemon harness) from "
+            "`sys.modules` so source edits anywhere — schedulers, hardware, "
+            "loaders, AND framework core (`sim.core.*`) — take effect on the "
+            "next construction. Set False to preserve current class "
+            "identities (e.g. for back-to-back runs of identical code).\n\n"
             "Blocks until the new Simulator is constructed and ready to "
             "accept breakpoint toggles. Response carries the same state "
             "shape as `current_state` (at_breakpoint=False, "

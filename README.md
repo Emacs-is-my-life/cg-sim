@@ -119,7 +119,7 @@ If you'd rather drive the simulator through an AI coding agent
 Context Protocol) server (`main_agent.py`) that exposes the
 simulator as an interactive breakpoint-debugging session the agent
 navigates end-to-end — inspect state at any stage, sweep config
-knobs across runs, hot-reload edited scheduler code, all driven by
+knobs across runs, hot-reload edited code (schedulers, hardware, even framework core), all driven by
 chat.
 
 ### One-time setup
