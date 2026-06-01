@@ -81,6 +81,17 @@ parent chain to the nearest `module_path`. Reincarnations are grouped by
 `(owner, shape)` (shape-only fallback for shared/tied/unresolved weights), and
 one CPU master is chosen per group.
 
+A **master must be a genuine RAM-resident *initial* weight**: `device == "cpu"`
+(not `"meta"`, which is a storage-less `init_empty_weights` placeholder, nor
+cuda) and `tensor_type` ∈ `initial_tensor_types` (not a runtime-produced
+`INTERMEDIATE` that merely happens to be weight-shaped). This guard matters:
+without it, a produced/meta tensor can be chosen as a "read-only streamed
+master" by iteration order even though it has no laid-out RAM source — it would
+then work only if its producer happens to run before the first redirected
+consumer (fragile) and is exposed to invalidate-on-write. Cuda `INPUT`
+reincarnations whose group has no cpu master are still *promoted* (retargeted to
+cpu, mutation B), so no weight is stranded by the restriction.
+
 ### A. Coalesce weight reincarnations onto one logical master
 
 **What.** All per-forward cuda reincarnations of a logical weight are mapped to
@@ -212,36 +223,65 @@ calibration and is orthogonal to the offload modeling above.
 
 ## 6. Why the overall result is faithful
 
-- **Peak VRAM is reproduced to ±0.2 %** (772.2 vs 772.8 MB; 1022.2 vs 1024.0
-  MB). This is the decisive evidence that the residency rewrite (A–E) is
-  correct: the simulated working set is one submodule's weights, exactly as the
-  real hook leaves it.
-- **The e2e tracks the trace it replays.** Measured against the trace's own
-  profiled wall-span, the replay is within −4 % (3B) / +8 % (8B), i.e. the
-  scheduler faithfully executes the recorded op/transfer schedule.
-- **The offload trade-off direction and magnitude match**: vs the resident
-  (`pytorch-lazy`) runs, both real and sim show ~8–15× VRAM reduction at a large
-  slowdown.
+The verification target (per `docs/TODO.md`) is each offload trace's **own
+profiled wall-span** (`runtime_nodes.csv`: `max(end_ns) − min(start_ns)`) for
+e2e and `manifest.json:vram_peak_allocated_bytes` for peak VRAM, with bounds
+**±20 % e2e / ±10 % VRAM**. Both pass:
 
-The residual +20–25 % of simulated e2e over the *no-profiler* run is the kineto
-probe effect baked into the trace (profiled is +12–30 % over noprofile), only
-partially removable by the 6-op aten compensation table (it covers none of the
-offload-specific `aten::copy_` / `cuda*` ops). This is a **data/calibration**
-limitation, independent of the Trace modifications, and is discussed in
-`tmp/report/accelerate-cpu-offload.md` §"Open item".
+| Workload   | e2e sim | profiled span | Δ e2e | VRAM sim | manifest peak | Δ VRAM |
+|------------|--------:|--------------:|------:|---------:|--------------:|-------:|
+| llama-3-3B | 11.36 s | 11.83 s | −4.0 % ✅ | 772.2 MB | 772.8 MB | −0.1 % ✅ |
+| llama-3-8B | 23.55 s | 21.85 s | +7.8 % ✅ | 1022.2 MB | 1024.0 MB | −0.2 % ✅ |
+
+- **Peak VRAM (±0.2 %)** is the decisive evidence that the residency rewrite
+  (A–E) is correct: the simulated working set is one weight at a time, exactly as
+  the real hook leaves it. (The approach-B reference in `docs/TODO.md` reached
+  only −8.4…−8.6 % on VRAM.)
+- **e2e is CPU-overhead-dominated, and that work is in the trace.** `docs/TODO.md`
+  establishes that an offload run's wall time is dominated by per-leaf hook CPU
+  work (~1 ms/leaf), `cudaStreamSynchronize`, and `cuMem*` driver calls — not
+  transfer bytes (the per-Memcpy transfer fits `bytes/bandwidth` at R²=0.99).
+  Because this scheduler replays the **offload trace itself**, that CPU work is
+  present as real `cpu_leaf` nodes and carries the e2e directly — which is why no
+  per-leaf phantom-node compensation is needed (the eager-trace synthesis,
+  approach B, required it).
+
+**Relation to the no-profiler run (context, not the target).** The trace is a
+profiled run, so its span exceeds the no-profiler inference (9.10 / 19.59 s) by
++12–30 % — the kineto probe effect on the whole offload run, only ~1.6 %
+removable by the 6-op aten `probe_effect_table.csv` (it covers none of the
+offload-specific `aten::copy_` / `cuda*` ops). cg-sim faithfully reproduces the
+*profiled* trace it is fed; bridging profiled→noprofile is a separate
+calibration concern.
+
+## 6a. Recommended next step: approach A (loader-side, from `docs/TODO.md`)
+
+This scheduler *synthesizes* residency from the offload trace — the notes'
+**D-2 (residency-driven)** shape. The notes' endpoint is **approach A**: have
+the loader (`sim/load/pytorch_profile/`) recognize the trace's real
+`Memcpy HtoD`/`DtoH` events and mark them as transfers, so the engine replays
+the recorded transfer schedule as ground truth instead of the scheduler
+reconstructing it. That would make this scheduler's coalesce/synthesis "largely
+unnecessary" and is the structurally faithful path if exact *transfer* fidelity
+(beyond residency + replayed CPU timing) is required. The current scheduler is
+the pragmatic approximation that already meets the bounds above.
 
 ---
 
 ## 7. Heuristics and limitations
 
-- **Weight identification is shape-based** (`CONTEXT` ∧ `min(shape) ≥ 64`).
-  Transformer weights are parameter-shaped while activation/KV buffers carry a
-  small sequence/batch dimension (e.g. `[9, 8192]`), so this separates them
-  cleanly. A mutated buffer wrongly classified as a read-only master would be
-  invalidated on write and then deadlock once its VRAM copy is evicted (this was
-  observed for one `[9, 8192]` buffer during bring-up and fixed by the shape
-  test). A weight that is genuinely square-and-large *and* mutated could fool
-  it; none exist in these Llama traces. Tunable via `offload_min_weight_dim`.
+- **Weight identification is shape-based** (`CONTEXT` ∧ `min(shape) ≥ 64`),
+  with a master also required to be cpu-resident + initial-typed (§3). Two
+  classes of mis-classification are guarded: (a) a *mutated activation/KV buffer*
+  with a small sequence dim (e.g. `[9, 8192]`) fails the shape test — without it,
+  treating it as a read-only master invalidated its RAM copy on write and
+  deadlocked once evicted (observed during bring-up, fixed by the shape test);
+  (b) a *weight-shaped but runtime-produced / meta-device* buffer (e.g. tids
+  56/67/149 on 3B) passes the shape test but is excluded from being a master by
+  the cpu+initial guard — without it, such a buffer became a master with no
+  laid-out RAM source and worked only by producer-ordering luck. A weight that
+  is genuinely square-and-large *and* mutated could still fool the shape test;
+  none exist in these Llama traces. Tunable via `offload_min_weight_dim`.
 - **Owner resolution** depends on `start_gated_edges` + `module_path` on the CPU
   dispatcher chain; weights whose owner cannot be resolved fall back to
   shape-only grouping, which can over-merge same-shape weights into one master.

@@ -410,8 +410,14 @@ class AccelerateCPUOffload(BaseScheduler):
         def is_weight_tensor(t) -> bool:
             if t.args.get("tensor_kind") != "CONTEXT":
                 return False
-            shape = t.args.get("shape") or ()
-            return bool(shape) and min(shape) >= min_weight_dim
+            shape = t.args.get("shape")
+            # Guard: a malformed trace can leave shape as a raw string (parse
+            # failure) or a scalar; min()/tuple() on those would crash compile.
+            if not isinstance(shape, (list, tuple)) or not shape:
+                return False
+            if not all(isinstance(d, int) for d in shape):
+                return False
+            return min(shape) >= min_weight_dim
 
         def owner_of(tid: int) -> set[str]:
             paths: set[str] = set()
@@ -439,7 +445,20 @@ class AccelerateCPUOffload(BaseScheduler):
         #         CONTEXT tensor; otherwise promote a cuda one to a RAM home) ----
         owner_master: dict[object, int] = {}
         for t in tm.values():
-            if is_cuda(t) or not is_weight_tensor(t):
+            if not is_weight_tensor(t):
+                continue
+            # A master must be a genuine RAM-resident *initial* weight: device
+            # 'cpu' (not 'meta', which is a storage-less placeholder, nor cuda)
+            # and an initial tensor_type (not a runtime-produced INTERMEDIATE
+            # that merely happens to be weight-shaped). Otherwise a
+            # produced/meta tensor becomes a "read-only streamed master" that
+            # has no laid-out RAM source — it works only if its producer
+            # happens to run before the first redirected consumer (fragile) and
+            # is exposed to invalidate-on-write. Cuda INPUT reincarnations with
+            # no cpu master are still promoted below, so nothing is stranded.
+            if str(t.args.get("device", "")).lower() != "cpu":
+                continue
+            if t.args.get("tensor_type") not in self.initial_tensor_types:
                 continue
             owner_master.setdefault(group_key(t), t.id)
 
@@ -515,6 +534,14 @@ class AccelerateCPUOffload(BaseScheduler):
                     continue
                 self._consumers_by_tid.setdefault(tid, []).append(nid)
 
+        # _build_arrival_index() appends to these defaultdicts and was already
+        # called once in __init__ on the unmodified trace; clear before the
+        # rebuild so a trace that *does* carry xfer/d2h arrivals cannot double
+        # -register them (no-op for the shipped configs, which emit none).
+        self._arrivals_by_issuer.clear()
+        self._gate_by_consumer.clear()
+        self._pending_consumers_by_tid.clear()
+        self._d2h_arrivals_by_issuer.clear()
         self._build_arrival_index()
         self._init_xfer_states()
         for tid in streamed_masters:
