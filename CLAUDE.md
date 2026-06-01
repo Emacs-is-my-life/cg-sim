@@ -5,11 +5,19 @@ repo. Everything here is durable — not specific to a transient task.
 
 ## Where to look for offload-verification context
 
-The catalog of simulator-vs-real divergence sources (D1–D8), the
-4-step correction hierarchy, current compensations, and the next
-recommended action live in `docs/cg-sim_divergence_sources.md`. Read
-that document before investigating any verification gap or proposing
-new compensation logic.
+Reading order for a fresh session picking up offload-scheduler
+verification work:
+
+1. `README.md` — what cg-sim is and how to run it
+2. **This file** (`CLAUDE.md`) — durable session-carried context
+3. `docs/cg-sim_divergence_sources.md` — D1-D8 divergence sources,
+   4-step correction hierarchy, profile-setup recommendation
+4. `TODO.md` — current state snapshot, active work, next concrete action,
+   decision log
+
+After those four are read, you should be on the same page as where
+the prior session left off. Read them in that order before
+investigating any verification gap or proposing new compensation logic.
 
 ## Faithfulness principle (read first)
 

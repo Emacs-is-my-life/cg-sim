@@ -125,3 +125,74 @@ For accelerate, also re-profile with `offload_buffers=True` so the
 RoPE `inv_freq` buffers are transferred through the same offload
 mechanism as parameters (eliminates an asymmetry between sim and
 real).
+
+## Profiling-setup recommendation in detail
+
+What to set when re-profiling, and what each flag buys.
+
+### Diffusers SDXL and SD3
+
+```
+--group-offload-type leaf_level     # one transfer path, simulator-modelable
+--group-offload-use-stream          # demonstrate compute/transfer overlap
+                                    # (cg-sim handles it natively: TransferJob
+                                    #  on memory hw runs concurrently with
+                                    #  ComputeJob on gpu hw — no shared
+                                    #  running_on, no water-filling collision)
+--with-stack                        # capture Python frames so D2's ~700 µs/leaf
+                                    # interpreter time appears in the trace at
+                                    # loader level (eliminates need for scheduler
+                                    # phantom to absorb it empirically)
+--profile-memory                    # for VRAM peak verification
+--record-shapes                     # tensor metadata
+--with-modules                      # module_path attribution
+```
+
+Leave at defaults:
+- `record_stream` (default False) — empirical behavior of False is already documented from prior traces; True is an unknown the simulator hasn't been calibrated against. If leaf_level+False still emits matched-block D2H bytes (we'd see it in the new trace), revisit then.
+- `non_blocking` (default False) — use_stream=True already gives async-side-stream semantics; this knob matters more when use_stream is False.
+
+### Accelerate Llama 3B / 8B
+
+Current config (Llama 3B/8B `accelerate.cpu_offload`) is already at <1% sim-vs-real; re-profile isn't strictly required. If re-profiling anyway, add:
+
+```
+--offload-buffers                   # offload RoPE inv_freq buffer (currently
+                                    # stays on GPU permanently). Tiny perf
+                                    # cost; removes a buffer/parameter
+                                    # asymmetry between sim and real.
+--with-stack                        # captures Python frames; lets future
+                                    # work move the per-leaf phantom from
+                                    # scheduler-emitted to loader-loaded.
+```
+
+### What this configuration buys
+
+| Source | How it gets closed by Step 1 |
+|---|---|
+| D1 hook CPU chain | `with_stack=True` records the chain into the trace; loader can map it to cpu_leaf nodes; scheduler phantom can be reduced or removed. |
+| D2 Python frames | `with_stack=True` captures them directly. |
+| D3 single bandwidth | `leaf_level` collapses two transfer paths into one — one cg-sim bandwidth knob is now physically correct. |
+| D4 no stream model | `leaf_level + use_stream=True` has one active transfer at a time; cg-sim's hardware-resource model handles compute/transfer overlap natively. |
+| D6 `record_stream=False` D2H bytes | Likely sidestepped at leaf-level (one-leaf-at-a-time eviction is structurally simpler than block-level). Verify against new trace. |
+| D7 SD3 D2H asymmetry | Hypothesis: tied to block_level matched-block eviction pattern. Likely disappears at leaf_level. Verify against new trace. |
+
+### What this configuration gives up
+
+1. **Doesn't verify the production-optimized `block_level` config.** Production users running diffusers prefer block_level (fewer hook fires per step → better perf). The verification result is explicitly bounded to `leaf_level + use_stream=True`. Anyone reading the verification needs to see this scope statement.
+2. **Slightly slower real wall time** at recording time (more per-event hook overhead × more events). Irrelevant for simulator verification (we're checking prediction accuracy, not optimizing perf).
+3. **D5 (batched TransferJob vs per-tensor) doesn't disappear** — but its impact shrinks because leaf_level groups are size 1, so sim's "one tid per TransferJob" matches reality's one cudaMemcpyAsync per tid. The 100-250× collapse becomes ~1×.
+
+### What is unknown until the new traces arrive
+
+1. **Does `leaf_level + record_stream=False` actually pointer-swap?** Block-level didn't (D6). If leaf-level also emits real D2H bytes per leaf, the trace will show it and we decide between (a) emitting matched D2H in the scheduler, (b) re-profile with `record_stream=True`, or (c) document and accept residual gap.
+2. **Is D7 truly block_level-specific?** Hypothesis above. Only confirmable by inspecting the new SD3 D2H per-event bandwidth.
+3. **How much of the per-leaf phantom (1090 µs pageable / 70 µs pinned) is already in `with_stack=True` traces?** First new trace tells us how much the scheduler phantom can be reduced.
+
+### Verification expectations after re-profile
+
+If the hypothesis above is right:
+- All four workloads (Llama 3B + 8B accelerate, SDXL + SD3 diffusers-leaf-level) should land within ±10-20% e2e and ±10% VRAM with the existing scheduler logic (possibly a small leaf-level scheduler variant for diffusers — even reusing `AccelerateCpuOffload` directly might work).
+- One calibration knob (pageable per-transfer phantom ~1090 µs), one bandwidth (literal per-Memcpy measurement, no compromise), one scheduler logic.
+
+If a workload still misses bound after re-profile, the gap is now from named sources (D5, residual D6/D7) on isolated evidence, and a focused step-2/3/4 decision can follow.
