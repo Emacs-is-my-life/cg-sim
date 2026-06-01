@@ -111,6 +111,17 @@ def main() -> None:
             "model). Try 3-10 if sim peak exceeds LP modeled peak."
         ),
     )
+    p.add_argument(
+        "--lateness-peak-coupling",
+        action="store_true",
+        help=(
+            "Re-enable the lateness→peak coupling term (OFF by default). "
+            "It adds bw×window_lateness bytes to each peak row, conflating "
+            "stall time with resident bytes — measured to over-predict peak "
+            "by ~2 GiB and lose to the no-coupling LP on every model at tight "
+            "budgets. Only enable for A/B comparison."
+        ),
+    )
     p.add_argument("--audit", action="store_true")
     args = p.parse_args()
     if args.cores < 1:
@@ -143,6 +154,7 @@ def main() -> None:
             args.backpressure_lateness_threshold_us * 1000
         ),
         arc_queue_factor=float(args.arc_queue_factor),
+        lateness_peak_coupling=bool(args.lateness_peak_coupling),
         audit=bool(args.audit),
         sidecars=sidecars,
     )

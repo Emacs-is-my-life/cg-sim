@@ -1085,6 +1085,7 @@ def _solve_milp(
     solver_threads: int | None,
     lp_relaxation: bool,
     arc_queue_factor: float = 1.0,
+    lateness_peak_coupling: bool = False,
     audit: bool,
     phase1_time_limit_s: float | None = None,
 ) -> _LPResult:
@@ -1488,9 +1489,17 @@ def _solve_milp(
         idx = int((t_l_val - _timeline_start_w) / _window_length_w)
         return max(0, min(NUM_LATENESS_WINDOWS - 1, idx))
 
+    # Lateness→peak coupling is OFF by default (mis-calibrated, see the
+    # per-sample gate below). Re-enable via arg or MILP_ENABLE_LP_COUPLING=1.
+    _coupling_on = (
+        lateness_peak_coupling
+        or os.environ.get("MILP_ENABLE_LP_COUPLING") == "1"
+    )
+
     if audit:
         print(
             f"[ct_milp_lateness:audit] lateness→peak coupling: "
+            f"{'ON' if _coupling_on else 'OFF (default)'} — "
             f"bw={_bw_h2d_Bpns:.1f}GB/s → "
             f"{_bytes_per_ns_late*1e6/1e6:.1f}MB peak per 1ms window-lateness"
         )
@@ -1613,12 +1622,17 @@ def _solve_milp(
             cols.append(var_col)
             vals.append(float(coef))
         # Lateness→peak coupling (option-b): add bw·L_window to this
-        # sample's peak. Mis-calibrated — it injects ~bw·L of *phantom*
-        # peak into every sample of a high-stall window (conflating stall
-        # time with resident bytes), which over-predicts the modeled peak
-        # and makes the LP under-fill VRAM at loose caps. Gate-off for the
-        # experiment via MILP_DISABLE_LP_COUPLING=1.
-        if os.environ.get("MILP_DISABLE_LP_COUPLING") != "1":
+        # sample's peak. OFF by default — it's mis-calibrated: it injects
+        # ~bw·L of *phantom* peak into every sample of a high-stall window
+        # (conflating stall time with resident bytes), over-predicting the
+        # modeled peak by ~2 GiB and making the LP under-fill VRAM. Measured
+        # to lose to the no-coupling LP on all of sdxl/sd3/llama3b/llama8b at
+        # tight budgets (exp_results/0601_calibrate/nocoupling_4models). Its
+        # stated purpose — stop the LP escaping peak by accepting lateness —
+        # is already served by the lateness objective. Re-enable for A/B via
+        # the `lateness_peak_coupling=True` arg or MILP_ENABLE_LP_COUPLING=1.
+        # (`_coupling_on` is computed once before this loop.)
+        if _coupling_on:
             _wi = _sample_window_idx(t_l)
             rows.append(row)
             cols.append(L_WINDOW_IDX_BASE + _wi)
@@ -2490,6 +2504,7 @@ def solve_neutral(
     backpressure_edges: bool = False,
     backpressure_lateness_threshold_ns: int = 100_000,  # 100 us
     arc_queue_factor: float = 1.0,
+    lateness_peak_coupling: bool = False,
     audit: bool = False,
     sidecars: Any = None,                 # accepted but ignored
     **_legacy_kwargs: Any,
@@ -2513,6 +2528,14 @@ def solve_neutral(
                                 detected CPU cores.
       ``lp_relaxation``       — Skip integrality, solve continuous LP
                                 (debug aid).
+      ``lateness_peak_coupling`` — Re-enable the lateness→peak coupling
+                                term (default False). Mis-calibrated: it
+                                adds bw·window_lateness to each peak row,
+                                over-predicting modeled peak by ~2 GiB and
+                                making the LP under-fill VRAM. Off wins on
+                                every model at tight budgets; leave False
+                                except for A/B. Also honored via env
+                                MILP_ENABLE_LP_COUPLING=1.
       ``audit``               — Print pool/LP/solver diagnostics.
       ``sidecars``            — Accepted for interface parity with
                                 ct_milp_multistream's main.py; ignored.
@@ -2619,6 +2642,7 @@ def solve_neutral(
         solver_threads=solver_threads,
         lp_relaxation=lp_relaxation,
         arc_queue_factor=arc_queue_factor,
+        lateness_peak_coupling=lateness_peak_coupling,
         audit=audit,
     )
 

@@ -241,7 +241,10 @@ Where `alive(t, T_i)` is a function of `c_t`, `e_{t,k}`, and where
 
 The "always alive" cases get added to a constant addon at `T_i`; the
 `size · c_t` cases get added to a variable-term coefficient for
-`c_t`. The peak row is `P ≥ const_i + Σ size_t · c_t`.
+`c_t`. The peak row is `P ≥ const_i + Σ size_t · c_t`. (An optional
+lateness→peak coupling term was historically added to each row; it is
+**disabled by default** because it over-models peak — see
+*Lateness→peak coupling* below.)
 
 Under the symmetric `c + e = 1` coupling, `(1 − e) = c`, so the
 dead-zone contribution `size · (1 − e_{t,k})` reduces to
@@ -347,6 +350,46 @@ issue, one at a time** (`_issue_prefetch`), so there is no
 claim-at-enqueue pile-up. `arc_queue_factor = 1` (the default) matches
 sim; values > 1 over-model peak and push the LP toward needless
 stream-everything plans. Leave it at 1.
+
+## Lateness→peak coupling (disabled by default)
+
+An optional term — call it *option-b* — added `bw · L_window_i` bytes to
+**every peak-sample row** of window `i`, the idea being "if the LP accepts
+`L_window_i` ns of late streaming, those bytes are effectively cold-resident,
+so charge them to peak." It was meant to stop the LP escaping the peak cap by
+accepting lateness.
+
+**It is off by default — it was mis-calibrated.** It conflates stall *time*
+with resident *bytes*: at 25 MB per 1 ms of window-lateness, a window with
+~100 ms of modeled stall injects ~2.5 GiB of **phantom peak** that the
+simulator never actually holds. The LP, seeing a fake-high peak, under-fills
+VRAM and over-streams weights — the opposite of what you want at a tight cap.
+The lateness objective (`Σ L_window_i`) already discourages lateness directly,
+so the coupling is redundant as well as wrong.
+
+Measured impact (`exp_results/0601_calibrate`, validated against the cg-sim
+MCP oracle — true sim peak / makespan read off the live engine):
+
+- On sd3-med@11gib the coupling over-predicted peak by **+2.2 GiB** (modeled
+  10121 vs true sim 7934 MiB). Disabling it collapses the gap to **−117 MiB**
+  (modeled now ≈ true within ~1 %; the small residual is the
+  intermediates/fragmentation that `safety_margin_frac` is there to absorb).
+- Coupling-off + feeding the **real cap** (no inflated target) beats both the
+  coupling-on plan and swapadvisor on every model at its tightest budget:
+
+  | model | budget | MILP off | MILP on | swapadvisor |
+  |---|---|---:|---:|---:|
+  | sdxl-turbo | 4 GiB | **0.631 s** | 0.848 | 0.826 |
+  | sd3-med | 8 GiB | **1.591 s** | 2.254 | 3.068 |
+  | llama3b | 4 GiB | **1.974 s** | 2.261 | 3.258 |
+  | llama8b | 10 GiB | **5.381 s** | 6.176 | 7.760 |
+
+  (All feasible, no OOM. swapadvisor consistently leaves VRAM unused; the
+  budget-filling MILP wins by streaming less.)
+
+**Re-enable only for A/B comparison** via the `lateness_peak_coupling=True`
+arg to `solve_neutral`, the `--lateness-peak-coupling` CLI flag, or
+`MILP_ENABLE_LP_COUPLING=1`. `--audit` prints `coupling: ON` / `OFF (default)`.
 
 ## Overrun repair
 
