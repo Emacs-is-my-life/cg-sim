@@ -377,7 +377,7 @@ Implement your own scheduler logic in `sim/sched/<scheduler-name>/`.
     `llamacpp__llama-3-8B-Q8__datai/`,
     `pytorch-eager__llama-3-8B__RTX4090/llama_bundle/`,
     `pytorch-lazy__sdxl-turbo__RTX4090/llama_bundle/`,
-    `diffusers-group-offload__sdxl-turbo__RTX4090/llama_bundle/`).
+    `accelerate-cpu-offload__llama-3-8B__RTX4090/llama_bundle/`).
     PyTorch bundles' `manifest.json` references its own siblings
     (`runtime_*.csv`, `pytorch_runtime_tensors.csv`,
     `module_hierarchy.json`, `step_*_compute_graph.dot`,

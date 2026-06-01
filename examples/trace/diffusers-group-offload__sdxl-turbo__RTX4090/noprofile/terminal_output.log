@@ -98,12 +98,7 @@
   class ZImageTransformerBlock(nn.Module):
 /home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/controlnets/controlnet_z_image.py:337: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
   class ZImageControlTransformerBlock(nn.Module):
-
-Loading pipeline components...:   0%|          | 0/7 [00:00<?, ?it/s]
-Loading pipeline components...:  14%|█▍        | 1/7 [00:00<00:00,  7.87it/s]
-Loading pipeline components...:  29%|██▊       | 2/7 [00:00<00:00,  8.42it/s]
-Loading pipeline components...:  71%|███████▏  | 5/7 [00:00<00:00, 15.18it/s]
-Loading pipeline components...: 100%|██████████| 7/7 [00:00<00:00, 17.19it/s]
+Loading pipeline components...:   0%|          | 0/7 [00:00<?, ?it/s]Loading pipeline components...:  29%|██▊       | 2/7 [00:00<00:00, 10.43it/s]Loading pipeline components...:  57%|█████▋    | 4/7 [00:00<00:00, 10.66it/s]Loading pipeline components...: 100%|██████████| 7/7 [00:00<00:00, 15.71it/s]
 pipeline: sdxl-turbo
 requested_device: cuda:0
 execution_device: cuda:0
@@ -116,15 +111,12 @@ variant: fp16
 seed: 0
 steps: 4
 warmup_runs: 4
-image_path: /tmp/sdxl_turbo_group_cpu_offload_steps4_output.png
+image_path: /data/pytorch-source/exp_results/0521_sweep/sdxl_offload_group_leaf_level_nonblocking/noprofile/sdxl_turbo_group_cpu_offload_steps4_output.png
 latent_shape: (1, 4, 64, 64)
-GPU memory: 8.2 MB allocated, 4581.1 MB peak
-load_seconds: 8.305926
-warmup_seconds: 8.257351
-inference_seconds: 1.521703
-decode_seconds: 0.069369
-save_seconds: 0.066271
-e2e_seconds: 18.220731
-
-# exit_code: 0
-# elapsed_seconds: 20.618
+GPU memory: 8.2 MB allocated, 1513.3 MB peak
+load_seconds: 8.241430
+warmup_seconds: 5.351113
+inference_seconds: 1.151086
+decode_seconds: 0.078982
+save_seconds: 0.063009
+e2e_seconds: 14.885726

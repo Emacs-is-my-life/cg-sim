@@ -1,0 +1,22 @@
+model: /data/llamasim/models/Llama-3.2-3B-Instruct/
+requested_device: cuda:0
+offload_mode: model
+offload_device: cpu
+fusion: none
+accelerate_version: 1.13.0
+dtype: bfloat16
+seed: 0
+enable_eos_stop: False
+max_new_tokens: 15
+batch_size: 1
+warmup_runs: 1
+text_path: /tmp/llama8b_model_cpu_offload_tokens15_output.txt
+sequence_shape: (1, 20)
+generated_text_preview: The quick brown fox jumps over the lazy dog.
+This is a well-known pangram, a
+GPU memory: 8.1 MB allocated, 772.8 MB peak
+load_seconds: 0.807582
+warmup_seconds: 9.831049
+inference_seconds: 9.097578
+save_seconds: 0.017214
+e2e_seconds: 19.753683
