@@ -3,6 +3,14 @@
 Things a future Claude Code session should know before working in this
 repo. Everything here is durable — not specific to a transient task.
 
+## Where to look for offload-verification context
+
+The catalog of simulator-vs-real divergence sources (D1–D8), the
+4-step correction hierarchy, current compensations, and the next
+recommended action live in `docs/cg-sim_divergence_sources.md`. Read
+that document before investigating any verification gap or proposing
+new compensation logic.
+
 ## Faithfulness principle (read first)
 
 cg-sim's purpose is to predict what would happen in a real run
