@@ -36,7 +36,7 @@ from mcp.client.stdio import stdio_client
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-INPUT_YAML = REPO_ROOT / "examples" / "run" / "llamacpp_llama-3-8B_flexinfer.yaml"
+INPUT_YAML = REPO_ROOT / "examples" / "run" / "llamacpp__llama-3-8B__flexinfer.yaml"
 
 
 def _unwrap(result) -> dict:
@@ -220,7 +220,7 @@ async def main() -> int:
 
             # 14. restart_simulation with a different input
             print("\n=== 14. restart_simulation ===", file=sys.stderr)
-            other = REPO_ROOT / "examples" / "run" / "llamacpp_llama-3-8B_vanilla.yaml"
+            other = REPO_ROOT / "examples" / "run" / "llamacpp__llama-3-8B__vanilla.yaml"
             r = _unwrap(await session.call_tool(
                 "restart_simulation", {"input_path": str(other)}))
             _check(r["ok"] is True,

@@ -5,13 +5,13 @@
 #
 # For Python-driven sweeps with summary.csv + analysis tree, prefer:
 #   python3 scripts/experiments/sweep_memory.py \
-#       examples/run/llamacpp_llama-3-8B_flexinfer.yaml \
+#       examples/run/llamacpp__llama-3-8B__flexinfer.yaml \
 #       cpu ram 0 2,3,4,5,6,7,8,9,10 flexinfer-mem-sweep
 #
 # This shell variant exists for a fine-grained MB-stepping sweep
 # without analyses; it still drops JSONs in the conventional path.
 
-INPUT_CFG="examples/run/llamacpp_llama-3-8B_flexinfer.yaml"
+INPUT_CFG="examples/run/llamacpp__llama-3-8B__flexinfer.yaml"
 EXPERIMENT="flexinfer-mem-sweep-fine"
 RESULTS_DIR="output/${EXPERIMENT}/sim_results"
 mkdir -p "${RESULTS_DIR}"

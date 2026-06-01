@@ -20,7 +20,7 @@ Usage:
         <memory_idx> <sizes_csv_GB> [experiment_name]
 
 Example:
-    python sweep_memory.py examples/run/llamacpp_llama-3-8B_flexinfer.yaml \\
+    python sweep_memory.py examples/run/llamacpp__llama-3-8B__flexinfer.yaml \\
         cpu ram 0 4,5,6,7,8 flexinfer_mem_sweep
 """
 from __future__ import annotations

@@ -33,8 +33,8 @@ from mcp.client.stdio import stdio_client
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_YAML = REPO_ROOT / "examples" / "run" / "llamacpp_llama-3-8B_flexinfer.yaml"
-ALT_YAML = REPO_ROOT / "examples" / "run" / "llamacpp_llama-3-8B_vanilla.yaml"
+DEFAULT_YAML = REPO_ROOT / "examples" / "run" / "llamacpp__llama-3-8B__flexinfer.yaml"
+ALT_YAML = REPO_ROOT / "examples" / "run" / "llamacpp__llama-3-8B__vanilla.yaml"
 
 
 def _unwrap(result) -> dict:
