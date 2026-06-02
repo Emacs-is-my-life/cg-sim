@@ -146,6 +146,23 @@ class AccelerateCPUOffload(BaseScheduler):
         self._stat_masters_evicted = 0
         self._stat_intermediates_freed = 0
         self._stat_stale_dups_freed = 0
+
+        # ---- dead-intermediate GC ----
+        # The refcount free (_release_intermediate) only fires when a CONSUMER
+        # retires and decrements rem to 0. That misses two classes that the SD3
+        # MMDiT trace produces in bulk (~200 MiB by the peak; SDXL/accelerate
+        # produce ~none): (a) ORPHANS — intermediates produced with no consumer
+        # at all (rem==0 from the start, so no retire ever triggers a release);
+        # (b) tids whose region is finalized through a cross-device / view-alias
+        # path AFTER rem already hit 0, so the one-shot release found nothing.
+        # A periodic sweep reclaims both: any INTERMEDIATE region that is IDLE
+        # with rem==0 is dead (no normal consumer needs it — custom_deps
+        # consumers bypass residency — and the real allocator frees such buffers
+        # at once). Periodic (not per-tick) keeps the full-region scan cheap;
+        # between sweeps only ~1 MiB of dead accrues, so the peak stays accurate.
+        self._gc_tick: int = 0
+        self._gc_period: int = int(self.args.get("dead_gc_period", 32))
+        self._stat_dead_freed: int = 0
         return
 
     # ============================================================ compile
@@ -270,6 +287,9 @@ class AccelerateCPUOffload(BaseScheduler):
 
         self._retry_pending_release()
         self._release_stale_duplicates()
+        self._gc_tick += 1
+        if self._gc_period > 0 and self._gc_tick % self._gc_period == 0:
+            self._gc_dead_intermediates()
         self._submit_ready()
         return
 
@@ -481,6 +501,29 @@ class AccelerateCPUOffload(BaseScheduler):
         if deferred:
             self._pending_release.add(tid)
 
+    def _gc_dead_intermediates(self) -> None:
+        """Periodic reclaim of dead intermediates the consumer-triggered
+        refcount free misses (orphans with no consumer, and tids whose region
+        is finalized after rem already hit 0 — see __init__). Frees every IDLE
+        INTERMEDIATE region whose tid has remaining_consumers==0 (skipping
+        masters/initials). Safe by construction: rem==0 means no normal consumer
+        needs the buffer (custom_deps consumers bypass residency), so e2e is
+        unaffected — nothing ever reads a freed region."""
+        rem = self._remaining_consumers
+        tm = self.sys.trace.tensor_map
+        for hw in (self.vram, self.ram):
+            for r in list(hw.space._regions_by_page_idx_start.values()):
+                if r.access_status != DataRegionAccess.IDLE:
+                    continue
+                tid = r.tensor_id
+                if rem.get(tid, 0) != 0 or tid in self.master_tids:
+                    continue
+                t = tm.get(tid)
+                if t is None or t.args.get("tensor_type") in self._INITIAL_TYPES:
+                    continue
+                self.sys.release(r)
+                self._stat_dead_freed += 1
+
     def _retry_pending_release(self) -> None:
         if not self._pending_release:
             return
@@ -502,6 +545,7 @@ class AccelerateCPUOffload(BaseScheduler):
             "masters_evicted": self._stat_masters_evicted,
             "intermediates_freed": self._stat_intermediates_freed,
             "stale_dups_freed": self._stat_stale_dups_freed,
+            "dead_freed": self._stat_dead_freed,
             "vram_used_KB": 4 * self.vram.space.num_used_pages,
             "vram_peak_KB": 4 * self.vram.space.peak_num_used_pages,
             "ready_queue": len(self.ready),
