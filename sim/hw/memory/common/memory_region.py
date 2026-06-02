@@ -44,6 +44,15 @@ class MemorySpace:
         self.peak_num_used_pages: int = 0
 
         self._regions_by_page_idx_start: SortedDict[int, MemoryRegion] = SortedDict()
+        # Secondary index: tensor_id -> regions holding it. A region's
+        # tensor_id is immutable, so membership only changes in claim()/
+        # release() (the only mutators of the primary map). This turns
+        # get_by_tensor_id from an O(all regions) linear scan into an
+        # O(regions-for-this-tid) lookup — the dominant cost in offload
+        # schedulers, which call it ~10x per node (input residency, output
+        # claim, eviction, refcount release) across traces with thousands
+        # of live regions (e.g. SD3: ~6k VRAM regions).
+        self._regions_by_tid: dict[int, list[MemoryRegion]] = {}
         return
 
     def _find_neighbors(self, page_idx_start: int) -> (MemoryRegion | None, MemoryRegion | None):
@@ -96,15 +105,20 @@ class MemorySpace:
 
     def get_by_tensor_id(self, tensor_id: int) -> list[MemoryRegion]:
         """
-        Find all MemoryRegion who holds tensor with tensor_id
+        Find all MemoryRegion who holds tensor with tensor_id.
+
+        Returns them in page_idx_start order — identical to the previous
+        linear scan over the page-sorted primary map — so callers that pick
+        the first matching region (begin_mutation, _dispatch_transfer, ...)
+        choose the same region as before; placement/peak stay deterministic.
+        Per-tid region count is tiny (1-2), so the sort is negligible.
         """
-
-        regions: list[MemoryRegion] = []
-        for mem_region in self._regions_by_page_idx_start.values():
-            if mem_region.tensor_id == tensor_id:
-                regions.append(mem_region)
-
-        return regions
+        regions = self._regions_by_tid.get(tensor_id)
+        if not regions:
+            return []
+        if len(regions) == 1:
+            return list(regions)
+        return sorted(regions, key=lambda r: r.page_idx_start)
 
     def claim(self, tensor_id: int, page_idx_start: int, num_pages: int) -> MemoryRegion | None:
         """
@@ -118,6 +132,7 @@ class MemorySpace:
 
         new_region = MemoryRegion(self.hw, page_idx_start, num_pages, tensor_id)
         self._regions_by_page_idx_start[page_idx_start] = new_region
+        self._regions_by_tid.setdefault(tensor_id, []).append(new_region)
         self.num_used_pages += num_pages
 
         if self.num_used_pages > self.peak_num_used_pages:
@@ -129,16 +144,28 @@ class MemorySpace:
         """
         Release a MemoryRegion reserved for certain tensor,
         freeing space for other tensors.
+
+        Look the region up by its own (immutable) page_idx_start key
+        rather than scanning the whole map for a matching id — equivalent,
+        since keys are unique and non-overlapping, but O(log N) not O(N).
+        The id guard keeps the original "no-op if not present" semantics.
         """
-        free_key = None
+        key = free_region.page_idx_start
+        existing = self._regions_by_page_idx_start.get(key)
+        if existing is None or existing.id != free_region.id:
+            return
 
-        for page_idx_start, mem_region in self._regions_by_page_idx_start.items():
-            if mem_region.id == free_region.id:
-                free_key = page_idx_start
-                break
+        self.num_used_pages -= existing.num_pages
+        del self._regions_by_page_idx_start[key]
 
-        if free_key is not None:
-            self.num_used_pages -= self._regions_by_page_idx_start[free_key].num_pages
-            del self._regions_by_page_idx_start[free_key]
+        # Maintain the tensor_id index.
+        lst = self._regions_by_tid.get(existing.tensor_id)
+        if lst is not None:
+            for i, r in enumerate(lst):
+                if r.id == existing.id:
+                    lst.pop(i)
+                    break
+            if not lst:
+                del self._regions_by_tid[existing.tensor_id]
 
         return
