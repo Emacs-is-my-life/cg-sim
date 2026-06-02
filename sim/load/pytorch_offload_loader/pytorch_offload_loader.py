@@ -602,9 +602,6 @@ class PytorchOffloadLoader(TraceLoader):
         sharing their storage automatically merges into them.
         """
         remap: dict[int, int] = {}
-        # TEMP §4c diagnostic (throwaway)
-        type(self)._ALIAS_DIAG = {"biggest_size": 0, "biggest": None,
-                                  "n_over50": 0, "tids_over50": 0}
 
         def resolve(tid: int) -> int:
             seen = []
@@ -738,23 +735,6 @@ class PytorchOffloadLoader(TraceLoader):
                 if not placed:
                     clusters.append([tid])
                     cluster_deaths.append(d)
-            # TEMP §4c diag: capture the biggest cluster's member lifetimes.
-            _diag = type(self)._ALIAS_DIAG
-            for c in clusters:
-                if len(c) >= 50:
-                    _diag["n_over50"] += 1
-                    _diag["tids_over50"] += len(c)
-                if len(c) > _diag["biggest_size"]:
-                    _diag["biggest_size"] = len(c)
-                    cs = sorted(c, key=lambda t: lifetime(t)[0])
-                    _diag["biggest"] = {
-                        "key": [key[0], key[1]],
-                        "size": len(c),
-                        "span_s": (max(lifetime(t)[1] for t in c)
-                                   - min(lifetime(t)[0] for t in c)) / 1e9,
-                        "members": [(lifetime(t)[0], lifetime(t)[1],
-                                     tensor_map[t].size_bytes) for t in cs[:30]],
-                    }
             # Within each cluster, pick an anchor and merge the rest.
             # Anchor preference: largest permanent row (its size is
             # the real parameter allocation), or largest member if no

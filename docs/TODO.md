@@ -69,15 +69,19 @@ Reproduce: `grep -oE '"Total Allocated": *[0-9]+' <trace>.json | grep -oE '[0-9]
 on `examples/trace/diffusers-group-offload__*/<...>_trace.json` (41726 memory events each).
 (Tell that both report ~1513: it's the shared VAE decode.)
 
-### 1b. Current sim VRAM (OVER target)
-| trace | sim VRAM | target | Δ |
-|---|---|---|---|
-| sdxl-turbo | 175 MiB | 129 MiB | +35% |
-| sd3 (pre-§4a) | 1756 MiB | 464 MiB | +278% |
-| **sd3 (post-§4a, default)** | **1460.66 MiB** | 464 MiB | **+215%** |
+### 1b. Current sim VRAM (history; §4c birth-fix is the big mover)
+| trace | sim VRAM | target | Δ | note |
+|---|---|---|---|---|
+| sdxl-turbo (orig) | 175.04 | 129.24 | +35% | pre-fixes |
+| **sdxl-turbo (post-§4c)** | **125.17** | 129.24 | **−3.2% ✓** | within ±10% — SOLVED |
+| sd3 (pre-§4a) | 1756 | 464.45 | +278% | |
+| sd3 (post-§4a) | 1460.66 | 464.45 | +215% | double-claim fix |
+| **sd3 (post-§4c, default)** | **719.25** | 464.45 | **+55%** | birth-fix; −741 MiB |
 
-(§4a double-claim fix is now default-on, so a fresh SD3 run gives 1460.66. The remaining
-~997 MiB over target is the §3 activation over-concurrency — the dominant open item.)
+§4c (the producer-less `birth=0` fix, §4c below) is default-on and is the dominant mover:
+SDXL is now SOLVED (125.17 ≈ 129). SD3 dropped 1460→719. Residual SD3 ~255 MiB = WEIGHT +55
+(masters concurrent vs the lone 432 master) + INTERMEDIATE +183 (sim 215 vs real ~32 —
+remaining *death-side* over-hold = the original §3 free-schedule; deferred).
 
 cg-sim KB are binary (peak = `peak_num_used_pages * 4 / 1024` MiB; result.json key
 `peak_memory_usage_KB`). 4 KB pages.
@@ -121,13 +125,28 @@ peak 125 MiB (≈ kineto 129 ✓); SD3 926 MiB (≈ 2× kineto 464 — the activ
 
 ## 3. PRIMARY PLAN — drive activation lifetimes from the kineto allocator timeline
 
-Goal: make the sim's VRAM peak track the real allocator (target 129/464). The trace's data-edge
+> **STATUS (2026-06-02): MOSTLY RESOLVED by §4c, not by this plan.** The dominant over-concurrency
+> was NOT a free-*timing* problem — it was the loader OVER-MERGING (`birth=0`) sequential
+> reincarnations into union-lifetime mega-tids (see §4c). Fixing that birth bug dropped SD3
+> 1460→719 and SOLVED SDXL (125.17). The kineto timeline (step 1, `tmp/kineto_vram_timeline.py`)
+> was extracted and CONFIRMED the targets (max `Total Allocated` = 129.24 / 464.45 MiB) and was the
+> ground truth that REVEALED the over-merge (real buffer lifetimes ~0.1 ms, not 6 s) — but the FIX
+> needed no kineto matching (it uses the cg-sim graph's own first-consumer time). The matching this
+> plan assumed is HARDER than written (sizes recur 1000s of times, not distinctive; clock rate IS
+> 1:1 so alignable — see `tmp/align_probe.py`). Only the SD3 residual remains (death-side, below).
+>
+> **Residual SD3 (719→464, ~255 MiB)** = WEIGHT +55 (master eviction timing) + INTERMEDIATE +183
+> (activations freed at cg-sim last-consumer, still later than the real free). THIS last piece is
+> the genuine "free-schedule from kineto" work below — now scoped to the death side only.
+
+Goal (residual): make the sim's VRAM peak track the real allocator (target 129/464). The trace's data-edge
 last-consumer lifetimes over-hold activations; the kineto memory events ARE the ground-truth
 alloc/free timeline.
 
 **Blocker (known):** the bundle re-indexes `storage_id` to small ints and DROPS the device `Addr`
 that the kineto memory events key on, so there's no clean tid↔allocation bridge. Workaround =
-**size + time greedy match** (no address needed) for the dominant, distinctively-sized allocations.
+**size + time greedy match** (clock rate IS 1:1, confirmed — `tmp/align_probe.py`) within each size
+class (sizes are NOT distinctive — they recur 1000s of times; confirmed).
 
 **Steps:**
 1. **Extract the kineto memory timeline** from `<trace>.json` (sdxl 0.5 GB, sd3 1.3 GB — stream/grep,
@@ -199,13 +218,27 @@ mid-run incl. releases): SDXL 175.04/1.2254, accelerate 3B 777.51/8.6493, **pyto
 start-timeout and the 140 s poll; coarse). The index also made §4a's vram+ram sweep cheap, so the
 VRAM-only optimization I'd considered is moot — left the sweep general. The §3 test loop is now fast.
 
-### 4c. (deeper, risky) Loader aliasing merge
-Root cause of the §2 dead-end + part of the over-concurrency: `_apply_storage_aliasing` keeps
-concurrently-live same-storage aliased views as separate tids (double-claimed). If their lifetime
-overlap were detected and merged, VRAM would drop AND storage-reuse would become safe. But the
-lifetime/birth-death computation is subtle and the method is SHARED by accelerate/eager/lazy —
-re-verify ALL after any change. Investigate the SD3 case: tid 5622 + its same-storage partner, why
-their `[birth,death]` didn't overlap-merge. Lower priority than §3.
+### 4c. Loader aliasing — ✅ DONE (2026-06-02). Bug was OVER-merge, not under-merge.
+The aliasing WAS the dominant culprit (instinct right), but the bug is the REVERSE of what was
+written here. NOT "fails to merge concurrent views" (that ceiling is only ~24 MiB — measured: at
+the SD3 peak only 8 storage_ids had duplicate concurrent regions; the loader already merges nearly
+all views). The real bug: in `_apply_storage_aliasing`, **producer-less tensors defaulted to
+`birth=0`** (`birth.setdefault(tid, 0)`). Cuda activations whose producer was a cross-device
+dispatcher / machinery node the offload reconstruction STRIPPED have no node in `output_tensors`,
+so birth=0. With every reincarnation of a reused storage slot "starting" at 0, the lifetime-overlap
+clustering collapsed thousands of 0.1 ms buffers into ONE union-lifetime mega-tid held for ~6 s
+(e.g. one 24 MiB tid absorbed 1143 tensors, 1621 consumers across the whole run). That over-HOLD
+(not view duplication) was the excess.
+**FIX:** a producer-less tensor is born when **first read** (min consumer `start_ns`), not at 0.
+Track `prod_birth` (from producers) and `first_use` (from consumers) separately; `birth = prod_birth
+if produced else first_use`. ~15 lines in `_apply_storage_aliasing`. No kineto matching needed —
+the kineto timeline only CONFIRMED the targets + revealed the bug (real lifetimes ~0.1 ms).
+**Effect:** clusters ≥50 members 84→1; biggest cluster 5666→61. **SD3 1460→719.25, SDXL 175→125.17
+(SOLVED, −3.2%), accel 777.5→768.55** (more accurate vs real 772.8: −0.55% vs old +0.6% — NEW
+locked baseline, user-approved). All e2e unchanged & exact; all complete cleanly; loader invariants
+(masters/volume/0-orphans) unchanged. Shared offload-loader code → affects accel+diffusers only
+(eager/lazy use the separate PytorchProfile loader). The §2 storage-reuse dead-end is now also
+safer (far fewer concurrent same-storage tids), but untested. Residual SD3 = death-side (§3).
 
 ---
 
@@ -236,7 +269,9 @@ e2e = max `timestamp_end` (µs) /1e6; VRAM = `peak_memory_usage_KB` /1024 MiB.
 - `tmp/verify_loader.py {3B|8B}` — ACCELERATE regression (run after ANY shared loader/scheduler change).
 
 **Regression discipline (P12):** any change to `PytorchOffloadLoader` or `AccelerateCPUOffload`
-(shared) → re-run `tmp/verify_loader.py 3B`+`8B` AND MCP accelerate 3B (must stay 8.6493 s / 777.5 MiB).
+(shared) → re-run `tmp/verify_loader.py 3B`+`8B` AND MCP accelerate 3B (must stay **8.6493 s /
+768.55 MiB** — NEW baseline as of the §4c birth-fix, 2026-06-02; was 777.5 before, the change is the
+fix correcting accelerate's minor over-merge, −0.55% vs real 772.8).
 
 ---
 

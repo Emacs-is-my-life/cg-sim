@@ -200,8 +200,14 @@ P10.) Both configs pass on both metrics:
 
 | Workload   | e2e sim | noprofile | Δ e2e | VRAM sim | manifest peak | Δ VRAM | H2D volume |
 |------------|--------:|----------:|------:|---------:|--------------:|-------:|-----------:|
-| llama-3-3B | 8.649 s | 9.098 s   | −4.9 % ✅ | 777.5 MiB | 772.8 MiB | +0.6 % ✅ | 108.20 GB (3826 xfers) exact |
-| llama-3-8B | 18.345 s| 19.592 s  | −6.4 % ✅ | 1029.95 MiB | 1024.0 MiB | +0.6 % ✅ | 240.91 GB (4366 xfers) exact |
+| llama-3-3B | 8.649 s | 9.098 s   | −4.9 % ✅ | 768.55 MiB | 772.8 MiB | −0.55 % ✅ | 108.20 GB (3826 xfers) exact |
+| llama-3-8B | 18.345 s| 19.592 s  | −6.4 % ✅ | 1023.9 MiB | 1024.0 MiB | −0.01 % ✅ | 240.91 GB (4366 xfers) exact |
+
+> **VRAM updated 2026-06-02 (diffusers §4c birth-fix).** Was 777.5 (+0.6%) / 1029.95 (+0.6%). The
+> shared offload-loader fix (producer-less tensors born at first-use, not time 0; corrects an
+> over-merge of sequential storage-slot reincarnations) also removed a *minor* over-merge in the
+> accelerate traces, making both sizes MORE accurate vs the manifest peak (3B −0.55%, 8B −0.01%).
+> e2e and H2D volume unchanged & exact. These are the new locked regression baselines.
 
 - **VRAM peak (+0.6 %)** confirms the residency model: the working set is one
   weight (the embedding dominates) + a small activation set, exactly as the real
