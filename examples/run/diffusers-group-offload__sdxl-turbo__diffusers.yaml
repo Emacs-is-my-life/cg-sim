@@ -1,0 +1,74 @@
+logger:
+  args:
+    result_path: "output/diffusers-group-offload__sdxl-turbo__diffusers/sim_results/result.json"
+    log_level: 1
+trace:
+  type: "PytorchProfile"
+  args:
+    bundle_manifest: "../trace/diffusers-group-offload__sdxl-turbo__RTX4090/llama_bundle/manifest.json"
+    skip_zero_byte_tensors: true
+    zero_wait_nodes: true
+    add_temporal_data_control_edges: true
+hardware:
+  compute:
+    - name: "cpu"
+      type: "SimpleCPU"
+      args:
+        memory: "ram"
+        modifier: 1
+    - name: "gpu0"
+      type: "SimpleGPU"
+      args:
+        memory: "vram0"
+        modifier: 1
+        max_concurrent_jobs: 1
+  memory:
+    - name: "ram"
+      type: "SimpleRAM"
+      args:
+        custom_dep_tag: "TARGET_RAM"
+        memory_size_KB: 33554432
+        # Calibrated to the trace's pinned H2D rate (node 35: 72MB / 2.83ms = 25.4 GB/s).
+        # This is the bandwidth HINT from the recorded Memcpy durations; cg-sim computes
+        # each TransferJob's wall time as bytes / this rate (water-filling), so it responds
+        # to hardware/placement changes — it is NOT the recorded duration replayed.
+        memory_bandwidth_KBps: 25000000
+    - name: "vram0"
+      type: "SimpleVRAM"
+      args:
+        custom_dep_tag: "TARGET_VRAM"
+        memory_size_KB: 24624320
+        memory_bandwidth_KBps: 25000000
+  storage:
+    - name: "ssd"
+      type: "SimpleSSD"
+      args:
+        custom_dep_tag: "TARGET_SSD"
+        fixed_latency_micros: 50
+        read_io_curve_KBps:
+          - [4, 80000]
+          - [8, 160000]
+          - [16, 320000]
+          - [32, 800000]
+          - [64, 1600000]
+          - [128, 3000000]
+          - [256, 5000000]
+          - [512, 6500000]
+          - [1024, 7000000]
+        write_io_curve_KBps:
+          - [4, 60000]
+          - [8, 120000]
+          - [16, 250000]
+          - [32, 600000]
+          - [64, 1200000]
+          - [128, 2200000]
+          - [256, 3500000]
+          - [512, 4500000]
+          - [1024, 5000000]
+scheduler:
+  type: "DiffusersGroupOffload"
+  args:
+    cpu_compute: "cpu"
+    cuda_compute: "gpu0"
+    cuda_device: "cuda:0"
+    h2d_streams: 1
