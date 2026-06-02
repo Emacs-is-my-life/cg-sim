@@ -1,11 +1,11 @@
 logger:
   args:
-    result_path: "output/diffusers-group-offload__sdxl-turbo__diffusers/sim_results/result.json"
+    result_path: "output/diffusers-group-offload__sd3__diffusers/sim_results/result.json"
     log_level: 1
 trace:
   type: "PytorchOffloadLoader"
   args:
-    bundle_manifest: "../trace/diffusers-group-offload__sdxl-turbo__RTX4090/llama_bundle/manifest.json"
+    bundle_manifest: "../trace/diffusers-group-offload__sd3__RTX4090/llama_bundle/manifest.json"
     skip_zero_byte_tensors: true
     zero_wait_nodes: true
     add_temporal_data_control_edges: true
@@ -31,22 +31,22 @@ hardware:
       args:
         custom_dep_tag: "TARGET_RAM"
         memory_size_KB: 33554432
-        # MEASURED pinned H2D rate from the SDXL trace: 22.175 GB streamed over
-        # 7435 Memcpy HtoD (Pinned->Device) events took 840.90 ms => 26.37 GB/s
+        # MEASURED pinned H2D rate from the SDXL trace: 121.10 GB streamed over
+        # 20050 Memcpy HtoD (Pinned->Device) events took 4558 ms => 26.57 GB/s
         # aggregate. diffusers low_cpu_mem_usage=False pins the cpu masters, so H2D
         # is ~2x the accelerate pageable rate (13.95). The loader neutralises the
         # recorded Memcpy nodes; the scheduler re-models H2D as RAM->VRAM
         # TransferJobs water-filled against this rate (wall = bytes/rate), NOT the
         # recorded duration replayed.
-        memory_bandwidth_KBps: 26370000
+        memory_bandwidth_KBps: 26570000
     - name: "vram0"
       type: "SimpleVRAM"
       args:
         custom_dep_tag: "TARGET_VRAM"
         memory_size_KB: 24624320
-        # Same 26.37 GB/s effective pinned H2D rate (RAM->VRAM transfer water-fills
+        # Same 26.57 GB/s effective pinned H2D rate (RAM->VRAM transfer water-fills
         # the bottleneck link); see ram note above.
-        memory_bandwidth_KBps: 26370000
+        memory_bandwidth_KBps: 26570000
   storage:
     - name: "ssd"
       type: "SimpleSSD"

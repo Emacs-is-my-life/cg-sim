@@ -24,7 +24,7 @@ from .utils import (
 )
 
 
-class PytorchLoader2(TraceLoader):
+class PytorchOffloadLoader(TraceLoader):
     """Trace loader for flattened PyTorch profiler runtime bundles."""
 
     @staticmethod
@@ -56,14 +56,14 @@ class PytorchLoader2(TraceLoader):
             for row in reader:
                 row_id = row[id_key]
                 if row_id in rows_by_id:
-                    raise Exception(f"[PytorchLoader2] Duplicate row id {row_id} in {csv_path}.")
+                    raise Exception(f"[PytorchOffloadLoader] Duplicate row id {row_id} in {csv_path}.")
                 rows_by_id[row_id] = row
         return rows_by_id
 
     def _handle_validation_failure(self, msg: str) -> None:
         if bool(self.args.get("strict_dot_validation", True)):
-            raise Exception(f"[PytorchLoader2] {msg}")
-        print(f"[PytorchLoader2] Warning: {msg}")
+            raise Exception(f"[PytorchOffloadLoader] {msg}")
+        print(f"[PytorchOffloadLoader] Warning: {msg}")
         return
 
     def _read_tensors(self, tensor_csv_path: Path) -> tuple[dict[int, Tensor], dict[str, int]]:
@@ -296,7 +296,7 @@ class PytorchLoader2(TraceLoader):
     def _dot_paths(self, bundle_dir: Path, manifest: dict[str, Any]) -> list[Path]:
         dot_files = manifest.get("step_dot_files") or []
         if not dot_files:
-            raise Exception("[PytorchLoader2] manifest does not define step_dot_files.")
+            raise Exception("[PytorchOffloadLoader] manifest does not define step_dot_files.")
         return [resolve_path(dot_file, bundle_dir) for dot_file in dot_files]
 
     def _read_dot_bundle(
@@ -602,6 +602,9 @@ class PytorchLoader2(TraceLoader):
         sharing their storage automatically merges into them.
         """
         remap: dict[int, int] = {}
+        # TEMP §4c diagnostic (throwaway)
+        type(self)._ALIAS_DIAG = {"biggest_size": 0, "biggest": None,
+                                  "n_over50": 0, "tids_over50": 0}
 
         def resolve(tid: int) -> int:
             seen = []
@@ -617,23 +620,34 @@ class PytorchLoader2(TraceLoader):
         birth: dict[int, float] = {}
         death: dict[int, float] = {}
 
+        prod_birth: dict[int, float] = {}   # min start_ns over PRODUCING nodes
+        first_use: dict[int, float] = {}    # min start_ns over CONSUMING nodes
         for node in node_map.values():
             s = node.args.get("start_ns")
             e = node.args.get("end_ns")
             if s is None: s = 0
             if e is None: e = s
             for tid in node.output_tensors:
-                if tid not in birth or s < birth[tid]:
-                    birth[tid] = s
+                if tid not in prod_birth or s < prod_birth[tid]:
+                    prod_birth[tid] = s
                 if tid not in death or e > death[tid]:
                     death[tid] = e
             for tid in node.input_tensors:
                 # consumed during this node — extends death
                 if tid not in death or e > death[tid]:
                     death[tid] = e
-                # if no producer ever recorded, consumer-only tensor is
-                # treated as alive from time 0
-                birth.setdefault(tid, 0)
+                if tid not in first_use or s < first_use[tid]:
+                    first_use[tid] = s
+        # birth = first production if produced, else FIRST CONSUMPTION (not 0).
+        # A producer-less tensor — its producer was a machinery / cross-device
+        # dispatcher node the offload reconstruction stripped — is born when it
+        # is first read, NOT at time 0. Defaulting such tensors to birth=0 made
+        # every sequential reincarnation of a reused storage slot appear to
+        # start at the same instant, so the lifetime-overlap clustering below
+        # collapsed thousands of 0.1 ms buffers into one union-lifetime mega-tid
+        # held resident for seconds — the dominant VRAM over-hold (SD3 peak).
+        for tid in set(prod_birth) | set(first_use):
+            birth[tid] = prod_birth[tid] if tid in prod_birth else first_use[tid]
 
         # Permanent tensors (WEIGHT/INPUT/LEAF) live for the whole run.
         for tid, tensor in tensor_map.items():
@@ -724,6 +738,23 @@ class PytorchLoader2(TraceLoader):
                 if not placed:
                     clusters.append([tid])
                     cluster_deaths.append(d)
+            # TEMP §4c diag: capture the biggest cluster's member lifetimes.
+            _diag = type(self)._ALIAS_DIAG
+            for c in clusters:
+                if len(c) >= 50:
+                    _diag["n_over50"] += 1
+                    _diag["tids_over50"] += len(c)
+                if len(c) > _diag["biggest_size"]:
+                    _diag["biggest_size"] = len(c)
+                    cs = sorted(c, key=lambda t: lifetime(t)[0])
+                    _diag["biggest"] = {
+                        "key": [key[0], key[1]],
+                        "size": len(c),
+                        "span_s": (max(lifetime(t)[1] for t in c)
+                                   - min(lifetime(t)[0] for t in c)) / 1e9,
+                        "members": [(lifetime(t)[0], lifetime(t)[1],
+                                     tensor_map[t].size_bytes) for t in cs[:30]],
+                    }
             # Within each cluster, pick an anchor and merge the rest.
             # Anchor preference: largest permanent row (its size is
             # the real parameter allocation), or largest member if no
@@ -1022,11 +1053,18 @@ class PytorchLoader2(TraceLoader):
                     table[r["op_name"]] = int(float(r["probe_effect_ns"]))
                 except (KeyError, ValueError):
                     continue
-        print(f"[PytorchLoader2] Loaded probe_effect_table.csv ({len(table)} entries) from {path}")
+        print(f"[PytorchOffloadLoader] Loaded probe_effect_table.csv ({len(table)} entries) from {path}")
         return table
 
     # ------------------------------------------------------------------ offload
-    _MEMCPY_HTOD_OP = "Memcpy HtoD (Pageable -> Device)"
+    # Matches BOTH "Memcpy HtoD (Pageable -> Device)" (accelerate) and
+    # "Memcpy HtoD (Pinned -> Device)" (diffusers, low_cpu_mem_usage=False pins
+    # the cpu masters). The prefix union is harmless for accelerate (pageable-only).
+    _MEMCPY_HTOD_PREFIX = "Memcpy HtoD"
+    # A non-master cpu tensor consumed by a gpu kernel is a by-value scalar arg
+    # (diffusion-scheduler sigmas / scales), not a device-memory operand. Anything
+    # larger is treated as a possible MISSING transfer and left in place (surfaces).
+    _SCALAR_ARG_MAX_BYTES = 4096
 
     def _reconstruct_offload(self, node_map: dict[int, Node], tensor_map: dict[int, Tensor]) -> None:
         """Reconstruct cpu_offload weights from the reincarnation soup.
@@ -1075,11 +1113,33 @@ class PytorchLoader2(TraceLoader):
         node_start = {nid: (n.args.get("start_ns") or 0) for nid, n in node_map.items()}
 
         memcpys = [n for n in node_map.values()
-                   if (n.args.get("op_name") or "") == self._MEMCPY_HTOD_OP]
+                   if (n.args.get("op_name") or "").startswith(self._MEMCPY_HTOD_PREFIX)]
         if not memcpys:
-            print("[PytorchLoader2] offload_reconstruct: no Memcpy HtoD nodes; "
+            print("[PytorchOffloadLoader] offload_reconstruct: no Memcpy HtoD nodes; "
                   "trace is not an offload bundle, skipping.")
             return
+
+        # --- variant detection: accelerate (synchronous H2D, single compute stream)
+        #     vs diffusers (async H2D on a side stream + prefetch). The decisive,
+        #     trace-grounded signal is whether the host cudaMemcpyAsync BLOCKS for the
+        #     copy: ratio = sum(host cudaMemcpyAsync dur) / sum(device Memcpy HtoD dur).
+        #       accelerate ~1.0  -> synchronous copy; the host dur IS the H2D, so
+        #                           zeroing cudaMemcpyAsync avoids a +H2D double-count (P3).
+        #       diffusers ~0.02-0.05 -> quick async submit; the device Memcpy carries
+        #                           the H2D, the host call is genuine ~5us CPU dispatch
+        #                           on the critical path -> KEEP it.
+        #     `offload_variant` arg overrides ("accelerate"/"diffusers"); default "auto".
+        dev_htod_dur = sum(n.compute_time_micros for n in memcpys)
+        host_async_dur = sum(n.compute_time_micros for n in node_map.values()
+                             if (n.args.get("op_name") or "") == "cudaMemcpyAsync")
+        ratio = (host_async_dur / dev_htod_dur) if dev_htod_dur else 1.0
+        variant = str(self.args.get("offload_variant", "auto")).lower()
+        if variant == "auto":
+            variant = "accelerate" if ratio >= 0.5 else "diffusers"
+        zero_cuda_async = (variant == "accelerate")
+        print(f"[PytorchOffloadLoader] offload_variant={variant} "
+              f"(host/device dur ratio={ratio:.3f}; "
+              f"cudaMemcpyAsync {'zeroed' if zero_cuda_async else 'kept as CPU dispatch'})")
 
         # --- 1+2. Memcpy events: cuda buffer storage -> sorted (time, master P, mc) ---
         events_by_S: dict[Any, list[tuple[int, Any, int]]] = defaultdict(list)
@@ -1206,7 +1266,7 @@ class PytorchLoader2(TraceLoader):
                         "dir": "h2d",
                     }
                 continue
-            if (n.args.get("op_name") or "") == "cudaMemcpyAsync":
+            if zero_cuda_async and (n.args.get("op_name") or "") == "cudaMemcpyAsync":
                 n.compute_time_micros = 0.0
             is_gpu = (n.args.get("runtime_role") or "") == "gpu_runtime"
             new_in: list[int] = []
@@ -1261,6 +1321,48 @@ class PytorchLoader2(TraceLoader):
                 t.args["device"] = "cuda:0"
                 cold_retargeted += 1
 
+        # --- 5c. tiny cpu scalars consumed by gpu kernels are by-VALUE kernel args,
+        # NOT device-memory operands. A gpu kernel like
+        # AUnaryFunctor<...MulFunctor<float>> CAPTURES a scalar (diffusion-scheduler
+        # sigmas / scales computed on the cpu thread by aten::sub / aten::empty).
+        # They are never streamed (no Memcpy, not a master), so cg-sim's residency
+        # gate would demand them in VRAM and DEADLOCK (a real gpu node reading a cpu
+        # tensor). Drop them from the gpu node's inputs (the cpu producer stays a
+        # control parent for ordering); they remain on cpu for any cpu consumer
+        # (several are dual-consumed, so retargeting to cuda is wrong). GUARD: a
+        # LARGE non-master cpu->gpu input would signal a MISSING transfer, so we do
+        # NOT hide it (leave it in place -> it surfaces, per the no-safety-net rule).
+        producer_of_now: dict[int, int] = {}
+        for n in node_map.values():
+            for o in n.output_tensors:
+                if o not in n.input_tensors:
+                    producer_of_now.setdefault(o, n.id)
+        scalar_args_dropped = 0
+        big_cpu_gpu_inputs: list[tuple[int, int]] = []
+        for n in node_map.values():
+            if (n.args.get("runtime_role") or "") != "gpu_runtime":
+                continue
+            kept: list[int] = []
+            for tid in n.input_tensors:
+                t = tensor_map.get(tid)
+                if (t is None or tid in master_tids
+                        or str(t.args.get("device") or "cpu").lower().startswith("cuda")):
+                    kept.append(tid)
+                    continue
+                if t.size_bytes > self._SCALAR_ARG_MAX_BYTES:
+                    big_cpu_gpu_inputs.append((tid, t.size_bytes))
+                    kept.append(tid)
+                    continue
+                pr = producer_of_now.get(tid)
+                if pr is not None and pr != n.id and pr not in n.parent_nodes:
+                    self._add_control_edge(node_map, pr, n.id)
+                scalar_args_dropped += 1
+            n.input_tensors = kept
+        if big_cpu_gpu_inputs:
+            print(f"[PytorchOffloadLoader] WARNING: {len(big_cpu_gpu_inputs)} large "
+                  f"(> {self._SCALAR_ARG_MAX_BYTES}B) non-master cpu->gpu inputs left "
+                  f"in place (possible MISSING transfer): {big_cpu_gpu_inputs[:5]}")
+
         # --- 6. evict schedule: per master, the LAST gpu use in each epoch ---
         gpu_uses_by_master: dict[Any, list[tuple[int, int]]] = defaultdict(list)
         tid_to_P = {mtid: P for P, mtid in master_tid_by_storage.items()}
@@ -1292,17 +1394,20 @@ class PytorchLoader2(TraceLoader):
 
         # --- stash the scheduler contract + stats ---
         self._offload = {
+            "variant": variant,
             "master_tids": sorted(master_tids),
             "evict_after_node": {nid: tids for nid, tids in evict_after_node.items()},
         }
         transfer_triggers = sum(1 for n in node_map.values()
                                 if "offload_transfer" in n.args)
         self._offload_stats = {
+            "variant": variant,
             "memcpys": len(memcpys),
             "transfer_triggers": transfer_triggers,
             "skipped_memcpys": skipped_mc,
             "masters": len(master_tids),
             "cold_buffers_retargeted": cold_retargeted,
+            "scalar_args_dropped": scalar_args_dropped,
             "buffer_storages": len(buffer_storages),
             "machinery_tids_removed": len(remove_tids),
             "gpu_weight_reads_redirected": sum(len(v) for v in gpu_uses_by_master.values()),
@@ -1310,7 +1415,7 @@ class PytorchLoader2(TraceLoader):
             "epochs_with_gpu_use": epochs_with_use,
             "evict_points": sum(len(v) for v in evict_after_node.values()),
         }
-        print(f"[PytorchLoader2] offload_reconstruct: {self._offload_stats}")
+        print(f"[PytorchOffloadLoader] offload_reconstruct: {self._offload_stats}")
         return
 
     def load(self) -> Trace:
@@ -1365,14 +1470,14 @@ class PytorchLoader2(TraceLoader):
             self._add_terminal_node(node_map)
             trace = Trace(self.id, self.name, self.log, node_map, tensor_map)
         else:
-            raise Exception(f"[PytorchLoader2] Unsupported graph_source: {graph_source}")
+            raise Exception(f"[PytorchOffloadLoader] Unsupported graph_source: {graph_source}")
 
         trace.args["start_gated_edges"] = list(self._start_gated_edges)
         if self._offload is not None:
             trace.args["offload"] = self._offload
 
         if self._probe_effect_ns and self._probe_clamp_count:
-            print(f"[PytorchLoader2] probe_effect clamped to 0 for "
+            print(f"[PytorchOffloadLoader] probe_effect clamped to 0 for "
                   f"{self._probe_clamp_count} node(s) (duration_ns < probe_effect_ns).")
 
         # Optional: inject a weight-streaming schedule so DAV simulates
@@ -1388,12 +1493,12 @@ class PytorchLoader2(TraceLoader):
                 )
             except ImportError as e:
                 raise Exception(
-                    "[PytorchLoader2] inject_schedule_path requires "
+                    "[PytorchOffloadLoader] inject_schedule_path requires "
                     "graph_modifiers.inject_schedule "
                     "to be importable. "
                     f"Underlying: {e}"
                 )
-            print(f"[PytorchLoader2] injecting schedule from {inject_path_resolved}",
+            print(f"[PytorchOffloadLoader] injecting schedule from {inject_path_resolved}",
                   flush=True)
             inject_schedule_into_trace(
                 trace, str(inject_path_resolved),
@@ -1415,13 +1520,13 @@ class PytorchLoader2(TraceLoader):
                 )
             except ImportError as e:
                 raise Exception(
-                    "[PytorchLoader2] inject_eager_schedule_path requires "
+                    "[PytorchOffloadLoader] inject_eager_schedule_path requires "
                     "graph_modifiers.inject_schedule.inject_eager_schedule_into_trace "
                     "to be importable. "
                     f"Underlying: {e}"
                 )
             print(
-                f"[PytorchLoader2] injecting eager schedule from "
+                f"[PytorchOffloadLoader] injecting eager schedule from "
                 f"{eager_path_resolved}", flush=True,
             )
             inject_eager_schedule_into_trace(

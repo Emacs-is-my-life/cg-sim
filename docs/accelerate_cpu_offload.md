@@ -6,7 +6,7 @@ We tried to keep the simulated trace faithful to the recorded one, but it is
 **not a byte-for-byte clone**; §4 documents every place we model something
 differently and why that is acceptable.
 
-- Loader: `sim/load/pytorch_loader2/` (`PytorchLoader2`, `_reconstruct_offload`,
+- Loader: `sim/load/pytorch_offload_loader/` (`PytorchOffloadLoader`, `_reconstruct_offload`,
   gated by the `offload_reconstruct` arg).
 - Scheduler: `sim/sched/accelerate_cpu_offload/` (`AccelerateCPUOffload`).
 - Configs: `examples/run/accelerate-cpu-offload__llama-3-{3B,8B}__accelerate.yaml`.

@@ -1,6 +1,6 @@
 """AccelerateCPUOffload — synchronous cpu_offload scheduler.
 
-A THIN, FAITHFUL executor of the plan that `PytorchLoader2` (with
+A THIN, FAITHFUL executor of the plan that `PytorchOffloadLoader` (with
 `offload_reconstruct`) emits. It does not reverse-engineer anything at runtime:
 the loader already collapsed the reincarnation soup into 255 RAM masters,
 redirected every gpu weight read to its master tid, and tagged each recorded
@@ -128,15 +128,29 @@ class AccelerateCPUOffload(BaseScheduler):
         self._pending_release: set[int] = set()        # tids whose release deferred (region busy)
         self._layout_phase: int = 0
 
+        # ---- stale-duplicate reclamation (double-claim leak) ----
+        # A tid produced twice (a dispatcher pre-claim AND a normal producer)
+        # can end up with two regions when the first is still busy (BEING_READ)
+        # at the second claim: the second write invalidate()s the first, which
+        # then leaks as an IDLE + is_latest=False region nobody releases. A
+        # stale-IDLE region is DEAD (no ComputeJob consumer can read it — the
+        # input check requires is_latest — and the only transfer source-select
+        # here requires is_latest too), so reclaiming it is correct, not just
+        # space-saving. We register a tid as a suspect at the moment a second
+        # region is claimed for it, then sweep only that small set per tick.
+        self._release_dups: bool = bool(self.args.get("release_stale_duplicates", True))
+        self._suspect_dups: set[int] = set()
+
         # diagnostics (visible via log_states / MCP)
         self._stat_transfers_fired = 0
         self._stat_masters_evicted = 0
         self._stat_intermediates_freed = 0
+        self._stat_stale_dups_freed = 0
         return
 
     # ============================================================ compile
     def compile(self, trace: Trace) -> None:
-        # The loader (PytorchLoader2 + offload_reconstruct) owns the rewrite.
+        # The loader (PytorchOffloadLoader + offload_reconstruct) owns the rewrite.
         return
 
     # ============================================================ helpers
@@ -255,6 +269,7 @@ class AccelerateCPUOffload(BaseScheduler):
                 self._consume_inputs(node)
 
         self._retry_pending_release()
+        self._release_stale_duplicates()
         self._submit_ready()
         return
 
@@ -281,6 +296,20 @@ class AccelerateCPUOffload(BaseScheduler):
             compute = self._compute_for_node(node)
             cap = getattr(compute, "max_concurrent_jobs", 1)
             if len(compute.job_running) + committed.get(compute, 0) >= cap:
+                requeue.append(nid)
+                continue
+            # Don't submit a gpu compute whose cuda inputs aren't VRAM-resident yet:
+            # job_waiting is FIFO with head-of-line blocking, so parking a not-yet-
+            # runnable node at the head would block the very TransferJob that makes it
+            # runnable -> engine "Deadlock detected". Accelerate never hits this (its
+            # gpu nodes are stream_order children of their own weight Memcpy, so they
+            # become ready only AFTER that transfer retires); diffusers streams on a
+            # SIDE stream, so a compute node can become ready before its master's
+            # cross-stream transfer completes. Defer it so the transfer runs first.
+            # Skip custom_deps nodes (alias/dispatcher) — they bypass residency by
+            # design. No-op for accelerate (its inputs are resident once ready).
+            if (compute is self.cuda_compute and not node.custom_deps
+                    and not self._inputs_resident_vram(node)):
                 requeue.append(nid)
                 continue
             if not self._ensure_outputs_claimed(node, compute):
@@ -325,6 +354,19 @@ class AccelerateCPUOffload(BaseScheduler):
         self._stat_transfers_fired += 1
         return True
 
+    def _inputs_resident_vram(self, node: Node) -> bool:
+        """True iff every input tensor of this gpu node has a ready+latest VRAM
+        region (a master after its RAM->VRAM transfer retired, or an activation
+        already produced on the gpu). Used pre-submission to avoid parking a
+        not-yet-runnable node at the FIFO head (see _submit_ready)."""
+        for tid in node.input_tensors:
+            regions = self.vram.space.get_by_tensor_id(tid)
+            if not any(r.is_ready and r.is_latest
+                       and r.access_status in (DataRegionAccess.IDLE, DataRegionAccess.BEING_READ)
+                       for r in regions):
+                return False
+        return True
+
     def _ensure_outputs_claimed(self, node: Node, compute: BaseCompute) -> bool:
         for tid in node.output_tensors:
             if tid in node.input_tensors:
@@ -332,6 +374,10 @@ class AccelerateCPUOffload(BaseScheduler):
             regions = compute.memory.space.get_by_tensor_id(tid)
             if any(r.access_status == DataRegionAccess.IDLE for r in regions):
                 continue
+            # No IDLE region but one already exists (busy) -> claiming a second
+            # region; the older copy will go stale on this write and leak. Watch it.
+            if regions and self._release_dups:
+                self._suspect_dups.add(tid)
             if self._claim(compute.memory, self.sys.trace.tensor_map[tid]) is None:
                 return False
         return True
@@ -346,14 +392,54 @@ class AccelerateCPUOffload(BaseScheduler):
             if t is None:
                 continue
             home = self._home_memory(t)
-            region = next((r for r in home.space.get_by_tensor_id(tid)
+            existing = home.space.get_by_tensor_id(tid)
+            region = next((r for r in existing
                            if r.access_status == DataRegionAccess.IDLE), None)
             if region is None:
+                if existing and self._release_dups:
+                    self._suspect_dups.add(tid)
                 region = self._claim(home, t)
                 if region is None:
                     continue
             region.is_ready = True
             region.is_latest = True
+
+    def _release_stale_duplicates(self) -> None:
+        """Reclaim double-claim leaks: for each suspect tid, on each memory that
+        holds a fresh (is_latest=True) region for it, release the dead
+        (is_latest=False) IDLE region(s). Same-memory gating keeps the fresh
+        copy and never drops a tid whose only copy here is stale (conservative:
+        if no fresh copy is present yet, leave it and revisit next tick). Skip
+        masters/initials — they are never invalidated, so never stale. A tid is
+        dropped from the watch set once it holds at most one region everywhere.
+        No-op (early return) whenever no suspect exists — so accelerate, whose
+        serial single-stream execution never claims a second region, pays only
+        one set-emptiness check per tick."""
+        if not self._suspect_dups:
+            return
+        for tid in list(self._suspect_dups):
+            if tid in self.master_tids:
+                self._suspect_dups.discard(tid)
+                continue
+            t = self.sys.trace.tensor_map.get(tid)
+            if t is None or t.args.get("tensor_type") in self._INITIAL_TYPES:
+                self._suspect_dups.discard(tid)
+                continue
+            total_regions = 0
+            for hw in (self.vram, self.ram):
+                regions = hw.space.get_by_tensor_id(tid)
+                total_regions += len(regions)
+                if len(regions) < 2:
+                    continue
+                if not any(r.is_latest for r in regions):
+                    continue  # fresh copy not here yet -> revisit next tick
+                for r in regions:
+                    if (not r.is_latest) and r.access_status == DataRegionAccess.IDLE:
+                        self.sys.release(r)
+                        self._stat_stale_dups_freed += 1
+                        total_regions -= 1
+            if total_regions <= 1:
+                self._suspect_dups.discard(tid)
 
     # ------------------------------------------------------------ eviction
     def _evict_masters(self, master_tids: list[int]) -> None:
@@ -415,8 +501,10 @@ class AccelerateCPUOffload(BaseScheduler):
             "transfers_fired": self._stat_transfers_fired,
             "masters_evicted": self._stat_masters_evicted,
             "intermediates_freed": self._stat_intermediates_freed,
+            "stale_dups_freed": self._stat_stale_dups_freed,
             "vram_used_KB": 4 * self.vram.space.num_used_pages,
             "vram_peak_KB": 4 * self.vram.space.peak_num_used_pages,
             "ready_queue": len(self.ready),
             "pending_release": len(self._pending_release),
+            "suspect_dups": len(self._suspect_dups),
         }

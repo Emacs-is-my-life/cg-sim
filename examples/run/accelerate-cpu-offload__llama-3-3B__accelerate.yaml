@@ -3,7 +3,7 @@ logger:
     result_path: "output/accelerate-cpu-offload__llama-3-3B__accelerate/sim_results/result.json"
     log_level: 1
 trace:
-  type: "PytorchLoader2"
+  type: "PytorchOffloadLoader"
   args:
     bundle_manifest: "../trace/accelerate-cpu-offload__llama-3-3B__RTX4090/llama_bundle/manifest.json"
     skip_zero_byte_tensors: true

@@ -8,7 +8,7 @@ This is a clean restart. The previous `accelerate_cpu_offload` /
 `diffusers_group_offload` schedulers (both forks of `device_aware_vanilla_async`,
 "DAV") were deleted — they reverse-engineered clean semantics *at runtime* and
 that became unwinnable whack-a-mole (§7). New plan: a dedicated loader
-(`sim/load/pytorch_loader2`, currently a verbatim copy of `pytorch_profile`) does
+(`sim/load/pytorch_offload_loader`, currently a verbatim copy of `pytorch_profile`) does
 the messy reconstruction **once with full trace context**, and a small new
 `AccelerateCPUOffload` scheduler only *executes* the clean plan.
 
@@ -128,7 +128,7 @@ nodes; shape collides up to 56-way).
 
 ## 4. The clean design (loader reconstructs, scheduler executes)
 
-**LOADER (`pytorch_loader2`, behind an `offload_reconstruct` flag — keep
+**LOADER (`pytorch_offload_loader`, behind an `offload_reconstruct` flag — keep
 vanilla/lazy/eager untouched, §P12):** after the existing parse, run the §2
 recipe: build 255 masters keyed by cpu-source storage_id; collapse
 reincarnations (incl. detach chain) → master tid; redirect consumers; **neutralize
@@ -154,7 +154,7 @@ built-in input-residency check (master in VRAM) = load-before-use. Evict per
 carry `dir:"d2h"` triggers → VRAM→RAM transfer + release). **No on-demand staging
 (§P7); no coalescing (loader owns identity).**
 
-**CONFIG:** `trace.type: PytorchLoader2`; RAM/VRAM `memory_bandwidth_KBps`
+**CONFIG:** `trace.type: PytorchOffloadLoader`; RAM/VRAM `memory_bandwidth_KBps`
 **≈ 14 GB/s** (13.95, the measured pageable rate — replaces the old 8.32 fudge);
 `scheduler.type: AccelerateCPUOffload`.
 

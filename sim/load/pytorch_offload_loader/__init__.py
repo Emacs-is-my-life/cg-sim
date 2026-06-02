@@ -1,3 +1,3 @@
-from .pytorch_loader2 import PytorchLoader2
+from .pytorch_offload_loader import PytorchOffloadLoader
 
-__all__ = ["PytorchLoader2"]
+__all__ = ["PytorchOffloadLoader"]
