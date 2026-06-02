@@ -94,13 +94,97 @@
   class WanTransformerBlock(nn.Module):
 /home/royce/anaconda3/envs/ptvenv/lib/python3.10/site-packages/diffusers/models/transformers/transformer_z_image.py:184: FutureWarning: torch._dynamo.allow_in_graph is deprecated and will be removed in a future version. Use torch._dynamo.nonstrict_trace instead.
   class ZImageTransformerBlock(nn.Module):
-Loading pipeline components...:   0%|          | 0/9 [00:00<?, ?it/s]You set `add_prefix_space`. The tokenizer needs to be converted from the slow tokenizers
-Loading pipeline components...:  11%|█         | 1/9 [00:00<00:01,  7.62it/s]
+Loading pipeline components...:   0%|          | 0/9 [00:00<?, ?it/s]Loading pipeline components...:  22%|██▏       | 2/9 [00:01<00:05,  1.24it/s]You set `add_prefix_space`. The tokenizer needs to be converted from the slow tokenizers
+Loading pipeline components...:  44%|████▍     | 4/9 [00:01<00:01,  2.68it/s]Loading pipeline components...:  67%|██████▋   | 6/9 [00:03<00:01,  1.71it/s]
 Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s][A
-Loading checkpoint shards:  50%|█████     | 1/2 [00:00<00:00,  1.67it/s][A
-Loading checkpoint shards: 100%|██████████| 2/2 [00:01<00:00,  1.49it/s][ALoading checkpoint shards: 100%|██████████| 2/2 [00:01<00:00,  1.52it/s]
-Loading pipeline components...:  44%|████▍     | 4/9 [00:01<00:02,  2.26it/s]Loading pipeline components...:  78%|███████▊  | 7/9 [00:01<00:00,  4.15it/s]Loading pipeline components...:  89%|████████▉ | 8/9 [00:02<00:00,  3.90it/s]Loading pipeline components...: 100%|██████████| 9/9 [00:03<00:00,  2.21it/s]Loading pipeline components...: 100%|██████████| 9/9 [00:03<00:00,  2.71it/s]
+Loading checkpoint shards:  50%|█████     | 1/2 [00:01<00:01,  1.56s/it][A
+Loading checkpoint shards: 100%|██████████| 2/2 [00:03<00:00,  1.59s/it][ALoading checkpoint shards: 100%|██████████| 2/2 [00:03<00:00,  1.58s/it]
+Loading pipeline components...:  78%|███████▊  | 7/9 [00:06<00:02,  1.27s/it]Loading pipeline components...: 100%|██████████| 9/9 [00:07<00:00,  1.13it/s]Loading pipeline components...: 100%|██████████| 9/9 [00:07<00:00,  1.21it/s]
 /data/pytorch-source/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
   _warn_once(
-[W601 22:57:08.859265575 execution_trace_observer.cpp:976] Enabling Execution Trace Observer
-[W601 22:57:16.394550329 execution_trace_observer.cpp:988] Disabling Execution Trace Observer
+[W602 18:00:57.665726151 execution_trace_observer.cpp:976] Enabling Execution Trace Observer
+[W602 18:01:06.421297789 execution_trace_observer.cpp:988] Disabling Execution Trace Observer
+llamasim_runtime_bundle: building pipeline module index
+llamasim_runtime_bundle: building component module index
+llamasim_runtime_bundle: writing runtime bundle
+llamasim_runtime_bundle: collecting raw Kineto events
+llamasim_runtime_bundle: loading execution trace nodes
+llamasim_runtime_bundle: matching execution trace nodes
+llamasim_runtime_bundle: parsing Chrome ac2g flows
+llamasim_runtime_bundle: selecting runtime events
+llamasim_runtime_bundle: building thread order edges
+llamasim_runtime_bundle: building stream order edges
+llamasim_runtime_bundle: building exact submit edges
+llamasim_runtime_bundle: building wrapper exact wait edges
+llamasim_runtime_bundle: building aten exact wait edges
+llamasim_runtime_bundle: building linked-family wait edges
+llamasim_runtime_bundle: building sync fallback wait edges
+llamasim_runtime_bundle: collecting tensor IO
+llamasim_runtime_bundle: writing DOT graph
+llamasim_runtime_bundle: loading Python module intervals
+llamasim_runtime_bundle: writing runtime_nodes.csv
+llamasim_runtime_bundle: writing runtime_edges.csv
+llamasim_runtime_bundle: writing pytorch_runtime_tensors.csv
+llamasim_runtime_bundle: writing manifest.json
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg       CPU Mem  Self CPU Mem      CUDA Mem  Self CUDA Mem    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                    sd3_cpu_offload_run        26.65%        2.333s       100.00%        8.755s        8.755s       0.000us         0.00%        5.764s        5.764s           0 B     -13.42 KB     128.00 KB    -323.52 GB             1  
+                                  cudaStreamSynchronize        23.87%        2.090s        23.87%        2.090s      90.857us     103.645ms         1.83%     103.645ms       4.506us           0 B           0 B           0 B           0 B         22999  
+                                         aten::_to_copy         4.49%     393.279ms        12.68%        1.110s      43.879us       0.000us         0.00%        4.591s     181.401us          80 B           0 B     146.00 GB           0 B         25306  
+                                               aten::to         4.01%     350.769ms        16.69%        1.461s      36.245us       0.000us         0.00%        4.591s     113.870us          80 B           0 B     146.00 GB           0 B         40314  
+                                            aten::copy_         3.66%     320.443ms         5.62%     491.777ms      17.617us        4.639s        81.97%        4.639s     166.175us           0 B         -80 B           0 B           0 B         27915  
+                                    aten::empty_strided         3.22%     282.288ms         3.22%     282.288ms      10.837us       0.000us         0.00%       0.000us       0.000us          80 B          80 B     151.26 GB     151.26 GB         26048  
+                                       cudaLaunchKernel         2.76%     241.350ms         2.76%     241.350ms       5.056us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B         47732  
+                                            aten::addmm         2.69%     235.136ms         3.55%     310.570ms      41.811us     567.943ms        10.04%     568.007ms      76.468us           0 B           0 B      35.93 GB      35.93 GB          7428  
+                                       aten::as_strided         2.54%     222.439ms         2.54%     222.439ms       6.962us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B         31951  
+                aten::_has_compatible_shallow_copy_type         2.27%     198.491ms         2.27%     198.491ms       4.950us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B         40100  
+                                        aten::transpose         1.99%     174.239ms         3.31%     289.789ms      17.013us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B         17033  
+                                        aten::is_pinned         1.92%     167.920ms         2.12%     185.430ms       9.248us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B         20050  
+                                           aten::linear         1.73%     151.431ms        10.80%     945.677ms     108.599us       0.000us         0.00%     657.273ms      75.479us           0 B           0 B      40.56 GB       6.00 MB          8708  
+                                              aten::mul         1.66%     145.749ms         2.12%     185.390ms      18.935us      69.132ms         1.22%      69.132ms       7.061us           0 B           0 B      51.24 GB      51.24 GB          9791  
+                                             aten::view         1.61%     141.123ms         1.61%     141.123ms       6.424us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B         21968  
+                                              aten::add         1.42%     123.928ms         1.88%     164.957ms      17.342us      76.984ms         1.36%      76.984ms       8.093us         208 B         208 B      19.13 GB      19.13 GB          9512  
+                                            aten::empty         1.34%     117.125ms         1.34%     117.125ms       9.499us       0.000us         0.00%       0.000us       0.000us      14.80 KB      14.80 KB      21.09 GB      21.09 GB         12330  
+                                        cudaMemcpyAsync         1.20%     105.021ms         1.20%     105.021ms       5.233us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B         20069  
+                                                aten::t         0.93%      81.552ms         2.63%     230.220ms      26.435us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          8709  
+                                            aten::slice         0.91%      79.245ms         1.50%     131.250ms      16.892us       0.000us         0.00%       0.000us       0.000us           0 B           0 B           0 B           0 B          7770  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 8.755s
+Self CUDA time total: 5.659s
+
+model: /data/llamasim/models/sd-3.5-med
+requested_device: cuda:0
+offload_mode: group
+fusion: none
+accelerate_version: not_used
+dtype: bfloat16
+seed: 0
+steps: 20
+guidance_scale: 4.5
+height: 512
+width: 512
+max_sequence_length: 256
+profile_memory: True
+record_shapes: True
+with_stack: True
+with_modules: True
+warmup_runs: 20
+trace_path: /data/pytorch-source/exp_results/0521_sweep/sd3_offload_group_leaf_level_nonblocking/sd3_offload_group_leaf_level_nonblocking_gpu_trace.json
+trace_csv_path: /data/pytorch-source/exp_results/0521_sweep/sd3_offload_group_leaf_level_nonblocking/sd3_offload_group_leaf_level_nonblocking_gpu_trace.csv
+execution_trace_path: /data/pytorch-source/exp_results/0521_sweep/sd3_offload_group_leaf_level_nonblocking/sd3_offload_group_leaf_level_nonblocking_gpu_execution_trace.json
+llamasim_output_dir: /data/pytorch-source/exp_results/0521_sweep/sd3_offload_group_leaf_level_nonblocking/llama_bundle
+llamasim_runtime_summary:
+  nodes: total=378921 gpu=75061 cpu=303860
+  submit_edges: exact=75061/75061 (100.00%) heuristic=0 provenance=ac2g_endpoint_exact
+  ac2g: paired=75061 matched=75061 errors=0
+  wait_edges: exact=9/111701 (0.01%) heuristic=111692
+  ws_sync: markers=0 leaves=0
+  wait_sources: aten_parent_scope_exact=9, kineto_sync_frontier=111692
+  excluded_wait_sources: profiler_sync_excluded=1
+  wait_kinds: device_sync=5, stream_sync=111696
+  wait_exact_note: wrapper emitted no ws_sync evidence; exact waits came from non-wrapper provenance
+  cpu_match_ambiguous: total=0 multiple_execution_nodes=0 no_runtime_candidate=0 multiple_runtime_candidates=0
+image_path: /data/pytorch-source/exp_results/0521_sweep/sd3_offload_group_leaf_level_nonblocking/sd3_offload_group_leaf_level_nonblocking_gpu_output.png
+latent_shape: (1, 16, 64, 64)
+profile_scope: steady_state_inference_only (load, checkpoint reads, and warmup are outside the trace)

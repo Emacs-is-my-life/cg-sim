@@ -51,3 +51,5 @@ examples/trace/diffusers-group-offload__sdxl-turbo__RTX4090/sdxl_offload_group_l
 examples/trace/diffusers-group-offload__sd3__RTX4090/sd3_offload_group_leaf_level_nonblocking_gpu_trace.json filter=lfs diff=lfs merge=lfs -text
 examples/trace/diffusers-group-offload__sd3__RTX4090/sd3_offload_group_leaf_level_nonblocking_gpu_execution_trace.json filter=lfs diff=lfs merge=lfs -text
 examples/trace/diffusers-group-offload__sd3__RTX4090/sd3_offload_group_leaf_level_nonblocking_gpu_trace.csv filter=lfs diff=lfs merge=lfs -text
+examples/trace/diffusers-group-offload__sd3__RTX4090/llama_bundle/step_0_compute_graph.dot filter=lfs diff=lfs merge=lfs -text
+examples/trace/diffusers-group-offload__sd3__RTX4090/llama_bundle/runtime_nodes.csv filter=lfs diff=lfs merge=lfs -text
