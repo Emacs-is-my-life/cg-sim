@@ -122,6 +122,28 @@ def main() -> None:
             "budgets. Only enable for A/B comparison."
         ),
     )
+    p.add_argument(
+        "--relax-cinfeasible",
+        action="store_true",
+        help=(
+            "Let the LP stream c-infeasible tids (default off) instead of "
+            "pinning them resident, trading a startup stall for VRAM. Makes "
+            "tight budgets feasible where they'd otherwise be infeasible "
+            "(e.g. llama8b@6gib). Opt-in: changes the feasible set."
+        ),
+    )
+    p.add_argument(
+        "--no-intermediate-axis-fix",
+        dest="intermediate_axis_fix",
+        action="store_false",
+        help=(
+            "ABLATION: disable the intermediate-residency axis-mix fix "
+            "(default on). The fix uses sim-time-only endpoints; disabling "
+            "reverts to the buggy sim/trace axis mix that inflated the "
+            "modeled activation floor ~10x on diffusion."
+        ),
+    )
+    p.set_defaults(intermediate_axis_fix=True)
     p.add_argument("--audit", action="store_true")
     args = p.parse_args()
     if args.cores < 1:
@@ -155,6 +177,8 @@ def main() -> None:
         ),
         arc_queue_factor=float(args.arc_queue_factor),
         lateness_peak_coupling=bool(args.lateness_peak_coupling),
+        relax_cinfeasible=bool(args.relax_cinfeasible),
+        intermediate_axis_fix=bool(args.intermediate_axis_fix),
         audit=bool(args.audit),
         sidecars=sidecars,
     )

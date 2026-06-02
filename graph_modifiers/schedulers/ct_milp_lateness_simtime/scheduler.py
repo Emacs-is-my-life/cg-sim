@@ -393,6 +393,7 @@ def _build_pool(
 def _build_intermediate_residencies(
     trace: Trace,
     sim_times: dict[int, tuple[int, int]] | None = None,
+    axis_fix: bool = True,
 ) -> list[tuple[int, int, int]]:
     """List of (start_ns, end_ns, size_bytes) for cuda INTERMEDIATEs.
 
@@ -406,6 +407,19 @@ def _build_intermediate_residencies(
     OOMs when intermediate working set materialises (esp. SDXL kv
     cache and similar large transients).
     """
+    # AXIS-MIX BUG FIX (``axis_fix``, default on; set False only for the
+    # ablation that shows the bug's cost). When sim_times is given, the old
+    # code fell back to a node's *trace* ns whenever it lacked a sim_time.
+    # But sim-axis and trace-axis are offset per-node (same node can be
+    # 67ms in sim, 469ms in trace), so a sim-time producer paired with a
+    # trace-fallback consumer (e.g. a cpu_thread consumer with no sim_time)
+    # yields a ~400ms PHANTOM residency window. ~160/219 sdxl intermediates
+    # were inflated this way, blowing the modeled activation floor to
+    # 1941MB vs ~192MB actual. Fix: when sim_times is active, use sim-time
+    # endpoints ONLY — skip nodes with no sim_time rather than mixing axes.
+    # (Recovers ~200MB, ≈ the sim truth; small residual covered by margin.)
+    _fix_axis = (sim_times is not None) and axis_fix
+
     def _t(nid: int, fallback: int) -> int:
         if sim_times is None:
             return fallback
@@ -424,6 +438,12 @@ def _build_intermediate_residencies(
         start_ns = int((node.args or {}).get("start_ns") or 0)
         end_ns = int((node.args or {}).get("end_ns") or start_ns)
         if start_ns <= 0:
+            continue
+        # Under the axis-fix, a node with no sim_time can't contribute a
+        # sim-axis endpoint — skip it (no trace-ns fallback that would mix
+        # axes). The producer pass also skips, so a tid produced only by
+        # no-sim-time nodes is dropped (its residency is unmodelable here).
+        if _fix_axis and sim_times.get(int(nid)) is None:
             continue
         for tid in (node.output_tensors or []):
             t = int(tid)
@@ -1086,6 +1106,8 @@ def _solve_milp(
     lp_relaxation: bool,
     arc_queue_factor: float = 1.0,
     lateness_peak_coupling: bool = False,
+    relax_cinfeasible: bool = False,
+    intermediate_axis_fix: bool = True,
     audit: bool,
     phase1_time_limit_s: float | None = None,
 ) -> _LPResult:
@@ -1103,6 +1125,15 @@ def _solve_milp(
     if audit:
         print(f"[ct_milp_lateness:audit] solver_threads={solver_threads}")
 
+    # ``relax_cinfeasible`` (param, default off): let the LP stream
+    # c-infeasible tids instead of pinning them resident, trading a startup
+    # stall (priced by the lateness rows) for VRAM at tight caps. When on,
+    # this also keeps the would-be `forced_cold` tids in the LP as
+    # streamable vars (c∈{0,1}, no e-vars since they have no feasible gap):
+    # streaming them frees VRAM OUTSIDE their consumer span (a big win for
+    # short-span tids like embedding/lm_head). See the bounds section.
+    _relax_cinfeasible = relax_cinfeasible
+
     # ---- 1. Feasibility filter ----
     feasible_tids: list[int] = []
     forced_cold: set[int] = set()
@@ -1111,8 +1142,9 @@ def _solve_milp(
         # early) AND no cross-iter gap admits a refetch either: the LP
         # has no choice but to keep the tid resident from layout.
         if not pt.c_feasibility and not any(pt.gap_feasibility):
-            forced_cold.add(tid)
-            continue
+            if not _relax_cinfeasible:
+                forced_cold.add(tid)
+                continue
         feasible_tids.append(tid)
 
     nv = len(feasible_tids)
@@ -1160,10 +1192,14 @@ def _solve_milp(
     total_vars = col
 
     # ---- 3. Variable bounds + integrality ----
+    # c-infeasible tids: pinned c=1 by default, or streamable (0,1) when
+    # `relax_cinfeasible` is set (read above at the feasibility filter).
+    # forced_cold tids, when relaxed, are also in feasible_tids here and
+    # get (0,1) via the same `not c_feasibility` branch.
     bounds_list: list[tuple[float, float | None]] = []
     for tid in feasible_tids:
         pt = pool[tid]
-        if not pt.c_feasibility:
+        if not pt.c_feasibility and not _relax_cinfeasible:
             # No GPU node fires early enough that a runtime prefetch
             # could deliver this tid in time. Pin c=1 → load at layout
             # phase, before runtime PCIe contention starts. The c+e<=1
@@ -1460,7 +1496,9 @@ def _solve_milp(
     constant_floor = (float(forced_cold_bytes) + float(extra_static_bytes)) / MODEL_SCALE
 
     # Intermediates: fixed (non-variable) VRAM residency per sample.
-    _intermediates = _build_intermediate_residencies(trace, sim_times)
+    _intermediates = _build_intermediate_residencies(
+        trace, sim_times, axis_fix=intermediate_axis_fix,
+    )
     if audit and _intermediates:
         sizes_alive = []
         for _, t_l in samples:
@@ -2505,6 +2543,8 @@ def solve_neutral(
     backpressure_lateness_threshold_ns: int = 100_000,  # 100 us
     arc_queue_factor: float = 1.0,
     lateness_peak_coupling: bool = False,
+    relax_cinfeasible: bool = False,
+    intermediate_axis_fix: bool = True,
     audit: bool = False,
     sidecars: Any = None,                 # accepted but ignored
     **_legacy_kwargs: Any,
@@ -2528,6 +2568,20 @@ def solve_neutral(
                                 detected CPU cores.
       ``lp_relaxation``       — Skip integrality, solve continuous LP
                                 (debug aid).
+      ``relax_cinfeasible``   — Let the LP stream c-infeasible tids
+                                (default False) instead of pinning them
+                                resident, trading a startup stall for VRAM.
+                                Makes tight budgets feasible where they'd
+                                otherwise be target_infeasible (e.g.
+                                llama8b@6gib). Opt-in: changes the feasible
+                                set / decisions.
+      ``intermediate_axis_fix`` — Use sim-time-only endpoints for
+                                intermediate (activation) residency windows
+                                instead of mixing sim/trace axes (default
+                                True). The old mix inflated the modeled
+                                activation floor ~10x on diffusion (sdxl
+                                1941MB vs ~192MB actual). Set False only for
+                                the ablation that shows the bug's cost.
       ``lateness_peak_coupling`` — Re-enable the lateness→peak coupling
                                 term (default False). Mis-calibrated: it
                                 adds bw·window_lateness to each peak row,
@@ -2643,6 +2697,8 @@ def solve_neutral(
         lp_relaxation=lp_relaxation,
         arc_queue_factor=arc_queue_factor,
         lateness_peak_coupling=lateness_peak_coupling,
+        relax_cinfeasible=relax_cinfeasible,
+        intermediate_axis_fix=intermediate_axis_fix,
         audit=audit,
     )
 

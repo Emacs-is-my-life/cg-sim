@@ -391,6 +391,71 @@ MCP oracle — true sim peak / makespan read off the live engine):
 arg to `solve_neutral`, the `--lateness-peak-coupling` CLI flag, or
 `MILP_ENABLE_LP_COUPLING=1`. `--audit` prints `coupling: ON` / `OFF (default)`.
 
+## Tight-budget knobs (feasibility at low VRAM)
+
+Three changes let the scheduler run at the tight budgets where it used to
+return `target_infeasible` or hit a spurious sim OOM. Two are on by default
+(a bugfix and a realism choice); one is opt-in.
+
+### `intermediate_axis_fix` (param, **default True** — bugfix)
+
+The activation-residency floor (`_build_intermediate_residencies`) was
+over-counted ~10× on diffusion: modeled max **1941 MB** on sdxl vs **~192 MB**
+actually resident in sim. Cause: when `baseline_sim_result` supplies sim-times,
+the old code fell back to a node's **trace** ns whenever it lacked a sim-time.
+Sim-axis and trace-axis are offset per node (one node: sim 67 ms, trace 469 ms),
+so a sim-time producer paired with a trace-fallback consumer (e.g. a cpu_thread
+consumer with no sim-time) produced a ~400 ms **phantom** residency window;
+~160/219 sdxl intermediates were inflated this way. That phantom floor blocked
+diffusion from targeting below ~4 GiB. The fix uses **sim-time endpoints only**
+(skip no-sim-time nodes; no axis mixing), recovering ~200 MB ≈ the sim truth.
+Set `--no-intermediate-axis-fix` for the ablation that exhibits the bug.
+
+LLMs are unaffected (their intermediate residency ≈ 0). Effect on diffusion at
+a binding budget: **sdxl@4gib 0.63 s → 0.45 s** (the LP keeps ~2× more weight
+resident once the fake floor is gone); and sdxl now runs at **1.6 GiB / 0.82 s**
+and sd3 at **6.5 GiB / 1.68 s**, vs sliding_window's 1.15 GiB/1.61 s and
+6.35 GiB/7.98 s — i.e. far faster at comparable budgets.
+
+Caveat: the fix lands *≈* actual, not provably above (sd3: 167.8 modeled vs
+192 actual). The residual is covered by `safety_margin_frac`, which is therefore
+load-bearing at the floor — push targeting very tight only with margin in mind.
+
+### `relax_cinfeasible` (param, **default False** — opt-in)
+
+A *c-infeasible* tid (load time > time before its first consumer ⇒ no async
+prefetch possible) is pinned `c=1` (resident), and a tid that is also gap-less
+goes to `forced_cold` (removed from the LP). When the sum of these pins exceeds
+the cap, the LP is `target_infeasible` even though sliding_window runs (e.g.
+llama8b@6gib: 5.05 GB pinned vs 5.8 GB cap). With `--relax-cinfeasible` these
+tids become streamable LP vars (`c∈{0,1}`, plus the gap-less `forced_cold` set):
+the LP may stream them, eating a startup stall (priced by the window-0 lateness
+row) to free VRAM. The emit issues a sync prefetch; the injector's
+`sync_fallback` path keeps it in RAM and stalls the consumer (it does **not**
+demote to resident — confirmed: `demoted=0, sync_fallback=28 (2952 MB)` on
+llama8b@6gib). Result: llama8b@6gib goes from infeasible → runs (8.19 s), and
+loose budgets don't regress (12gib 3.44 s). Opt-in because it changes the
+feasible set / decisions; validated on llama so far.
+
+Note: for continuously-reused weights (LLM decoder weights used every token)
+the residency floor is the working set, not the pins, so relaxing helps tids
+with **short** consumer spans (embedding/lm_head) more than reused weights.
+
+### `alloc_policy` (sim scheduler arg on DeviceAwareVanillaAsync — **default `first_fit`**)
+
+Not a scheduler param — a **sim allocator** choice (`scheduler.args.alloc_policy:
+first_fit | best_fit`). First-fit-from-page-0 drifts allocations low and shreds
+free space under heavy evict/refetch churn, so a tightly-packed plan can fail to
+find a *contiguous* slot even with ample total free (llama3b@4gib: 366 MiB free,
+largest gap 43.9 MiB, a 48 MiB weight aborts). `best_fit` reuses an evicted
+same-size weight's slot for the next same-size load — the anti-fragmentation the
+real CUDA caching allocator gets from size-segregated free lists. Placement is
+invariant for peak (byte-sum) and makespan (address-independent), so this only
+changes **which runs can place**, never the resulting numbers (verified: sd3-med
+@8gib byte-identical under both). Recommended `best_fit`; left default
+`first_fit` pending a project-level call since it re-baselines every scheduler's
+feasibility frontier in the comparison.
+
 ## Overrun repair
 
 When the solved plan's true peak (recomputed over the sample grid with
