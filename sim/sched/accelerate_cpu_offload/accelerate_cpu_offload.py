@@ -160,8 +160,14 @@ class AccelerateCPUOffload(BaseScheduler):
         # consumers bypass residency — and the real allocator frees such buffers
         # at once). Periodic (not per-tick) keeps the full-region scan cheap;
         # between sweeps only ~1 MiB of dead accrues, so the peak stays accurate.
+        # Default OFF for accelerate: its dead-intermediate count is tiny and the
+        # real allocator HOLDS those buffers at its peak (the manifest peak
+        # includes them), so sweeping them makes accelerate LESS accurate vs the
+        # target (768.55→763.3, i.e. −0.55%→−1.23% vs the real 772.8). The
+        # phenomenon is diffusers/MMDiT-specific (thousands of orphan activations
+        # the real run frees promptly), so `DiffusersGroupOffload` turns it on.
         self._gc_tick: int = 0
-        self._gc_period: int = int(self.args.get("dead_gc_period", 32))
+        self._gc_period: int = int(self.args.get("dead_gc_period", 0))
         self._stat_dead_freed: int = 0
         return
 

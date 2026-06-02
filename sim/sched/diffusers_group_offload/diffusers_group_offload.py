@@ -65,6 +65,18 @@ class DiffusersGroupOffload(AccelerateCPUOffload):
     ones (cross-device values a later node reads, which refcount-free normally).
     """
 
+    def __init__(self, obj_id, name, log, sys, args=None):
+        super().__init__(obj_id, name, log, sys, args)
+        # Enable the dead-intermediate GC (OFF in the accelerate base). Diffusers /
+        # MMDiT traces produce thousands of orphan or short-lived cuda activations
+        # whose region is never freed by the consumer-triggered refcount (rem==0
+        # from the start, or region finalized after rem already hit 0). The real
+        # allocator frees them promptly (it's why the kineto peak is far below the
+        # sim's last-consumer residency), so a periodic sweep is correct HERE —
+        # unlike accelerate, where the real run holds its few such buffers at peak.
+        self._gc_period = int(self.args.get("dead_gc_period", 32))
+        return
+
     def _preclaim_dispatcher_outputs(self, node: Node) -> None:
         tm = self.sys.trace.tensor_map
         for tid in node.args.get("dispatcher_outputs") or []:

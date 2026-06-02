@@ -1343,17 +1343,29 @@ class PytorchOffloadLoader(TraceLoader):
                   f"(> {self._SCALAR_ARG_MAX_BYTES}B) non-master cpu->gpu inputs left "
                   f"in place (possible MISSING transfer): {big_cpu_gpu_inputs[:5]}")
 
-        # --- 6. evict schedule: per master, the LAST gpu use in each epoch ---
+        # --- 6. evict schedule: per master, the LAST use in each epoch ---
+        # Prefer gpu_runtime consumers (the actual kernels). A master with NO
+        # gpu_runtime consumer — e.g. a large buffer read only via cpu-side
+        # launchers (SD3's 432 MiB [1,147456,1536] master, consumed by 20
+        # cpu_leaf nodes) — would otherwise get ZERO eviction points and stay
+        # resident for the WHOLE run, sitting underneath every other master's
+        # residency window and inflating the VRAM peak. Fall back to its
+        # non-gpu_runtime consumers so it is freed per-epoch like the rest.
+        # Masters that DO have gpu_runtime consumers are unaffected (their last
+        # use is the gpu kernel, after any cpu launcher) → accelerate stays
+        # byte-identical. The re-stream transfers already fire per epoch, so
+        # this changes residency, not H2D volume.
         gpu_uses_by_master: dict[Any, list[tuple[int, int]]] = defaultdict(list)
+        other_uses_by_master: dict[Any, list[tuple[int, int]]] = defaultdict(list)
         tid_to_P = {mtid: P for P, mtid in master_tid_by_storage.items()}
         for n in node_map.values():
-            if (n.args.get("runtime_role") or "") != "gpu_runtime":
-                continue
             s = node_start[n.id]
+            is_gpu = (n.args.get("runtime_role") or "") == "gpu_runtime"
             for tid in n.input_tensors:
                 P = tid_to_P.get(tid)
-                if P is not None:
-                    gpu_uses_by_master[P].append((s, n.id))
+                if P is None:
+                    continue
+                (gpu_uses_by_master if is_gpu else other_uses_by_master)[P].append((s, n.id))
 
         evict_after_node: dict[int, list[int]] = defaultdict(list)
         epochs_with_use = 0
@@ -1361,8 +1373,10 @@ class PytorchOffloadLoader(TraceLoader):
         for P, mtid in master_tid_by_storage.items():
             loads = sorted(loads_by_master[P])
             epochs_total += len(loads)
+            # gpu_runtime uses if the master has any; else its cpu-side uses.
+            uses = gpu_uses_by_master.get(P) or other_uses_by_master.get(P, [])
             last_use: dict[int, tuple[int, int]] = {}   # epoch idx -> (start, node)
-            for (us, nid) in gpu_uses_by_master.get(P, []):
+            for (us, nid) in uses:
                 ei = bisect_right(loads, us) - 1
                 if ei < 0:
                     ei = 0

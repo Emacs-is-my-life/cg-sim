@@ -290,9 +290,7 @@ When a PyTorch trace is recorded with kineto attached, every
 plus workload-context effects (cache pollution, allocator pressure,
 profiler buffer contention). Replaying such a trace inflates cg-sim
 e2e wall time, most severely in eager mode where most cpu_leafs sit
-on the simulator's critical path. The full thesis and evidence are in
-`docs/eager-lazy-probing-effect.md` and
-`docs/sim_real-run_comparison.md`.
+on the simulator's critical path.
 
 Two scripts under `scripts/tool/` produce the calibration data the
 loader uses to compensate:
@@ -356,6 +354,8 @@ Implement your own hardware model in `sim/hw/<hardware-type>/<hardware-name>/`.
   - `sim/sched/llamacpp_vanilla/` (`LlamaCppVanilla`): No-offload policy for llama.cpp traces — keeps all tensors in memory, aborts if it doesn't fit.
   - `sim/sched/llamacpp_flexinfer/` (`LlamaCppFlexInfer`): Implements the FlexInfer (https://dl.acm.org/doi/10.1145/3721146.3721961) memory-saving policy for llama.cpp traces.
   - `sim/sched/device_aware_vanilla_async/` (`DeviceAwareVanillaAsync`): Vanilla scheduler for PyTorch-profile traces — routes each Node to the compute device its kineto record came from (`node.hw`), with async H2D transfer streams.
+  - `sim/sched/accelerate_cpu_offload/` (`AccelerateCPUOffload`): HuggingFace `accelerate` cpu_offload — one RAM master per weight, re-streamed (RAM→VRAM `TransferJob`) per forward and freed after use; activations refcount-freed. Consumes `PytorchOffloadLoader` (`offload_reconstruct`). See `docs/accelerate_cpu_offload.md`.
+  - `sim/sched/diffusers_group_offload/` (`DiffusersGroupOffload`): Diffusers `group_offload` (leaf-level, `use_stream`) — thin subclass of `AccelerateCPUOffload`; the H2D∥compute prefetch overlap falls out of the side-stream `stream_order` in the trace. See `docs/diffusers_group_offload.md`.
   - `sim/sched/generic_stub/` (`Stub`): No-op scheduler — spins up a simulation for inspection at the compile/layout breakpoints but aborts at runtime. Useful when the intended scheduler for a config is not yet implemented on this branch.
   - And more to come...
 

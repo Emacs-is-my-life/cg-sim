@@ -10,7 +10,8 @@ differently and why that is acceptable.
   gated by the `offload_reconstruct` arg).
 - Scheduler: `sim/sched/accelerate_cpu_offload/` (`AccelerateCPUOffload`).
 - Configs: `examples/run/accelerate-cpu-offload__llama-3-{3B,8B}__accelerate.yaml`.
-- Problem analysis + evidence: `docs/known_problems.md` (P1–P14).
+- Companion: `docs/diffusers_group_offload.md` (the diffusers `group_offload`
+  variant — same loader/executor, plus the shared VRAM-fidelity fixes).
 
 ---
 
@@ -195,19 +196,24 @@ what the real run does, what cg-sim does instead, and why it is acceptable.
 
 Target: **noprofile `inference_seconds`** (true hardware), bounds **±20 % e2e**;
 and `manifest.vram_peak_allocated_bytes`, bounds **±10 % VRAM**. (We target
-noprofile, not the probe-inflated profiled span — see `docs/known_problems.md`
-P10.) Both configs pass on both metrics:
+noprofile, not the probe-inflated profiled span.) Both configs pass on both metrics:
 
 | Workload   | e2e sim | noprofile | Δ e2e | VRAM sim | manifest peak | Δ VRAM | H2D volume |
 |------------|--------:|----------:|------:|---------:|--------------:|-------:|-----------:|
 | llama-3-3B | 8.649 s | 9.098 s   | −4.9 % ✅ | 768.55 MiB | 772.8 MiB | −0.55 % ✅ | 108.20 GB (3826 xfers) exact |
 | llama-3-8B | 18.345 s| 19.592 s  | −6.4 % ✅ | 1023.9 MiB | 1024.0 MiB | −0.01 % ✅ | 240.91 GB (4366 xfers) exact |
 
-> **VRAM updated 2026-06-02 (diffusers §4c birth-fix).** Was 777.5 (+0.6%) / 1029.95 (+0.6%). The
-> shared offload-loader fix (producer-less tensors born at first-use, not time 0; corrects an
-> over-merge of sequential storage-slot reincarnations) also removed a *minor* over-merge in the
-> accelerate traces, making both sizes MORE accurate vs the manifest peak (3B −0.55%, 8B −0.01%).
-> e2e and H2D volume unchanged & exact. These are the new locked regression baselines.
+> **VRAM updated 2026-06-02 (shared fixes from the diffusers `group_offload` work).** Was
+> 777.5 (+0.6%) / 1029.95 (+0.6%). The shared loader birth-fix (producer-less tensors born at
+> first-use, not time 0 — corrects an over-merge of sequential storage-slot reincarnations) removed
+> a *minor* over-merge in the accelerate traces too, making both sizes MORE accurate vs the manifest
+> peak (3B −0.55%, 8B −0.01%). e2e and H2D volume unchanged & exact. These are the new locked
+> regression baselines. The other two diffusers fixes are **inert for accelerate, by design:** the
+> master evict-fix (cpu-consumed masters) is a no-op (accelerate's masters all have `gpu_runtime`
+> consumers, so the cpu-side fallback never triggers — evict points 3826/4366 exact), and the
+> dead-intermediate GC is **gated off** for accelerate (the real allocator holds its few dead
+> buffers at the peak, so sweeping them would make accelerate *less* accurate — it is enabled only
+> for the diffusion-transformer traces). See `docs/diffusers_group_offload.md` §5 for all three.
 
 - **VRAM peak (+0.6 %)** confirms the residency model: the working set is one
   weight (the embedding dominates) + a small activation set, exactly as the real
@@ -221,8 +227,8 @@ P10.) Both configs pass on both metrics:
 
 Validated end-to-end through the cg-sim-mcp debugger; four modelling bugs were
 found and fixed during bring-up (cold scalars, an embedding-buffer leak, an
-orphan-view leak, and the no-parent alias of §4.8) — see
-`docs/known_problems.md` and the project memory for the debugging trail.
+orphan-view leak, and the no-parent alias of §4.8) — see the project memory for
+the debugging trail.
 
 ---
 
