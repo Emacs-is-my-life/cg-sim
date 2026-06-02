@@ -3,13 +3,14 @@ logger:
     result_path: "output/accelerate-cpu-offload__llama-3-8B__accelerate/sim_results/result.json"
     log_level: 1
 trace:
-  type: "PytorchProfile"
+  type: "PytorchLoader2"
   args:
     bundle_manifest: "../trace/accelerate-cpu-offload__llama-3-8B__RTX4090/llama_bundle/manifest.json"
     skip_zero_byte_tensors: true
     zero_wait_nodes: true
     add_temporal_data_control_edges: true
     cpu_node_probe_effect_compensate: true
+    offload_reconstruct: true
 hardware:
   compute:
     - name: "cpu"
@@ -29,13 +30,21 @@ hardware:
       args:
         custom_dep_tag: "TARGET_RAM"
         memory_size_KB: 33554432
-        memory_bandwidth_KBps: 25000000
+        # MEASURED pageable H2D rate from THIS trace: 240.91 GB over 4366 Memcpy
+        # HtoD events took 16.19 s => 14.88 GB/s. Higher than 3B's 13.95 GB/s on
+        # the same RTX4090 because 8B's larger weights are bigger per-transfer and
+        # run closer to the PCIe ceiling (cg-sim models one linear rate per memory,
+        # so each trace's effective aggregate is measured). NOT the old 25 GB/s
+        # pinned guess. See docs/known_problems.md P4.
+        memory_bandwidth_KBps: 14878000
     - name: "vram0"
       type: "SimpleVRAM"
       args:
         custom_dep_tag: "TARGET_VRAM"
         memory_size_KB: 24624320
-        memory_bandwidth_KBps: 25000000
+        # Same 14.88 GB/s effective H2D rate as ram (RAM->VRAM water-fills the
+        # bottleneck link); see ram note above.
+        memory_bandwidth_KBps: 14878000
   storage:
     - name: "ssd"
       type: "SimpleSSD"

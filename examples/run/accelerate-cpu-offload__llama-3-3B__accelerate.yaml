@@ -3,13 +3,14 @@ logger:
     result_path: "output/accelerate-cpu-offload__llama-3-3B__accelerate/sim_results/result.json"
     log_level: 1
 trace:
-  type: "PytorchProfile"
+  type: "PytorchLoader2"
   args:
     bundle_manifest: "../trace/accelerate-cpu-offload__llama-3-3B__RTX4090/llama_bundle/manifest.json"
     skip_zero_byte_tensors: true
     zero_wait_nodes: true
     add_temporal_data_control_edges: true
     cpu_node_probe_effect_compensate: true
+    offload_reconstruct: true
 hardware:
   compute:
     - name: "cpu"
@@ -29,13 +30,23 @@ hardware:
       args:
         custom_dep_tag: "TARGET_RAM"
         memory_size_KB: 33554432
-        memory_bandwidth_KBps: 25000000
+        # MEASURED pageable H2D rate from the trace: 108.20 GB of weight
+        # streaming over 3826 Memcpy HtoD events took 7.759 s => 13.95 GB/s
+        # aggregate (per-transfer median 14.3 GB/s; pageable, ~2x slower than
+        # pinned ~25 GB/s). The loader neutralises the recorded Memcpy nodes and
+        # the scheduler re-models H2D as RAM->VRAM TransferJobs; this is the
+        # bandwidth they water-fill against (wall = bytes / rate), NOT the
+        # recorded duration replayed. (Replaces the earlier 8.32 GB/s value,
+        # which was an under-volume fudge -- see docs/known_problems.md P4.)
+        memory_bandwidth_KBps: 13946000
     - name: "vram0"
       type: "SimpleVRAM"
       args:
         custom_dep_tag: "TARGET_VRAM"
         memory_size_KB: 24624320
-        memory_bandwidth_KBps: 25000000
+        # Same 13.95 GB/s effective H2D rate as ram (the RAM->VRAM transfer
+        # water-fills the bottleneck link); see ram note above.
+        memory_bandwidth_KBps: 13946000
   storage:
     - name: "ssd"
       type: "SimpleSSD"
