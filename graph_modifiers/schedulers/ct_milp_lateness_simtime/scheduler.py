@@ -348,8 +348,19 @@ def _build_pool(
         # in a late-starting graph (e.g. UNet first kernel in G_3
         # when G_0..G_2 already ran) wrongly looks c-infeasible
         # because its graph's first node provides no slack.
+        # MILP_RELAX_GAP_FEASIBILITY=1: mark every gap feasible, giving the LP
+        # an e_{t,k} even on gaps smaller than the transfer time. Evicting
+        # there makes the refetch land late (sim stalls via the injector's
+        # sync-fallback), which the lateness term prices — so the LP can free
+        # peak by evicting otherwise-forced-resident weights in their small
+        # gaps. This trades stall for peak → lets tighter budgets become
+        # FEASIBLE that the unrelaxed filter forces over-cap.
+        _relax_gap = os.environ.get("MILP_RELAX_GAP_FEASIBILITY") == "1"
         gap_feas: list[bool] = []
         for i in range(len(consumers) - 1):
+            if _relax_gap:
+                gap_feas.append(True)
+                continue
             ck_end = consumers[i][2]
             ckp1_start = consumers[i + 1][1]
             target = ckp1_start - tau_h2d
@@ -1082,6 +1093,17 @@ def _solve_two_phase_highspy(
     for i in int_indices:
         x_warm[i] = 1.0 if x_lp[i] >= 0.5 else 0.0
 
+    # NOTE: phase 2 reuses the phase-1 model object, whose time budget HiGHS
+    # has already spent (cumulative per model), so by default phase 2 returns
+    # the rounded-LP warm-start WITHOUT branch & bound. This is intentional:
+    # the phase-1 LP relaxation is ~99% integer, so rounding is near-optimal
+    # and builds stay fast. Set MILP_PHASE2_BRANCH=1 to reset the limit and
+    # let phase 2 genuinely branch (tested: 1200s on llama8b@6G improved the
+    # modeled objective only 0.18% and OOM'd in sim — the gap there is
+    # structural, not under-solving — so this is opt-in for diagnostics).
+    if os.environ.get("MILP_PHASE2_BRANCH") == "1" and time_limit_s is not None:
+        h.setOptionValue("time_limit", float(time_limit_s))
+
     return _solve_integer_highspy_model(
         h,
         total_vars=total_vars,
@@ -1255,8 +1277,19 @@ def _solve_milp(
     # (lateness, streaming, peak-slack) shrinks by the same factor, so the
     # argmin is identical. We just express size in MB so the cost vector
     # sits in [1, 1e6] instead of [1, 1e8].
-    for i in range(NUM_LATENESS_WINDOWS):
-        c_obj[L_WINDOW_IDX_BASE + i] = 1.0          # per ms of stall
+    # Cumulative/EDF lateness (MILP_CUMULATIVE_LATENESS=1): a single slack
+    # L = max prefix backlog (in slot L_WINDOW_IDX_BASE), rather than summing
+    # independent per-window slacks. The per-window-independent sum
+    # over-penalizes "demand-late / PCIe-idle-early" patterns that prefetch
+    # can absorb (it forbids using an earlier window's idle PCIe); the
+    # cumulative form credits that, and in the saturated regime reduces to
+    # the total-transfer-time floor → minimizes total volume like Belady.
+    _cumulative_lat = os.environ.get("MILP_CUMULATIVE_LATENESS") == "1"
+    if _cumulative_lat:
+        c_obj[L_WINDOW_IDX_BASE] = 1.0              # single max-backlog slack
+    else:
+        for i in range(NUM_LATENESS_WINDOWS):
+            c_obj[L_WINDOW_IDX_BASE + i] = 1.0      # per ms of stall
     if peak_target_bytes is not None:
         c_obj[S_PEAK_IDX] = PEAK_SLACK_PENALTY      # per MB over cap
     for tid in feasible_tids:
@@ -1755,44 +1788,84 @@ def _solve_milp(
             f"timeline=[{timeline_start/1e6:.1f}, {timeline_end/1e6:.1f}]ms"
         )
 
-    for i in range(NUM_LATENESS_WINDOWS):
-        s_i = timeline_start + i * window_length
-        e_i = timeline_start + (i + 1) * window_length
-        is_last = (i == NUM_LATENESS_WINDOWS - 1)
+    if _cumulative_lat:
+        # ---- Cumulative/EDF form ----
+        # For each prefix i (windows 0..i), one row sharing the single
+        # slack L (= L_WINDOW_IDX_BASE):
+        #   Σ_{first_dl ≤ e_i} δ·(1−c) + Σ_{refetch_dl ≤ e_i} δ·e − L
+        #       ≤  (i+1)·window_length
+        # Accumulate coefficients incrementally so prefix i extends i−1.
+        # cum_c[tid] tracks the running −δ coef on c_t; cum_e likewise;
+        # cum_const tracks Σδ from the (1−c) expansion (moved to RHS).
+        cum_c: dict[int, float] = {}
+        cum_e: dict[tuple[int, int], float] = {}
+        cum_const = 0.0  # ms, the Σδ constant accumulated so far
+        for i in range(NUM_LATENESS_WINDOWS):
+            s_i = timeline_start + i * window_length
+            e_i = timeline_start + (i + 1) * window_length
+            is_last = (i == NUM_LATENESS_WINDOWS - 1)
+            # Add this window's new demand terms to the running totals.
+            for tid in feasible_tids:
+                pt = pool[tid]
+                delta_ms = pt.tau_h2d_ns / MODEL_SCALE
+                first_dl = pt.consumers[0][1]
+                if (s_i <= first_dl < e_i) or (is_last and first_dl == e_i):
+                    cum_c[tid] = cum_c.get(tid, 0.0) - float(delta_ms)
+                    cum_const += delta_ms
+                for k in range(len(pt.consumers) - 1):
+                    if (tid, k) not in e_var_idx:
+                        continue
+                    dl = pt.consumers[k + 1][1]
+                    if (s_i <= dl < e_i) or (is_last and dl == e_i):
+                        cum_e[(tid, k)] = cum_e.get((tid, k), 0.0) + float(delta_ms)
+            # Emit the prefix row: accumulated terms − L ≤ cum_budget − cum_const.
+            rows.append(row); cols.append(L_WINDOW_IDX_BASE); vals.append(-1.0)
+            for tid, coef in cum_c.items():
+                rows.append(row); cols.append(c_var_idx[tid]); vals.append(coef)
+            for key, coef in cum_e.items():
+                rows.append(row); cols.append(e_var_idx[key]); vals.append(coef)
+            cum_budget_ms = (i + 1) * window_length / MODEL_SCALE
+            ub_list.append(cum_budget_ms - cum_const)
+            row += 1
+    else:
+        for i in range(NUM_LATENESS_WINDOWS):
+            s_i = timeline_start + i * window_length
+            e_i = timeline_start + (i + 1) * window_length
+            is_last = (i == NUM_LATENESS_WINDOWS - 1)
 
-        # Coefficients/RHS are in ms (ns / S); the window-membership
-        # comparisons stay in ns (deadlines, s_i, e_i are ns).
-        const_lhs = 0.0  # ms
-        rows.append(row)
-        cols.append(L_WINDOW_IDX_BASE + i)
-        vals.append(-1.0)
-        for tid in feasible_tids:
-            pt = pool[tid]
-            delta_ms = pt.tau_h2d_ns / MODEL_SCALE
-            first_dl = pt.consumers[0][1]
-            in_window_first = (
-                s_i <= first_dl < e_i if not is_last
-                else s_i <= first_dl <= e_i
-            )
-            if in_window_first:
-                const_lhs += delta_ms
-                rows.append(row)
-                cols.append(c_var_idx[tid])
-                vals.append(-float(delta_ms))
-            for k in range(len(pt.consumers) - 1):
-                if (tid, k) not in e_var_idx:
-                    continue
-                dl = pt.consumers[k + 1][1]
-                in_window = (
-                    s_i <= dl < e_i if not is_last
-                    else s_i <= dl <= e_i
+            # Coefficients/RHS are in ms (ns / S); the window-membership
+            # comparisons stay in ns (deadlines, s_i, e_i are ns).
+            const_lhs = 0.0  # ms
+            rows.append(row)
+            cols.append(L_WINDOW_IDX_BASE + i)
+            vals.append(-1.0)
+            for tid in feasible_tids:
+                pt = pool[tid]
+                delta_ms = pt.tau_h2d_ns / MODEL_SCALE
+                first_dl = pt.consumers[0][1]
+                in_window_first = (
+                    s_i <= first_dl < e_i if not is_last
+                    else s_i <= first_dl <= e_i
                 )
-                if in_window:
+                if in_window_first:
+                    const_lhs += delta_ms
                     rows.append(row)
-                    cols.append(e_var_idx[(tid, k)])
-                    vals.append(float(delta_ms))
-        ub_list.append(window_length / MODEL_SCALE - const_lhs)
-        row += 1
+                    cols.append(c_var_idx[tid])
+                    vals.append(-float(delta_ms))
+                for k in range(len(pt.consumers) - 1):
+                    if (tid, k) not in e_var_idx:
+                        continue
+                    dl = pt.consumers[k + 1][1]
+                    in_window = (
+                        s_i <= dl < e_i if not is_last
+                        else s_i <= dl <= e_i
+                    )
+                    if in_window:
+                        rows.append(row)
+                        cols.append(e_var_idx[(tid, k)])
+                        vals.append(float(delta_ms))
+            ub_list.append(window_length / MODEL_SCALE - const_lhs)
+            row += 1
 
     nb = row
 

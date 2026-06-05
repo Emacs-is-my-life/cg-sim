@@ -1157,6 +1157,19 @@ def _solve_milp(
     # short-span tids like embedding/lm_head). See the bounds section.
     _relax_cinfeasible = relax_cinfeasible
 
+    # MILP_LIFETIME (prototype): strip the cold-vs-stream decision. Every
+    # weight is modeled as resident over its LIFETIME [first_use, last_use]
+    # (= c=0 semantics: resident around/between consumers, freed after last
+    # use), and the only decision is e_{t,k} — which gaps to evict to keep
+    # the instantaneous resident set ≤ cap. With the (already refetch-
+    # dominated) objective this is OFFLINE OPTIMAL CACHE REPLACEMENT (the
+    # offline analogue of Belady), which is where the whole-run H2D-volume
+    # gap lives. Cold-start (layout load) is left to the emit/injector.
+    # Implies relax_cinfeasible (all tids streamable).
+    _lifetime_mode = os.environ.get("MILP_LIFETIME") == "1"
+    if _lifetime_mode:
+        _relax_cinfeasible = True
+
     # ---- 1. Feasibility filter ----
     feasible_tids: list[int] = []
     forced_cold: set[int] = set()
@@ -1248,8 +1261,43 @@ def _solve_milp(
     # EDF processing order on the single machine: sort by deadline.
     channel_jobs.sort(key=lambda j: j[0])
     n_channel = len(channel_jobs)
+
+    # ---- 2c. Bucket the channel jobs by deadline (tractability) ----
+    #
+    # A completion var per job (~36k on sd3/llama) makes the C-chain LP time
+    # out. Instead aggregate jobs into B deadline buckets and run the EXACT
+    # SAME completion recurrence on B "super-jobs": C_b = cumulative channel
+    # completion at bucket b, W_b = Σ p·x of jobs due in bucket b (linear in
+    # the c/e binaries). This is the per-job chain coarsened to bucket
+    # resolution (within-bucket order lost, but a bucket spans ~timeline/B ≈
+    # a couple ms). O(B) vars + O(B) rows, build O(jobs+B). Reproduces the
+    # per-job result; this is the form that scales to sd3/llama.
+    _timeline_end_ns = max(c[1] for pt in pool.values() for c in pt.consumers)
+    NUM_CHANNEL_BUCKETS = max(16, min(512, int(max_peak_samples)))
+    _bucket_w_ns = max(1.0, (_timeline_end_ns - _timeline_start_ns)
+                       / NUM_CHANNEL_BUCKETS)
+
+    def _deadline_bucket(d_ns: float) -> int:
+        b = int((d_ns - _timeline_start_ns) / _bucket_w_ns)
+        return max(0, min(NUM_CHANNEL_BUCKETS - 1, b))
+
+    # Per bucket: const work A_b (= Σ p of init jobs, the p·1 part of p(1−c)),
+    # and the variable terms [(var_col, signed_coef)] where coef is −p on an
+    # init c-var and +p on a refetch e-var (so W_b = A_b + Σ coef·var).
+    _bucket_const = [0.0] * NUM_CHANNEL_BUCKETS               # ms
+    _bucket_terms: list[list[tuple[int, float]]] = [
+        [] for _ in range(NUM_CHANNEL_BUCKETS)
+    ]
+    for (d_ms, var_col, is_complement, p_ms, _r_ms) in channel_jobs:
+        b = _deadline_bucket(d_ms * MODEL_SCALE)
+        if is_complement:                       # x = 1 − c: p(1−c) = p − p·c
+            _bucket_const[b] += p_ms
+            _bucket_terms[b].append((var_col, -p_ms))
+        else:                                   # x = e:      p·e
+            _bucket_terms[b].append((var_col, p_ms))
+
     C_IDX_BASE = col
-    col += n_channel                                         # C_j per job
+    col += NUM_CHANNEL_BUCKETS                                # C_b per bucket
     L_IDX = col
     col += 1                                                 # single max-lateness
     S_PEAK_IDX = col
@@ -1265,6 +1313,11 @@ def _solve_milp(
     bounds_list: list[tuple[float, float | None]] = []
     for tid in feasible_tids:
         pt = pool[tid]
+        if _lifetime_mode:
+            # Strip the cold decision: force c=0 (resident over lifetime,
+            # freed after last use). Only e decides evictions.
+            bounds_list.append((0.0, 0.0))
+            continue
         if not pt.c_feasibility and not _relax_cinfeasible:
             # No GPU node fires early enough that a runtime prefetch
             # could deliver this tid in time. Pin c=1 → load at layout
@@ -1278,7 +1331,7 @@ def _solve_milp(
             bounds_list.append((0.0, 1.0))
     bounds_list.extend([(0.0, 1.0)] * n_e)
     bounds_list.append((0.0, None))                          # P
-    bounds_list.extend([(0.0, None)] * n_channel)            # C_j (channel completion)
+    bounds_list.extend([(0.0, None)] * NUM_CHANNEL_BUCKETS)  # C_b (channel completion/bucket)
     bounds_list.append((0.0, None))                          # L (max lateness)
     bounds_list.append(
         (0.0, None) if peak_target_bytes is not None else (0.0, 0.0)
@@ -1363,18 +1416,32 @@ def _solve_milp(
     vals: list[float] = []
     ub_list: list[float] = []
     row = 0
-    for (tid, k), e_col in e_var_idx.items():
-        if not pool[tid].c_feasibility:
-            # c pinned to 1 — hybrid allowed, no coupling row needed.
-            continue
-        rows.append(row)
-        cols.append(c_var_idx[tid])
-        vals.append(1.0)
-        rows.append(row)
-        cols.append(e_col)
-        vals.append(1.0)
-        ub_list.append(1.0)
-        row += 1
+    # MILP_LIFT_COUPLING=1: allow the hybrid (c=1,e=1) for ALL tids, not just
+    # c-infeasible ones — i.e. let a COLD weight be transiently evicted in a
+    # consumer gap to time-share the cap (Belady's move). DIAGNOSTIC: tests
+    # whether the c+e≤1 coupling is what caps cold residency / forces
+    # over-streaming. NOTE: not sim-realizable without the injector
+    # coverage_repair fix (sim would demote c=1,e=1 c-feasible tids back to
+    # resident) — so judge by the MODELED cold/stream split, not sim makespan.
+    _lift_coupling = os.environ.get("MILP_LIFT_COUPLING") == "1"
+    n_coupling_rows = 0
+    if not _lift_coupling:
+        for (tid, k), e_col in e_var_idx.items():
+            if not pool[tid].c_feasibility:
+                # c pinned to 1 — hybrid allowed, no coupling row needed.
+                continue
+            rows.append(row)
+            cols.append(c_var_idx[tid])
+            vals.append(1.0)
+            rows.append(row)
+            cols.append(e_col)
+            vals.append(1.0)
+            ub_list.append(1.0)
+            row += 1
+            n_coupling_rows += 1
+    if audit:
+        print(f"[ct_milp_overlap:audit] c+e<=1 coupling rows: {n_coupling_rows} "
+              f"({'LIFTED (hybrid allowed for all)' if _lift_coupling else 'on'})")
 
     # ---- 6. Sample grid (shared by peak & lateness rows) ----
     #
@@ -1406,15 +1473,17 @@ def _solve_milp(
     # per-iteration linear scan of pt.consumers for the
     # is_currently_consumed check.
     #
-    # OVERLAP MODEL: the residency arc width is the lookahead horizon W,
-    # not τ_h2d. A streamed tid issued up to W ahead of its consumer
-    # occupies dst VRAM for ~W before that consumer; charging W (≥ τ) in
-    # the peak rows is the *cost* side of the overlap the channel model
-    # buys on the lateness side. Keeping the two consistent (same W) is
-    # what avoids putting the variable arrival time into the peak rows
-    # (which would be bilinear). arc_queue_factor still scales it for A/B.
+    # OVERLAP-PEAK (Fix 2 — honest in-flight). Earlier this widened the
+    # per-tid arc to W, which over-counts: it charged W of residency to
+    # EVERY streamed tid, but with h2d_streams=1 the channel claims dst at
+    # actual-issue ONE AT A TIME, so the "arrived-early, waiting-for-consumer"
+    # pool is bounded by bw·W bytes TOTAL — not the per-tid sum. So we keep
+    # the per-tid arc at τ (the real transfer window) and add a single global
+    # bw·W in-flight term to the peak floor below. This makes modeled peak
+    # track true sim peak (was over by ~335-575MB), so margin can go to 0 and
+    # the LP fills the real cap instead of under-filling and over-streaming.
     _pt_arc_tau: dict[int, int] = {
-        tid: int(round(max(pool[tid].tau_h2d_ns, _W_ns) * float(arc_queue_factor)))
+        tid: int(round(pool[tid].tau_h2d_ns * float(arc_queue_factor)))
         for tid in feasible_tids
     }
     _pt_consumer_nids_set: dict[int, frozenset[int]] = {
@@ -1573,6 +1642,19 @@ def _solve_milp(
     forced_cold_bytes = sum(pool[t].size_bytes for t in forced_cold)
     # Model is in MB: constant_floor (and every size/const below) is bytes/S.
     constant_floor = (float(forced_cold_bytes) + float(extra_static_bytes)) / MODEL_SCALE
+    # Fix 2: in-flight pool. With early issue (≤W ahead) on a serial channel,
+    # the bytes "arrived early, waiting for their consumer" plus the one
+    # in-flight transfer are bounded by bw·W. Charge that bound once (a small
+    # constant — bw·W ≈ 50MB at W=2ms, 125MB at W=5ms — vs the ~330-575MB the
+    # old per-tid arc=W over-counted). Conservative (over-estimate ⇒ never
+    # causes a sim OOM) but tight enough that modeled peak ≈ true sim peak.
+    _inflight_pool_mb = float(effective_h2d_bw(hw)) * float(_W_ns) / MODEL_SCALE
+    constant_floor += _inflight_pool_mb
+    if audit:
+        print(
+            f"[ct_milp_overlap:audit] in-flight pool (bw·W) = "
+            f"{_inflight_pool_mb:.1f}MB added to peak floor (W={_W_ns/1e6:.1f}ms)"
+        )
 
     # Intermediates: fixed (non-variable) VRAM residency per sample.
     _intermediates = _build_intermediate_residencies(
@@ -1751,66 +1833,63 @@ def _solve_milp(
                 f"margin={safety_margin_frac*100:.1f}% → P ≤ {target_adj_mb:.1f}MB"
             )
 
-    # ---- 8. Channel-schedule rows (single serial H2D machine) ----
+    # ---- 8. Channel-schedule rows (single serial H2D machine, bucketed) ----
     #
-    # The H2D channel processes its jobs (built in §2b, sorted by deadline =
-    # EDF order) one at a time. For job j with completion C_j, selection
-    # x_j, processing p_j, release r_j, deadline d_j:
+    # The H2D channel processes its jobs one at a time, EDF order. Aggregated
+    # into B deadline buckets (§2c): C_b = cumulative channel completion at
+    # bucket b, W_b = Σ p·x of jobs due in bucket b (linear in c/e binaries,
+    # = A_b + Σ coef·var). The exact per-job completion recurrence, coarsened
+    # to bucket resolution:
     #
-    #   C_j ≥ C_{j-1} + p_j · x_j      (FIFO accumulation; backlog/ripple carry)
-    #   C_j ≥ (r_j + p_j) · x_j        (a selected late-released job finishes late)
-    #   L   ≥ C_j − d_j                (max lateness = makespan extension)
+    #   C_b ≥ C_{b-1} + W_b      (FIFO accumulation; backlog/ripple carry)
+    #   C_b ≥ r_b + W_b          (bucket's work can't finish before its release)
+    #   L   ≥ C_b − T_b          (max lateness = makespan extension)
     #
-    # Minimizing L drives C_j to max(C_{j-1}+p·x, (r+p)·x), which is EXACTLY
-    # the EDF completion max(C_{j-1}, r_j)+p_j when x=1 and C_{j-1} when x=0
-    # (case split on C_{j-1} ≷ r_j). So this is the exact channel schedule
-    # given EDF order, not a loose bound. x_j is an existing binary:
-    #   initial prefetch → x = 1 − c_t   (is_complement=True)
-    #   refetch          → x = e_{t,k}   (is_complement=False)
-    # All quantities in ms. C_0's predecessor is the constant t0 (run start).
+    # r_b = max(t0, left_edge_b − W): the earliest the bucket's work can be on
+    # the channel (issued at most W ahead). This release floor is what prices
+    # overlap honestly — tight-slack streaming can't be pre-done, so it costs
+    # L; wide-slack streaming sequences free. T_b = bucket right edge.
+    # Minimizing L drives C_b = max(C_{b-1}, r_b) + W_b (the EDF completion).
     timeline_start = _timeline_start_ns
-    timeline_end = max(c[1] for pt in pool.values() for c in pt.consumers)
+    timeline_end = _timeline_end_ns
     if audit:
         print(
-            f"[ct_milp_overlap:audit] channel jobs: {n_channel} "
-            f"(serial H2D, EDF order), lookahead W={_W_ns/1e6:.1f}ms; "
+            f"[ct_milp_overlap:audit] channel: {n_channel} jobs -> "
+            f"{NUM_CHANNEL_BUCKETS} deadline buckets ({_bucket_w_ns/1e6:.2f}ms each), "
+            f"lookahead W={_W_ns/1e6:.1f}ms; "
             f"timeline=[{timeline_start/1e6:.1f}, {timeline_end/1e6:.1f}]ms"
         )
 
-    for j, (d_ms, var_col, is_complement, p_ms, r_ms) in enumerate(channel_jobs):
-        C_j = C_IDX_BASE + j
-        # --- accumulation row: C_j ≥ C_{j-1} + p·x ---
-        rows.append(row); cols.append(C_j); vals.append(-1.0)
-        if j > 0:
-            rows.append(row); cols.append(C_IDX_BASE + j - 1); vals.append(1.0)
+    for b in range(NUM_CHANNEL_BUCKETS):
+        C_b = C_IDX_BASE + b
+        A_b = _bucket_const[b]                       # ms (Σ p of init jobs here)
+        terms = _bucket_terms[b]                     # [(var_col, ±p_ms)]
+        left_edge_ns = _timeline_start_ns + b * _bucket_w_ns
+        r_b = max(_t0_ms, (left_edge_ns) / MODEL_SCALE - _W_ns / MODEL_SCALE)
+        T_b = (_timeline_start_ns + (b + 1) * _bucket_w_ns) / MODEL_SCALE
+        # --- accumulation: C_b ≥ C_{b-1} + W_b ;  W_b = A_b + Σ coef·var ---
+        #   -C_b + C_{b-1} + Σ coef·var ≤ -A_b   (C_{-1}=t0 const for b=0)
+        rows.append(row); cols.append(C_b); vals.append(-1.0)
+        if b > 0:
+            rows.append(row); cols.append(C_IDX_BASE + b - 1); vals.append(1.0)
             base_const = 0.0
         else:
-            base_const = _t0_ms          # C_{-1} ≡ run start, moved to RHS
-        if is_complement:
-            # x = 1 - c:  C_j >= C_{j-1} + p*(1-c)
-            #   => -C_j + C_{j-1} - p*c <= -p   (cold c=1 -> adds 0; streamed c=0 -> +p)
-            rows.append(row); cols.append(var_col); vals.append(-float(p_ms))
-            ub_list.append(-float(p_ms) - base_const)
-        else:
-            # x = e:      C_j >= C_{j-1} + p*e
-            #   => -C_j + C_{j-1} + p*e <= 0    (refetch e=1 -> adds +p)
-            rows.append(row); cols.append(var_col); vals.append(float(p_ms))
-            ub_list.append(-base_const)
+            base_const = _t0_ms
+        for vc, coef in terms:
+            rows.append(row); cols.append(vc); vals.append(float(coef))
+        ub_list.append(-float(A_b) - base_const)
         row += 1
-        # --- release row: C_j ≥ (r+p)·x ---
-        rp = float(r_ms + p_ms)
-        rows.append(row); cols.append(C_j); vals.append(-1.0)
-        if is_complement:                # −C_j − (r+p)·var ≤ −(r+p)
-            rows.append(row); cols.append(var_col); vals.append(-rp)
-            ub_list.append(-rp)
-        else:                            # −C_j + (r+p)·var ≤ 0
-            rows.append(row); cols.append(var_col); vals.append(rp)
-            ub_list.append(0.0)
+        # --- release floor: C_b ≥ r_b + W_b ---
+        #   -C_b + Σ coef·var ≤ -A_b - r_b
+        rows.append(row); cols.append(C_b); vals.append(-1.0)
+        for vc, coef in terms:
+            rows.append(row); cols.append(vc); vals.append(float(coef))
+        ub_list.append(-float(A_b) - float(r_b))
         row += 1
-        # --- lateness row: C_j − L ≤ d_j ---
-        rows.append(row); cols.append(C_j); vals.append(1.0)
+        # --- lateness: C_b − L ≤ T_b ---
+        rows.append(row); cols.append(C_b); vals.append(1.0)
         rows.append(row); cols.append(L_IDX); vals.append(-1.0)
-        ub_list.append(float(d_ms))
+        ub_list.append(float(T_b))
         row += 1
 
     nb = row
@@ -1866,21 +1945,23 @@ def _solve_milp(
     feasible_warm_start[P_IDX] = _total_feasible_mb
     if peak_target_bytes is not None:
         feasible_warm_start[S_PEAK_IDX] = _total_feasible_mb
-    # Channel completions/lateness: compute the ACTUAL EDF completion of the
-    # seed's selected jobs (a flat C=big would violate C_j ≥ C_{j-1}+p, making
-    # the seed infeasible). Walk jobs in EDF order with the seed's x values.
+    # Channel completions/lateness: compute the ACTUAL bucketed EDF completion
+    # of the seed (a flat C=big would violate C_b ≥ C_{b-1}+W_b → infeasible
+    # seed). Walk buckets with the seed's x values: W_b = A_b + Σ coef·seed_x.
     _seed_C = _t0_ms
     _seed_L = 0.0
-    for j, (d_ms, var_col, is_complement, p_ms, r_ms) in enumerate(channel_jobs):
-        x = (
-            1.0 - feasible_warm_start[var_col] if is_complement
-            else feasible_warm_start[var_col]
-        )
-        if x > 0.5:
-            _seed_C = max(_seed_C, r_ms) + p_ms
-        feasible_warm_start[C_IDX_BASE + j] = _seed_C
-        if _seed_C - d_ms > _seed_L:
-            _seed_L = _seed_C - d_ms
+    for b in range(NUM_CHANNEL_BUCKETS):
+        W_b = _bucket_const[b]
+        for vc, coef in _bucket_terms[b]:
+            W_b += coef * float(feasible_warm_start[vc])
+        W_b = max(0.0, W_b)
+        left_edge_ns = _timeline_start_ns + b * _bucket_w_ns
+        r_b = max(_t0_ms, left_edge_ns / MODEL_SCALE - _W_ns / MODEL_SCALE)
+        T_b = (_timeline_start_ns + (b + 1) * _bucket_w_ns) / MODEL_SCALE
+        _seed_C = max(_seed_C, r_b) + W_b
+        feasible_warm_start[C_IDX_BASE + b] = _seed_C
+        if _seed_C - T_b > _seed_L:
+            _seed_L = _seed_C - T_b
     feasible_warm_start[L_IDX] = _seed_L
 
     if _HIGHSPY_AVAILABLE and integrality_arr is not None and not lp_relaxation:
@@ -2241,6 +2322,7 @@ def _emit_neutral(
     hw: HwParams,
     sim_times: dict[int, tuple[int, int]] | None = None,
     lookahead_ns: int = 5_000_000,
+    cold_budget_bytes: int | None = None,
 ) -> NeutralSchedule:
     """Build a NeutralSchedule with cgsim_tids pre-resolved on every entry.
 
@@ -2382,11 +2464,34 @@ def _emit_neutral(
     evicts: list[NeutralEvict] = []
     cold_starts: list[NeutralColdStart] = []
 
+    # MILP_LIFETIME: the LP forced c=0 (lifetime residency + e-evictions), so
+    # nothing is cold-started → all initial loads land on the runtime channel
+    # (huge startup contention). Belady instead cold-loads its working set at
+    # LAYOUT (free). So here the *injector/emit* picks the cold-start set:
+    # greedily layout-load weights in first-use order up to the cap budget
+    # (mirrors SwapAdvisorRuntime._pick_cold_residents); the rest are runtime
+    # prefetched. The MILP's offline-optimal evictions (e) apply on top.
+    _lifetime_mode = os.environ.get("MILP_LIFETIME") == "1"
+    lifetime_cold: set[int] = set()
+    if _lifetime_mode and cold_budget_bytes:
+        order = sorted(
+            pool.keys(),
+            key=lambda t: pool[t].consumers[0][1] if pool[t].consumers else 1 << 62,
+        )
+        used = 0
+        for t in order:
+            sz = int(pool[t].size_bytes)
+            if used + sz <= int(cold_budget_bytes):
+                lifetime_cold.add(t)
+                used += sz
+
     for tid, pt in pool.items():
         uid = uid_by_tid[tid]
         cv = result.c_solution.get(tid, None)
         is_forced = tid in result.forced_cold or cv is None
         is_cold = is_forced or float(cv) >= KEEP_THRESHOLD
+        if _lifetime_mode:
+            is_cold = tid in lifetime_cold
 
         # Emit cold-start or initial prefetch, depending on c_t.
         # c-feasible cold tids must not get runtime refetches — the
@@ -2453,7 +2558,10 @@ def _emit_neutral(
         # MILP's coupling guarantees e=0 for them. c-infeasible cold
         # tids (forced or pinned) fall through to the per-gap loop
         # so their hybrid evict+refetch can be emitted when e=1.
-        if is_cold and pt.c_feasibility:
+        # In lifetime mode, a cold-started weight STILL carries its
+        # MILP-decided e evictions (cold-load at layout, evict-in-gap,
+        # refetch) — that's the whole point — so don't skip.
+        if is_cold and pt.c_feasibility and not _lifetime_mode:
             continue
 
         # Per-gap evict + refetch. For c=0 (streamed) tids this is the
@@ -2730,8 +2838,32 @@ def solve_neutral(
         audit=audit,
     )
 
+    # Lifetime-mode cold-start budget: cap MINUS peak activation residency +
+    # static overhead, so layout cold-loading leaves room for runtime
+    # activations (mirrors SwapAdvisorRuntime._pick_cold_residents headroom).
+    # Filling the full cap with weights aborts on models with real
+    # activations (e.g. llama); sd3's peak has ~0 activations so it was fine.
+    _cold_budget = peak_target_bytes
+    if peak_target_bytes is not None:
+        _interm = _build_intermediate_residencies(
+            trace, sim_times, axis_fix=intermediate_axis_fix,
+        )
+        _peak_act = 0
+        if _interm:
+            _evts = sorted(
+                [(s, sz) for s, _e, sz in _interm]
+                + [(e + 1, -sz) for _s, e, sz in _interm]
+            )
+            _cur = 0
+            for _, _d in _evts:
+                _cur += _d
+                if _cur > _peak_act:
+                    _peak_act = _cur
+        _cold_budget = max(0, int(peak_target_bytes) - int(_peak_act)
+                           - int(extra_static_bytes))
     neutral = _emit_neutral(pool, result, trace, hw, sim_times,
-                            lookahead_ns=lookahead_ns)
+                            lookahead_ns=lookahead_ns,
+                            cold_budget_bytes=_cold_budget)
 
     n_cold = len(neutral.cold_starts)
     n_pf = len(neutral.prefetches)
