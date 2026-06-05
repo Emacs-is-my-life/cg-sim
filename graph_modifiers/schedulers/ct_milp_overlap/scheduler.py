@@ -1101,14 +1101,27 @@ def _solve_two_phase_highspy(
     # let phase 2 genuinely branch (tested: 1200s on llama8b@6G improved the
     # modeled objective only 0.18% and OOM'd in sim — the gap there is
     # structural, not under-solving — so this is opt-in for diagnostics).
-    if os.environ.get("MILP_PHASE2_BRANCH") == "1" and time_limit_s is not None:
+    _gmode = os.environ.get("MILP_GMODE") == "1"
+    # Phase-2 seed. Default: rounded LP (near-optimal when LP ~integral). In
+    # g-mode: seed the GREEDY-BELADY incumbent AND branch — HiGHS keeps the
+    # greedy as a floor (incumbent never worse than ≈Belady) and branches to
+    # improve past it. The rounded LP can't be trusted here: on hard
+    # (100s-fractional) instances like llama it over-evicts ~2× yet has a
+    # LOWER *modeled* objective (the LP relaxation is optimistic), so comparing
+    # modeled objectives picks the wrong one. Flooring at the greedy is the
+    # robust choice. Diffusion (~integral) branches quickly past Belady; llama
+    # stays floored at Belady even unconverged.
+    x_seed = x_warm
+    if _gmode and feasible_fallback is not None:
+        x_seed = feasible_fallback
+    if (_gmode or os.environ.get("MILP_PHASE2_BRANCH") == "1") and time_limit_s is not None:
         h.setOptionValue("time_limit", float(time_limit_s))
 
     return _solve_integer_highspy_model(
         h,
         total_vars=total_vars,
         integrality_arr=integrality_arr,
-        warm_start=x_warm,
+        warm_start=x_seed,
         label="phase2",
     )
 
@@ -1948,15 +1961,66 @@ def _solve_milp(
     # MILP returns a feasible under-floor incumbent rather than a garbage
     # high-peak one that only the overrun-repair could (dishonestly) mask.
     feasible_warm_start = np.zeros(total_vars, dtype=np.float64)
-    for tid in feasible_tids:
-        pt = pool[tid]
-        c_val = 0.0 if pt.c_feasibility else 1.0
-        feasible_warm_start[c_var_idx[tid]] = c_val
-        for k in range(len(pt.consumers) - 1):
-            if (tid, k) in e_var_idx:
-                feasible_warm_start[e_var_idx[(tid, k)]] = (
-                    1.0 if c_val < 0.5 else 0.0
-                )
+    # g-mode: seed phase-2 with a GREEDY BELADY plan (offline farthest-next-use
+    # eviction) instead of stream-everything. This floors the incumbent at
+    # ≈Belady so the (hard, 100s-fractional) llama MILP can't ship a worse plan
+    # even without converging. g=1 for the soonest-first-use cold set up to cap;
+    # e=1 for the gaps Belady evicts. Builds a tight, peak-feasible incumbent.
+    _greedy_seeded = False
+    if _gmode and peak_target_bytes is not None:
+        import bisect as _bis
+        _cap_b = float(peak_target_bytes)
+        _cstarts = {t: [c[1] for c in pool[t].consumers] for t in feasible_tids}
+        _g = {t: 0.0 for t in feasible_tids}
+        _resident: set[int] = set()
+        _rb = 0.0
+        for t in sorted(feasible_tids, key=lambda t: pool[t].consumers[0][1]):
+            sz = float(pool[t].size_bytes)
+            if _rb + sz <= _cap_b:
+                _g[t] = 1.0; _resident.add(t); _rb += sz
+        _eset: set[tuple[int, int]] = set()
+        _events = sorted(
+            (c[1], t, k)
+            for t in feasible_tids for k, c in enumerate(pool[t].consumers)
+        )
+        _last_idx = {t: -1 for t in feasible_tids}
+
+        def _nu_after(u: int, tau: int) -> float:
+            cs = _cstarts[u]
+            i = _bis.bisect_right(cs, tau)
+            return float(cs[i]) if i < len(cs) else float("inf")
+
+        for (_tau, _t, _k) in _events:
+            if _t not in _resident:
+                sz = float(pool[_t].size_bytes)
+                while _rb + sz > _cap_b and _resident:
+                    _victim = max(_resident, key=lambda u: _nu_after(u, _tau))
+                    _vk = _last_idx[_victim]
+                    if _vk == -1:
+                        _g[_victim] = 0.0           # evicted before first use → not cold
+                    elif (_victim, _vk) in e_var_idx:
+                        _eset.add((_victim, _vk))
+                    _resident.discard(_victim); _rb -= float(pool[_victim].size_bytes)
+                _resident.add(_t); _rb += sz
+            _last_idx[_t] = _k
+        for tid in feasible_tids:
+            feasible_warm_start[c_var_idx[tid]] = _g[tid]
+        for key, col in e_var_idx.items():
+            feasible_warm_start[col] = 1.0 if key in _eset else 0.0
+        _greedy_seeded = True
+        if audit:
+            print(f"[ct_milp_overlap:audit] greedy-Belady warm-start: "
+                  f"cold={sum(_g.values()):.0f} tids, evicts={len(_eset)}")
+    if not _greedy_seeded:
+        for tid in feasible_tids:
+            pt = pool[tid]
+            c_val = 0.0 if pt.c_feasibility else 1.0
+            feasible_warm_start[c_var_idx[tid]] = c_val
+            for k in range(len(pt.consumers) - 1):
+                if (tid, k) in e_var_idx:
+                    feasible_warm_start[e_var_idx[(tid, k)]] = (
+                        1.0 if c_val < 0.5 else 0.0
+                    )
     # Continuous slacks (MB / ms) set to safe over-estimates so the seed
     # is a valid feasible point (slacks have no upper bound). constant_floor
     # is already MB; sizes are bytes → MB.

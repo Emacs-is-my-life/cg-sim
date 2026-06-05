@@ -40,6 +40,7 @@ sync prefetch realistic without inventing a phantom copy resource.
 
 from __future__ import annotations
 
+import os
 from collections import defaultdict, deque
 from typing import Any, TYPE_CHECKING
 
@@ -305,7 +306,63 @@ class DeviceAwareVanillaAsync(BaseScheduler):
 
     # ============================================================ compile
     def compile(self, trace: Trace) -> None:
+        # DAV_REACTIVE_EVICT=1: reactive farthest-next-use (Belady) eviction
+        # fallback in _claim_region. Makes an injected OFFLINE schedule robust:
+        # the schedule's planned evictions handle the steady state, and when a
+        # scheduled load can't fit (planned-eviction timing vs actual need
+        # mismatch) we evict the resident evictable weight whose next use is
+        # furthest out instead of aborting (what SwapAdvisorRuntime does
+        # online). Needs per-tid consumer start times for _next_use.
+        self._reactive_evict = os.environ.get("DAV_REACTIVE_EVICT") == "1"
+        self._consumer_starts: dict[int, list[tuple[int, int]]] = {}
+        self._nu_cursor: dict[int, int] = {}
+        if self._reactive_evict:
+            starts: dict[int, list[tuple[int, int]]] = {}
+            for nid, node in trace.node_map.items():
+                s = int(node.args.get("start_ns", nid))
+                for tid in (node.input_tensors or []):
+                    starts.setdefault(int(tid), []).append((s, int(nid)))
+            for tid in starts:
+                starts[tid].sort()
+            self._consumer_starts = starts
         return
+
+    def _next_use(self, tid: int) -> float:
+        """Start_ns of tid's first not-yet-DONE consumer; +inf if none remain
+        (ideal Belady victim). Amortized O(1) via a forward-only cursor."""
+        cs = self._consumer_starts.get(tid)
+        if not cs:
+            return float("inf")
+        node_map = self.sys.trace.node_map
+        i = self._nu_cursor.get(tid, 0)
+        while i < len(cs):
+            node = node_map.get(cs[i][1])
+            if node is None or node.status == NodeStatus.DONE:
+                i += 1
+            else:
+                break
+        self._nu_cursor[tid] = i
+        return float(cs[i][0]) if i < len(cs) else float("inf")
+
+    def _reactive_evict_until_fits(self, memory: BaseMemory, tensor: Tensor) -> None:
+        """Evict IDLE evictable resident weights, furthest-next-use first, until
+        `tensor` fits or no victim remains. Mirrors SwapAdvisorRuntime."""
+        need = tensor.num_pages
+        cands: list[tuple[float, int]] = []
+        for region in memory.space._regions_by_page_idx_start.values():
+            tid = getattr(region, "tensor_id", None)
+            if tid is None or tid == tensor.id:
+                continue
+            if tid not in self._evictable_tensor_ids:
+                continue
+            if region.access_status != DataRegionAccess.IDLE:
+                continue
+            cands.append((self._next_use(tid), int(tid)))
+        cands.sort(reverse=True)   # furthest next use first
+        for _nu, tid in cands:
+            if self._find_free_page(memory, need) is not None:
+                break
+            self._release_vram_only(tid)
 
     # ============================================================ helpers
     def _memory_for_tensor(self, tensor: Tensor) -> BaseMemory:
@@ -334,18 +391,94 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         )
 
     def _find_free_page(self, memory: BaseMemory, num_pages: int) -> int | None:
+        # Placement policy via scheduler arg `alloc_policy`:
+        #   "first_fit" (default) — first gap from page 0.
+        #   "best_fit"            — smallest gap that fits.
+        # First-fit drifts allocations low and shreds free space under the
+        # heavy evict/refetch churn of a tight weight-streaming schedule — a
+        # tid can fail to find a CONTIGUOUS slot even when total free ≫ its
+        # size (e.g. llama3b@4gib: 366 MiB free, largest gap 43.9 MiB, a
+        # 48 MiB weight aborts). Best-fit reuses an evicted same-size
+        # weight's slot for the next same-size load, which is how the real
+        # CUDA caching allocator (size-segregated free lists) avoids exactly
+        # this fragmentation. Placement is invariant for peak (byte-sum) and
+        # makespan (address-independent timing), so this only changes which
+        # runs can place — never the resulting peaks/makespans.
+        bestfit = str(self.args.get("alloc_policy", "first_fit")) == "best_fit"
         cursor = 0
+        best_start: int | None = None
+        best_gap: int | None = None
         for region in memory.space._regions_by_page_idx_start.values():
-            if region.page_idx_start - cursor >= num_pages:
-                return cursor
+            gap = region.page_idx_start - cursor
+            if gap >= num_pages:
+                if not bestfit:
+                    return cursor
+                if best_gap is None or gap < best_gap:
+                    best_start, best_gap = cursor, gap
             cursor = max(cursor, region.page_idx_end)
 
-        if memory.space.num_total_pages - cursor >= num_pages:
-            return cursor
-        return None
+        tail = memory.space.num_total_pages - cursor
+        if tail >= num_pages:
+            if not bestfit:
+                return cursor
+            if best_gap is None or tail < best_gap:
+                best_start, best_gap = cursor, tail
+        return best_start
+
+    def _compact_vram(self, memory: BaseMemory) -> bool:
+        """VMM-style defragmentation: relocate IDLE regions to coalesce free
+        space. Address-invariant — peak is a byte-count (num_used_pages,
+        unchanged by moving) and every transfer/compute timing is derived
+        from bytes & bandwidth, never from a page address — so this changes
+        nothing observable. It only lets a placement succeed when total free
+        >= need but contiguity was shredded by heavy evict/refetch churn.
+        Models CUDA VMM (cuMemMap) / PyTorch expandable_segments, where
+        scattered physical pages back a contiguous virtual range, so physical
+        contiguity is not a real constraint. Busy regions (BEING_READ /
+        BEING_WRITTEN, i.e. active transfer endpoints) are PINNED at their
+        current pages; movable IDLE regions are first-fit-packed (largest
+        first) into the lowest free slots not overlapping pinned ones.
+        Returns True if any region moved."""
+        space = memory.space
+        BUSY = (DataRegionAccess.BEING_READ, DataRegionAccess.BEING_WRITTEN)
+        regs = list(space._regions_by_page_idx_start.values())
+        movable = [r for r in regs if r.access_status not in BUSY]
+        pinned = [r for r in regs if r.access_status in BUSY]
+        occ = sorted((r.page_idx_start, r.page_idx_end) for r in pinned)
+        space._regions_by_page_idx_start.clear()
+        for r in pinned:
+            space._regions_by_page_idx_start[r.page_idx_start] = r
+        changed = False
+        for r in sorted(movable, key=lambda x: x.page_idx_end - x.page_idx_start,
+                        reverse=True):
+            n = r.page_idx_end - r.page_idx_start
+            cur = 0
+            for s, e in occ:
+                if s - cur >= n:
+                    break
+                cur = max(cur, e)
+            start = cur
+            if start != r.page_idx_start:
+                changed = True
+            r.page_idx_start = start
+            r.page_idx_end = start + n
+            space._regions_by_page_idx_start[start] = r
+            occ.append((start, start + n)); occ.sort()
+        return changed
 
     def _claim_region(self, memory: BaseMemory, tensor: Tensor):
         page_idx = self._find_free_page(memory, tensor.num_pages)
+        if (page_idx is None and getattr(self, "_reactive_evict", False)
+                and memory is self._vram):
+            # Reactive Belady fallback: free room by evicting furthest-next-use
+            # evictable weights, so an offline schedule's planned-eviction
+            # timing mismatch doesn't abort (see compile()).
+            self._reactive_evict_until_fits(memory, tensor)
+            page_idx = self._find_free_page(memory, tensor.num_pages)
+        if page_idx is None and os.environ.get("DAV_COMPACT_VRAM") == "1":
+            # No contiguous slot, but free bytes may suffice — defrag & retry.
+            if self._compact_vram(memory):
+                page_idx = self._find_free_page(memory, tensor.num_pages)
         if page_idx is None:
             self._dump_abort_diag(memory, tensor)
             self.sys.abort({
@@ -563,6 +696,19 @@ class DeviceAwareVanillaAsync(BaseScheduler):
                     })
                     return True
                 src = stor_regions[0]
+
+                # DAV_STREAM_FROM_SSD=1: model weights streaming SSD->GPU with
+                # NO DRAM staging. Skip the SSD->RAM load for streamed (RAM-homed)
+                # WEIGHT tensors — their RAM home stays empty, so at runtime
+                # _find_latest_region (prefer-memory, fall through to storage)
+                # finds only the SSD copy and the prefetch runs SSD->VRAM at the
+                # SSD read_io_curve bandwidth. Cold (VRAM-homed) weights still
+                # stage through DRAM at layout, but layout is ~free (≈20us), so
+                # this models "runtime streaming is SSD->GPU".
+                if (os.environ.get("DAV_STREAM_FROM_SSD") == "1"
+                        and tensor.id not in self._cuda_staging
+                        and tensor_type == "WEIGHT"):
+                    continue
 
                 if tensor.id in self._cuda_staging:
                     dest = self._cuda_staging[tensor.id][0]  # DRAM staging
@@ -1494,10 +1640,17 @@ class DeviceAwareVanillaAsync(BaseScheduler):
             tensor = self.sys.trace.tensor_map.get(tid)
             if tensor is None:
                 continue
+            # Normally source from the RAM home. Under SSD-streaming
+            # (DAV_STREAM_FROM_SSD) the RAM home was never loaded at
+            # layout, so it exists but is empty/not-readable — fall back
+            # to the latest readable region (the SSD copy). The transfer
+            # then runs SSD->VRAM at the SSD read_io_curve bandwidth.
             src_regions = self._ram.space.get_by_tensor_id(tid)
-            if not src_regions:
+            src = src_regions[0] if src_regions else None
+            if src is None or not self._region_readable(src):
+                src = self._find_latest_region(tid, exclude_hw=self._vram)
+            if src is None:
                 continue
-            src = src_regions[0]
             dst = self._claim_region(self._vram, tensor)
             if dst is None:
                 continue

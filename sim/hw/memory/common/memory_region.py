@@ -42,6 +42,10 @@ class MemorySpace:
         self.num_total_pages: int = num_total_pages
         self.num_used_pages: int = 0
         self.peak_num_used_pages: int = 0
+        # Diagnostic: resident {tensor_id: num_pages} snapshot at the instant
+        # the peak was (last) reached. Lets us compare the sim-realized
+        # resident set at peak against a scheduler's planned resident set.
+        self.peak_resident_tids: dict[int, int] = {}
 
         self._regions_by_page_idx_start: SortedDict[int, MemoryRegion] = SortedDict()
         return
@@ -122,6 +126,10 @@ class MemorySpace:
 
         if self.num_used_pages > self.peak_num_used_pages:
             self.peak_num_used_pages = self.num_used_pages
+            self.peak_resident_tids = {
+                r.tensor_id: r.num_pages
+                for r in self._regions_by_page_idx_start.values()
+            }
 
         return new_region
 
