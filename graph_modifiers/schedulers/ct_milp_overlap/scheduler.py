@@ -1170,6 +1170,23 @@ def _solve_milp(
     if _lifetime_mode:
         _relax_cinfeasible = True
 
+    # MILP_GMODE: model cold-start as `g` (= the c binary, but with corrected
+    # semantics): resident over [layout, first_use) when g=1 (the early
+    # cold-load cost) and FREED after last use (lifetime), DECOUPLED from e
+    # (no c+e≤1 coupling), so g=1,e=1 (cold-load + mid-run evict + refetch) is
+    # allowed. c-infeasible tids stay forced g=1 (transfer > first-use slack ⇒
+    # must cold-load); c-feasible g is free and optimized — the MILP cold-loads
+    # the early working set up to where early peak binds, minimizing runtime
+    # prefetch. This is the modeled version of lifetime-mode's heuristic emit
+    # cold-start. Channel already scales the initial load by (1−c)=(1−g).
+    # NOTE: g is FREE for c-infeasible too (relax) — forcing g=1 on the many
+    # c-infeasible multi-iter weights (e.g. llama) overloads layout and spirals
+    # into cold-load+evict+refetch-every-token. Let the MILP choose cold vs
+    # stream-with-stall; the channel L prices the stall.
+    _gmode = os.environ.get("MILP_GMODE") == "1"
+    if _gmode:
+        _relax_cinfeasible = True
+
     # ---- 1. Feasibility filter ----
     feasible_tids: list[int] = []
     forced_cold: set[int] = set()
@@ -1423,7 +1440,7 @@ def _solve_milp(
     # over-streaming. NOTE: not sim-realizable without the injector
     # coverage_repair fix (sim would demote c=1,e=1 c-feasible tids back to
     # resident) — so judge by the MODELED cold/stream split, not sim makespan.
-    _lift_coupling = os.environ.get("MILP_LIFT_COUPLING") == "1"
+    _lift_coupling = _gmode or os.environ.get("MILP_LIFT_COUPLING") == "1"
     n_coupling_rows = 0
     if not _lift_coupling:
         for (tid, k), e_col in e_var_idx.items():
@@ -1743,9 +1760,13 @@ def _solve_milp(
                     )
                 continue
             if t_l > last_end:
-                var_coefs[c_var_idx[tid]] = (
-                    var_coefs.get(c_var_idx[tid], 0.0) + size
-                )
+                # Post-last-use. g-mode: FREED after last use (lifetime) — the
+                # sim releases it, so don't charge peak here. Original c-mode:
+                # cold tid stays resident to end (alive iff c).
+                if not _gmode:
+                    var_coefs[c_var_idx[tid]] = (
+                        var_coefs.get(c_var_idx[tid], 0.0) + size
+                    )
                 continue
             k_in = None
             for k in range(len(pt.consumers) - 1):
@@ -2472,6 +2493,9 @@ def _emit_neutral(
     # (mirrors SwapAdvisorRuntime._pick_cold_residents); the rest are runtime
     # prefetched. The MILP's offline-optimal evictions (e) apply on top.
     _lifetime_mode = os.environ.get("MILP_LIFETIME") == "1"
+    # g-mode: cold-start is the MODELED `g` decision (c≥0.5), evictions apply
+    # on top (no skip). No heuristic cold-set needed.
+    _gmode_emit = os.environ.get("MILP_GMODE") == "1"
     lifetime_cold: set[int] = set()
     if _lifetime_mode and cold_budget_bytes:
         order = sorted(
@@ -2561,7 +2585,7 @@ def _emit_neutral(
         # In lifetime mode, a cold-started weight STILL carries its
         # MILP-decided e evictions (cold-load at layout, evict-in-gap,
         # refetch) — that's the whole point — so don't skip.
-        if is_cold and pt.c_feasibility and not _lifetime_mode:
+        if is_cold and pt.c_feasibility and not _lifetime_mode and not _gmode_emit:
             continue
 
         # Per-gap evict + refetch. For c=0 (streamed) tids this is the
