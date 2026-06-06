@@ -1848,6 +1848,8 @@ def _solve_milp(
     # constraint.
 
     # ---- 7b. Soft peak cap: P − s_P ≤ target·(1 − margin) ----  (MB)
+    _softcap_ub_pos = -1
+    target_adj_mb = 0.0
     if peak_target_bytes is not None:
         target_adj_mb = max(
             0.0,
@@ -1859,6 +1861,7 @@ def _solve_milp(
         rows.append(row)
         cols.append(S_PEAK_IDX)
         vals.append(-1.0)
+        _softcap_ub_pos = len(ub_list)        # remember to raise it for g-mode floor
         ub_list.append(target_adj_mb)
         row += 1
         if audit:
@@ -2008,6 +2011,28 @@ def _solve_milp(
         for key, col in e_var_idx.items():
             feasible_warm_start[col] = 1.0 if key in _eset else 0.0
         _greedy_seeded = True
+        # Make the greedy seed FEASIBLE so HiGHS keeps it as a floor: its
+        # modeled peak (with the overlay over-count) may exceed the cap even
+        # though its TRUE residency respects it. Compute the greedy's modeled
+        # peak from peak_sample_terms and RAISE the soft-cap to it. The MILP
+        # then can't ship an incumbent worse than the greedy (≈Belady refetch),
+        # and reactive eviction keeps the realized peak ≤ true cap. Auto-
+        # calibrated (= the greedy's own over-count), so no magic factor.
+        if _softcap_ub_pos >= 0:
+            _greedy_pk = 0.0
+            for _const_s, _terms in peak_sample_terms:
+                _v = _const_s
+                for _col, _coef in _terms:
+                    _v += _coef * float(feasible_warm_start[_col])
+                if _v > _greedy_pk:
+                    _greedy_pk = _v
+            if _greedy_pk > ub_list[_softcap_ub_pos]:
+                if audit:
+                    print(f"[ct_milp_overlap:audit] raising soft-cap "
+                          f"{ub_list[_softcap_ub_pos]:.0f}→{_greedy_pk:.0f}MB so "
+                          f"greedy seed is feasible (auto-calibrated over-count "
+                          f"{_greedy_pk - ub_list[_softcap_ub_pos]:.0f}MB)")
+                ub_list[_softcap_ub_pos] = _greedy_pk
         if audit:
             print(f"[ct_milp_overlap:audit] greedy-Belady warm-start: "
                   f"cold={sum(_g.values()):.0f} tids, evicts={len(_eset)}")
@@ -2273,7 +2298,12 @@ def _solve_milp(
                 f"[ct_milp_overlap:audit] channel max-lateness "
                 f"L={float(x[L_IDX]):.2f}ms (= makespan extension)"
             )
-        if peak_target_bytes is not None:
+        # g-mode raises the soft-cap (greedy floor) and relies on reactive
+        # eviction for realized overflow, so the overrun-repair (which would
+        # stream cold tids back to fit the ORIGINAL target, undoing the floor)
+        # is skipped — reactive eviction is the safety net instead.
+        _gmode_decode = os.environ.get("MILP_GMODE") == "1"
+        if peak_target_bytes is not None and not _gmode_decode:
             # Repair works in model units (MB): _alive_peak and target_adj_mb
             # are both MB. Convert the results back to bytes for reporting.
             target_adj_mb = max(
