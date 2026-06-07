@@ -2096,9 +2096,15 @@ def _solve_milp(
         # early weights and STREAMS the big embeddings → their forced in-flight
         # (cinfeas) piles on the cold set → modeled peak > cap → Belady plan
         # excluded → MILP over-evicts. (c_feasibility False sorts before True.)
-        for t in sorted(feasible_tids,
-                        key=lambda t: (pool[t].c_feasibility,
-                                       pool[t].consumers[0][1])):
+        # GATED to the tight regime (MILP_CINFEAS_INFLIGHT): at loose caps with
+        # slack it changes the cold set unhelpfully and REGRESSES the overlap win
+        # (llama8b@12 1.746→2.125), so default ordering is plain soonest-first-use.
+        _greedy_key = (
+            (lambda t: (pool[t].c_feasibility, pool[t].consumers[0][1]))
+            if _cinfeas_inflight
+            else (lambda t: pool[t].consumers[0][1])
+        )
+        for t in sorted(feasible_tids, key=_greedy_key):
             sz = float(pool[t].size_bytes)
             if _rb + sz <= _cap_b:
                 _g[t] = 1.0; _resident.add(t); _rb += sz
