@@ -1649,6 +1649,61 @@ def _solve_milp(
     # Consumer / big-interm samples are thinned uniformly as before.
     # max_peak_samples ≤ 0 disables the cap.
     n_arc_kept = n_arc_samples
+    # DENSE GRID (MILP_DENSE_GRID): protect the densest-RESIDENCY instants from
+    # thinning. The size+uniform-stride policy below can drop the sample at the
+    # binding instant (where the cap is most pressured), so the MILP omits the
+    # eviction needed there and the realized run deadlocks at a tight cap
+    # (llama3b@2: feasibility was luck-of-the-grid, non-monotonic in sample
+    # count). Compute a plan-independent residency-pressure proxy = Σ size of
+    # weights whose [arc_start, consumer_end] window covers t (sweep-line), and
+    # keep the highest-pressure sample times PLUS a uniform baseline. O(events).
+    _dense_grid = os.environ.get("MILP_DENSE_GRID") == "1"
+    if _dense_grid and max_peak_samples > 0:
+        import bisect as _dg
+        _deltas: list[tuple[int, int]] = []
+        for _tid in feasible_tids:
+            _tau = _pt_arc_tau[_tid]
+            _sz = int(pool[_tid].size_bytes)
+            for _cn, _cs, _ce in pool[_tid].consumers:
+                _deltas.append((max(0, int(_cs) - _tau), _sz))
+                _deltas.append((int(_ce) + 1, -_sz))
+        _deltas.sort()
+        _ptimes: list[int] = []
+        _pres: list[int] = []
+        _cur = 0
+        for _t, _d in _deltas:
+            _cur += _d
+            if _ptimes and _ptimes[-1] == _t:
+                _pres[-1] = _cur
+            else:
+                _ptimes.append(_t)
+                _pres.append(_cur)
+
+        def _pressure_at(t: int) -> int:
+            i = _dg.bisect_right(_ptimes, t) - 1
+            return _pres[i] if 0 <= i < len(_pres) else 0
+
+        # budget ≈ the legacy arc(2x)+other(1x) total, split: highest-pressure
+        # samples (binding instants) + uniform-stride baseline (whole-timeline
+        # coverage so we don't lose far-apart events).
+        _budget = max_peak_samples * 2
+        _by_pres = sorted(samples, key=lambda s: _pressure_at(s[1]), reverse=True)
+        _keep = dict((s[1], s) for s in _by_pres[:_budget])
+        if len(samples) > max_peak_samples:
+            _step = len(samples) / float(max_peak_samples)
+            for _i in range(max_peak_samples):
+                _s = samples[int(_i * _step)]
+                _keep.setdefault(_s[1], _s)
+        else:
+            for _s in samples:
+                _keep.setdefault(_s[1], _s)
+        samples = sorted(_keep.values(), key=lambda x: x[1])
+        n_arc_kept = sum(1 for s in samples if s[0] == -1)
+        if audit:
+            print(f"[ct_milp_overlap:audit] dense grid: kept {len(samples)} "
+                  f"samples (pressure-protected + uniform baseline)")
+        max_peak_samples = 0  # skip the legacy thinning below
+
     if max_peak_samples > 0:
         arc_samples = [s for s in samples if s[0] == -1]
         other_samples = [s for s in samples if s[0] != -1]
