@@ -329,6 +329,21 @@ class DeviceAwareVanillaAsync(BaseScheduler):
                     flush=True,
                 )
             )
+        # Peak depth of the H2D prefetch FIFO (transfers waiting for the single
+        # h2d_stream slot). Measures how many prefetches pile up at once: high
+        # ⇒ the plan fires loads faster than the serial channel can drain them.
+        self._diag_max_pf_queue = 0          # max queued "h2d" entries (batches)
+        self._diag_max_pf_queue_tids = 0     # max queued "h2d" tids
+        if os.environ.get("DAV_PFQUEUE_REPORT") == "1":
+            import atexit
+            atexit.register(
+                lambda: print(
+                    f"[DAV:pfqueue_report] max_h2d_queue_entries="
+                    f"{self._diag_max_pf_queue} max_h2d_queue_tids="
+                    f"{self._diag_max_pf_queue_tids}",
+                    flush=True,
+                )
+            )
         self._consumer_starts: dict[int, list[tuple[int, int]]] = {}
         self._nu_cursor: dict[int, int] = {}
         if self._reactive_evict:
@@ -1590,6 +1605,16 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         return True
 
     def _drain_prefetch_queue(self) -> None:
+        # Sample the FIFO depth at its post-fire peak (this tick's prefetches
+        # have been appended; the drain below pops them down to the stream
+        # limit). Count only h2d (prefetch) entries, not d2h.
+        if self._prefetch_queue:
+            _h2d_entries = [q for q in self._prefetch_queue if q[0] == "h2d"]
+            if len(_h2d_entries) > self._diag_max_pf_queue:
+                self._diag_max_pf_queue = len(_h2d_entries)
+            _h2d_tids = sum(len(q[1]) for q in _h2d_entries)
+            if _h2d_tids > self._diag_max_pf_queue_tids:
+                self._diag_max_pf_queue_tids = _h2d_tids
         if self._h2d_streams <= 0:
             return
         while (
