@@ -1234,10 +1234,20 @@ def _solve_milp(
     for col, tid in enumerate(feasible_tids):
         c_var_idx[tid] = col
 
+    # PIN C-INFEASIBLE (MILP_CINFEAS_INFLIGHT): a c-infeasible weight is
+    # un-streamable (first use too early to load in time) AND reused every token
+    # — Belady PINS it resident. If the MILP is allowed to evict it (e=1), the
+    # refetch is catastrophic at a tight cap (llama3b@2: reloading the 751MB
+    # embedding into a 2048MB cap can't fit → abort). So forbid eviction (no e
+    # var ⇒ e≡0) for c-infeasible weights; combined with the forced-cold bound
+    # (g=1) below they stay resident the whole run, matching Belady.
+    _pin_cinf = os.environ.get("MILP_CINFEAS_INFLIGHT") == "1"
     e_var_idx: dict[tuple[int, int], int] = {}
     col = nv
     for tid in feasible_tids:
         pt = pool[tid]
+        if _pin_cinf and not pt.c_feasibility:
+            continue  # pinned resident: no eviction variables
         for k in range(len(pt.consumers) - 1):
             # Only feasible gaps get e variables; infeasible ones are
             # implicit (e ≡ 0).
@@ -1352,14 +1362,14 @@ def _solve_milp(
             # freed after last use). Only e decides evictions.
             bounds_list.append((0.0, 0.0))
             continue
-        if not pt.c_feasibility and not _relax_cinfeasible:
+        if not pt.c_feasibility and (not _relax_cinfeasible or _pin_cinf):
             # No GPU node fires early enough that a runtime prefetch
             # could deliver this tid in time. Pin c=1 → load at layout
-            # phase, before runtime PCIe contention starts. The c+e<=1
-            # coupling below is SUPPRESSED for these tids so e_{t,k}
-            # can still be 1 on feasible gaps — yielding the hybrid
-            # `cold-at-layout + evict-between-consumers + refetch`
-            # pattern. See the coupling section and the emit path.
+            # phase, before runtime PCIe contention starts. Under _pin_cinf
+            # we ALSO created no e-vars for it (above), so it is pinned
+            # resident the whole run (g=1, e≡0) — matching Belady, and
+            # avoiding the catastrophic tight-cap refetch of an un-streamable
+            # weight. (Without _pin_cinf, the legacy hybrid c=1,e=1 applies.)
             bounds_list.append((1.0, 1.0))
         else:
             bounds_list.append((0.0, 1.0))
@@ -2882,6 +2892,14 @@ def _emit_neutral(
         # the hybrid pattern this scheduler now supports for the
         # cold-pinned set.
         if is_cold:
+            # PIN marker: c-infeasible weights pinned (g=1, e≡0) must stay
+            # resident the WHOLE run — the injector must NOT add them to its
+            # cold-start last-use evict pass / evictable set, or runtime reactive
+            # eviction will evict the un-streamable weight and the refetch aborts
+            # at a tight cap (llama3b@2/@3, the 751MB embedding). Tagged reason so
+            # the injector can exclude them.
+            _pinned = (os.environ.get("MILP_CINFEAS_INFLIGHT") == "1"
+                       and not pt.c_feasibility)
             cold_starts.append(NeutralColdStart(
                 tensor_uid=uid,
                 anchor_launch_id=(
@@ -2889,7 +2907,8 @@ def _emit_neutral(
                     if pt.consumer_launch_ids else 0
                 ),
                 reason=(
-                    "lateness_forced_cold" if is_forced
+                    "pinned_cinfeasible" if _pinned
+                    else "lateness_forced_cold" if is_forced
                     else "lateness_optimal_cold"
                 ),
                 cgsim_tids=[int(tid)],

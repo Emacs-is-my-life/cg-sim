@@ -672,6 +672,7 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
     # the coverage-repair walk decide whether the tid stays cuda or
     # needs to be demoted.
     n_pf_infeasible = 0
+    n_pf_gated = 0
     for pf in doc.get("prefetches", []):
         uid = int(pf.get("tensor_uid", -1))
         meta = tensors_by_uid.get(uid)
@@ -769,13 +770,25 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
         start_ns = int(pf.get("transfer_start_ns", 0))
         end_ns = int(pf.get("transfer_end_ns", 0))
         duration_ns = max(0, end_ns - start_ns)
-        arrivals.append({
+        # Structural swap-in gate: the evict trigger NODES this H2D must
+        # wait to retire before it fires (and claims VRAM). Pass through
+        # only node ids that exist in this trace; drop the issuer itself
+        # (a node can't gate on its own retirement).
+        gate_nodes = [
+            int(n) for n in (pf.get("gate_evict_node_ids", []) or [])
+            if int(n) in trace.node_map and int(n) != issuer_id
+        ]
+        arrival = {
             "issuer_node_id": issuer_id,
             "consumer_node_id": consumer_id,
             "cgsim_tids": [int(cgsim_tid)],
             "duration_ns": duration_ns,
             "trusted_async": bool(pf.get("trusted_async", False)),
-        })
+        }
+        if gate_nodes:
+            arrival["gate_evict_node_ids"] = gate_nodes
+            n_pf_gated += 1
+        arrivals.append(arrival)
         prefetch_covered_cgsim.add(int(cgsim_tid))
         n_pf_async += 1
 
@@ -1266,10 +1279,23 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
     for nid, tids in evict_after_node.items():
         already_scheduled_evicted.update(tids)
 
+    # PINNED weights (cold_start reason "pinned_cinfeasible"): the scheduler
+    # pinned these un-streamable, every-token-reused weights resident for the
+    # WHOLE run (g=1, e≡0). They must NOT enter the cold-start last-use evict
+    # pass or the evictable set — otherwise runtime reactive eviction evicts
+    # them and the refetch aborts at a tight cap (e.g. the 751MB embedding at
+    # llama3b@2/@3). Keep them permanently resident.
+    pinned_cgsim: set[int] = set()
+    for cs in doc.get("cold_starts", []):
+        if cs.get("reason") == "pinned_cinfeasible":
+            pinned_cgsim.update(int(t) for t in cs.get("cgsim_tids", []))
+
     for tid, t in trace.tensor_map.items():
         ttype = t.args.get("tensor_type")
         if ttype not in ("WEIGHT", "LEAF"):
             continue
+        if int(tid) in pinned_cgsim:
+            continue  # pinned: never evictable
         if int(tid) in already_scheduled_evicted:
             n_cold_start_skipped_already_evicted += 1
             continue
@@ -1291,6 +1317,15 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
     if evictable_cgsim:
         trace.args.setdefault("evictable_tensor_ids", set()).update(evictable_cgsim)
 
+    # Fixed memory-pool reserve for DeviceAwareSwapAdvisor: the peak
+    # activation footprint the plan kept weights below. The swap scheduler
+    # caps resident weight bytes at (vram_capacity − this) so an activation
+    # claim always has room. Plan-side value; harmless for other schedulers.
+    _sched_meta = doc.get("meta") or {}
+    _act_reserve = int(_sched_meta.get("activation_reserve_bytes", 0) or 0)
+    if _act_reserve > 0:
+        trace.args["swap_activation_reserve_bytes"] = _act_reserve
+
     print(
         f"[inject_schedule:cold_start_evicts] "
         f"emitted={n_cold_start_evicts} "
@@ -1302,6 +1337,7 @@ def _inject_neutral(trace: Trace, doc: dict[str, Any]) -> None:
     print(
         f"[inject_schedule:neutral] "
         f"prefetch async={n_pf_async} sync_fallback={n_pf_sync} "
+        f"gated={n_pf_gated} "
         f"infeasible_ts={n_pf_infeasible} "
         f"exact={n_pf_exact} launch_fallback={n_pf_launch_fallback} "
         f"pre_resolved={n_pf_pre_resolved} "
