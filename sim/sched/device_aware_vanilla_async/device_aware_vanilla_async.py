@@ -445,47 +445,6 @@ class DeviceAwareVanillaAsync(BaseScheduler):
                 best_start, best_gap = cursor, tail
         return best_start
 
-    def _compact_vram(self, memory: BaseMemory) -> bool:
-        """VMM-style defragmentation: relocate IDLE regions to coalesce free
-        space. Address-invariant — peak is a byte-count (num_used_pages,
-        unchanged by moving) and every transfer/compute timing is derived
-        from bytes & bandwidth, never from a page address — so this changes
-        nothing observable. It only lets a placement succeed when total free
-        >= need but contiguity was shredded by heavy evict/refetch churn.
-        Models CUDA VMM (cuMemMap) / PyTorch expandable_segments, where
-        scattered physical pages back a contiguous virtual range, so physical
-        contiguity is not a real constraint. Busy regions (BEING_READ /
-        BEING_WRITTEN, i.e. active transfer endpoints) are PINNED at their
-        current pages; movable IDLE regions are first-fit-packed (largest
-        first) into the lowest free slots not overlapping pinned ones.
-        Returns True if any region moved."""
-        space = memory.space
-        BUSY = (DataRegionAccess.BEING_READ, DataRegionAccess.BEING_WRITTEN)
-        regs = list(space._regions_by_page_idx_start.values())
-        movable = [r for r in regs if r.access_status not in BUSY]
-        pinned = [r for r in regs if r.access_status in BUSY]
-        occ = sorted((r.page_idx_start, r.page_idx_end) for r in pinned)
-        space._regions_by_page_idx_start.clear()
-        for r in pinned:
-            space._regions_by_page_idx_start[r.page_idx_start] = r
-        changed = False
-        for r in sorted(movable, key=lambda x: x.page_idx_end - x.page_idx_start,
-                        reverse=True):
-            n = r.page_idx_end - r.page_idx_start
-            cur = 0
-            for s, e in occ:
-                if s - cur >= n:
-                    break
-                cur = max(cur, e)
-            start = cur
-            if start != r.page_idx_start:
-                changed = True
-            r.page_idx_start = start
-            r.page_idx_end = start + n
-            space._regions_by_page_idx_start[start] = r
-            occ.append((start, start + n)); occ.sort()
-        return changed
-
     def _claim_region(self, memory: BaseMemory, tensor: Tensor):
         page_idx = self._find_free_page(memory, tensor.num_pages)
         if (page_idx is None and getattr(self, "_reactive_evict", False)
@@ -495,10 +454,6 @@ class DeviceAwareVanillaAsync(BaseScheduler):
             # timing mismatch doesn't abort (see compile()).
             self._reactive_evict_until_fits(memory, tensor)
             page_idx = self._find_free_page(memory, tensor.num_pages)
-        if page_idx is None and os.environ.get("DAV_COMPACT_VRAM") == "1":
-            # No contiguous slot, but free bytes may suffice — defrag & retry.
-            if self._compact_vram(memory):
-                page_idx = self._find_free_page(memory, tensor.num_pages)
         if page_idx is None:
             self._dump_abort_diag(memory, tensor)
             self.sys.abort({

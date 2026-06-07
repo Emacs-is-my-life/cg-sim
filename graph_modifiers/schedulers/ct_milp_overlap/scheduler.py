@@ -1174,19 +1174,6 @@ def _solve_milp(
     # short-span tids like embedding/lm_head). See the bounds section.
     _relax_cinfeasible = relax_cinfeasible
 
-    # MILP_LIFETIME (prototype): strip the cold-vs-stream decision. Every
-    # weight is modeled as resident over its LIFETIME [first_use, last_use]
-    # (= c=0 semantics: resident around/between consumers, freed after last
-    # use), and the only decision is e_{t,k} — which gaps to evict to keep
-    # the instantaneous resident set ≤ cap. With the (already refetch-
-    # dominated) objective this is OFFLINE OPTIMAL CACHE REPLACEMENT (the
-    # offline analogue of Belady), which is where the whole-run H2D-volume
-    # gap lives. Cold-start (layout load) is left to the emit/injector.
-    # Implies relax_cinfeasible (all tids streamable).
-    _lifetime_mode = os.environ.get("MILP_LIFETIME") == "1"
-    if _lifetime_mode:
-        _relax_cinfeasible = True
-
     # MILP_GMODE: model cold-start as `g` (= the c binary, but with corrected
     # semantics): resident over [layout, first_use) when g=1 (the early
     # cold-load cost) and FREED after last use (lifetime), DECOUPLED from e
@@ -1242,6 +1229,23 @@ def _solve_milp(
     # var ⇒ e≡0) for c-infeasible weights; combined with the forced-cold bound
     # (g=1) below they stay resident the whole run, matching Belady.
     _pin_cinf = os.environ.get("MILP_CINFEAS_INFLIGHT") == "1"
+    # GATE: only pin if the c-infeasible set FITS resident with churn room. If
+    # Σ c-infeasible bytes exceeds ~85% of the cap, pinning all of them is
+    # infeasible (can't keep > cap resident) or leaves no room for the dynamic
+    # set → abort (llama8b@3/@4: c-infeasible 4601MB > cap 3072/4096). In that
+    # regime fall back to non-pinned (c-infeasible streamable with startup
+    # stall, the pre-pin behavior that ran feasibly). The pin only helps when
+    # the un-streamable set genuinely fits (llama3b@2: 1731MB of 2048 = 84%).
+    if _pin_cinf and peak_target_bytes is not None:
+        _cinf_bytes = sum(
+            pool[t].size_bytes for t in feasible_tids if not pool[t].c_feasibility
+        )
+        if _cinf_bytes > 0.85 * float(peak_target_bytes):
+            _pin_cinf = False
+            if audit:
+                print(f"[ct_milp_overlap:audit] pin DISABLED: c-infeasible "
+                      f"{_cinf_bytes/1e6:.0f}MB > 0.85·cap "
+                      f"{0.85*peak_target_bytes/1e6:.0f}MB (would over-pin)")
     e_var_idx: dict[tuple[int, int], int] = {}
     col = nv
     for tid in feasible_tids:
@@ -1357,11 +1361,6 @@ def _solve_milp(
     bounds_list: list[tuple[float, float | None]] = []
     for tid in feasible_tids:
         pt = pool[tid]
-        if _lifetime_mode:
-            # Strip the cold decision: force c=0 (resident over lifetime,
-            # freed after last use). Only e decides evictions.
-            bounds_list.append((0.0, 0.0))
-            continue
         if not pt.c_feasibility and (not _relax_cinfeasible or _pin_cinf):
             # No GPU node fires early enough that a runtime prefetch
             # could deliver this tid in time. Pin c=1 → load at layout
@@ -1460,14 +1459,9 @@ def _solve_milp(
     vals: list[float] = []
     ub_list: list[float] = []
     row = 0
-    # MILP_LIFT_COUPLING=1: allow the hybrid (c=1,e=1) for ALL tids, not just
-    # c-infeasible ones — i.e. let a COLD weight be transiently evicted in a
-    # consumer gap to time-share the cap (Belady's move). DIAGNOSTIC: tests
-    # whether the c+e≤1 coupling is what caps cold residency / forces
-    # over-streaming. NOTE: not sim-realizable without the injector
-    # coverage_repair fix (sim would demote c=1,e=1 c-feasible tids back to
-    # resident) — so judge by the MODELED cold/stream split, not sim makespan.
-    _lift_coupling = _gmode or os.environ.get("MILP_LIFT_COUPLING") == "1"
+    # g-mode lifts the c+e≤1 coupling for ALL tids (a cold weight may be
+    # transiently evicted in a gap to time-share the cap — Belady's move).
+    _lift_coupling = _gmode
     n_coupling_rows = 0
     if not _lift_coupling:
         for (tid, k), e_col in e_var_idx.items():
@@ -2227,16 +2221,7 @@ def _solve_milp(
                     _v += _coef * float(feasible_warm_start[_col])
                 if _v > _greedy_pk:
                     _greedy_pk = _v
-            # Optional bound on the raise (option 3 safe default): cap how far
-            # above the true target the soft-cap may float. Diffusion's over-
-            # count is tiny (~50MB) so any frac ≥0.01 leaves it untouched; for
-            # llama the raise is GBs, so bounding it keeps tight caps honest
-            # (greedy seed may then be infeasible → MILP runs at ≈Belady rather
-            # than over-committing and OOMing).
             _raise_bound = float("inf")
-            _mrf = os.environ.get("MILP_MAX_SOFTCAP_RAISE_FRAC")
-            if _mrf is not None and target_adj_mb > 0:
-                _raise_bound = target_adj_mb * (1.0 + float(_mrf))
             if not _legacy_arc:
                 # Faithful path: NEVER raise the soft-cap above the true target.
                 # The plan must fit the real cap; honest peak makes the greedy's
@@ -2842,14 +2827,6 @@ def _emit_neutral(
     evicts: list[NeutralEvict] = []
     cold_starts: list[NeutralColdStart] = []
 
-    # MILP_LIFETIME: the LP forced c=0 (lifetime residency + e-evictions), so
-    # nothing is cold-started → all initial loads land on the runtime channel
-    # (huge startup contention). Belady instead cold-loads its working set at
-    # LAYOUT (free). So here the *injector/emit* picks the cold-start set:
-    # greedily layout-load weights in first-use order up to the cap budget
-    # (mirrors SwapAdvisorRuntime._pick_cold_residents); the rest are runtime
-    # prefetched. The MILP's offline-optimal evictions (e) apply on top.
-    _lifetime_mode = os.environ.get("MILP_LIFETIME") == "1"
     # g-mode: cold-start is the MODELED `g` decision (c≥0.5), evictions apply
     # on top (no skip). No heuristic cold-set needed.
     _gmode_emit = os.environ.get("MILP_GMODE") == "1"
@@ -2858,18 +2835,6 @@ def _emit_neutral(
     # short-gap evict→refetch costs a stall (the refetch issuer falls back to a
     # near-sync load), not an abort — that stall is the honest cost.
     _faithful_emit = os.environ.get("MILP_FAITHFUL_EVICT") == "1"
-    lifetime_cold: set[int] = set()
-    if _lifetime_mode and cold_budget_bytes:
-        order = sorted(
-            pool.keys(),
-            key=lambda t: pool[t].consumers[0][1] if pool[t].consumers else 1 << 62,
-        )
-        used = 0
-        for t in order:
-            sz = int(pool[t].size_bytes)
-            if used + sz <= int(cold_budget_bytes):
-                lifetime_cold.add(t)
-                used += sz
 
     # HEADROOM-AWARE PREFETCH (MILP_HEADROOM_PREFETCH=1). A streamed load is
     # issued AHEAD only where the modeled cold-residency leaves VRAM room for it
@@ -2883,6 +2848,14 @@ def _emit_neutral(
     # lifetimes; _max_resident(a,b) = peak cold bytes over [a,b].
     import bisect as _hr_bisect
     _headroom_pf = os.environ.get("MILP_HEADROOM_PREFETCH") == "1"
+    # Pin active iff cinfeas on AND the c-infeasible set fits (≤85% of cap) —
+    # MUST match the scheduler's gate so the injector exclusion matches the
+    # MILP pin (else we'd mark a non-pinned weight non-evictable).
+    _pin_active = os.environ.get("MILP_CINFEAS_INFLIGHT") == "1"
+    if _pin_active and cold_budget_bytes:
+        _cinf_b = sum(p.size_bytes for p in pool.values() if not p.c_feasibility)
+        if _cinf_b > 0.85 * float(cold_budget_bytes):
+            _pin_active = False
     _hr_times: list[int] = []
     _hr_res: list[int] = []
     if _headroom_pf and cold_budget_bytes:
@@ -2891,8 +2864,6 @@ def _emit_neutral(
             _cv2 = result.c_solution.get(_t2, None)
             _cold2 = (_t2 in result.forced_cold or _cv2 is None
                       or float(_cv2) >= KEEP_THRESHOLD)
-            if _lifetime_mode:
-                _cold2 = _t2 in lifetime_cold
             if _cold2 and _p2.consumers:
                 _hr_deltas.append((int(_p2.consumers[0][1]), int(_p2.size_bytes)))
                 _hr_deltas.append((int(_p2.consumers[-1][2]) + 1,
@@ -2935,8 +2906,6 @@ def _emit_neutral(
         cv = result.c_solution.get(tid, None)
         is_forced = tid in result.forced_cold or cv is None
         is_cold = is_forced or float(cv) >= KEEP_THRESHOLD
-        if _lifetime_mode:
-            is_cold = tid in lifetime_cold
 
         # Emit cold-start or initial prefetch, depending on c_t.
         # c-feasible cold tids must not get runtime refetches — the
@@ -2953,7 +2922,7 @@ def _emit_neutral(
             # eviction will evict the un-streamable weight and the refetch aborts
             # at a tight cap (llama3b@2/@3, the 751MB embedding). Tagged reason so
             # the injector can exclude them.
-            _pinned = (os.environ.get("MILP_CINFEAS_INFLIGHT") == "1"
+            _pinned = (_pin_active
                        and not pt.c_feasibility)
             cold_starts.append(NeutralColdStart(
                 tensor_uid=uid,
@@ -3017,10 +2986,7 @@ def _emit_neutral(
         # MILP's coupling guarantees e=0 for them. c-infeasible cold
         # tids (forced or pinned) fall through to the per-gap loop
         # so their hybrid evict+refetch can be emitted when e=1.
-        # In lifetime mode, a cold-started weight STILL carries its
-        # MILP-decided e evictions (cold-load at layout, evict-in-gap,
-        # refetch) — that's the whole point — so don't skip.
-        if is_cold and pt.c_feasibility and not _lifetime_mode and not _gmode_emit:
+        if is_cold and pt.c_feasibility and not _gmode_emit:
             continue
 
         # Per-gap evict + refetch. For c=0 (streamed) tids this is the
