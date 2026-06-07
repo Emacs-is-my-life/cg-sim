@@ -314,6 +314,21 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         # furthest out instead of aborting (what SwapAdvisorRuntime does
         # online). Needs per-tid consumer start times for _next_use.
         self._reactive_evict = os.environ.get("DAV_REACTIVE_EVICT") == "1"
+        # Plan-fidelity instrumentation: count UNPLANNED reactive evictions (i.e.
+        # how much cache-replacement the runtime does that the MILP plan did NOT
+        # schedule). High values ⇒ sim is overriding the offline residency plan.
+        self._reactive_evict_count = 0
+        self._reactive_evict_bytes = 0
+        if os.environ.get("DAV_REACTIVE_REPORT") == "1":
+            import atexit
+            atexit.register(
+                lambda: print(
+                    f"[DAV:reactive_report] reactive_evict_count="
+                    f"{self._reactive_evict_count} reactive_evict_bytes_MB="
+                    f"{self._reactive_evict_bytes/1e6:.0f}",
+                    flush=True,
+                )
+            )
         self._consumer_starts: dict[int, list[tuple[int, int]]] = {}
         self._nu_cursor: dict[int, int] = {}
         if self._reactive_evict:
@@ -362,6 +377,11 @@ class DeviceAwareVanillaAsync(BaseScheduler):
         for _nu, tid in cands:
             if self._find_free_page(memory, need) is not None:
                 break
+            self._reactive_evict_count += 1
+            self._reactive_evict_bytes += int(
+                getattr(self.sys.trace.tensor_map.get(int(tid)), "size_bytes", 0)
+                or 0
+            )
             self._release_vram_only(tid)
 
     # ============================================================ helpers

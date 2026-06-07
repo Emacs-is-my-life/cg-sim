@@ -938,6 +938,10 @@ def _solve_integer_highspy_model(
     h.run()
     status = h.getModelStatus()
     status_str = h.modelStatusToString(status)
+    _gap = getattr(h.getInfo(), "mip_gap", None)
+    if _gap is not None:
+        print(f"[ct_milp_overlap:solver] {label} MILP terminated "
+              f"status={status_str!r} mip_gap={_gap:.4g}")
     if status == highspy.HighsModelStatus.kOptimal:
         final = np.asarray(list(h.getSolution().col_value), dtype=np.float64)
         return (final, True, f"{label} MILP optimal", status_str, False)
@@ -1724,6 +1728,42 @@ def _solve_milp(
     # peak is consistent with the constraints by construction.
     peak_sample_terms: list[tuple[float, list[tuple[int, float]]]] = []
 
+    # Instrumentation: per-sample peak contributions split by category so the
+    # binding-sample peak can be attributed to FORCED (un-evictable) vs
+    # EVICTABLE residency. Each entry maps category → [const_mb, [(col, coef)]].
+    # Gated (audit or env) — the categorize bookkeeping is skipped on the hot
+    # path otherwise. Used below to drive peak fidelity (fix: turn forced
+    # residency into channel-L lateness so modeled peak can reach the true cap).
+    _categorize = bool(audit) or os.environ.get("MILP_PEAK_CATEGORIZE") == "1"
+    peak_sample_cats: list[dict[str, list]] = []
+
+    # HONEST IN-FLIGHT PEAK (opt-in: MILP_HONEST_INFLIGHT=1; default OFF).
+    # The load/refetch ARC of a tid is charged at full per-tid `size` in its
+    # [consumer−τ, consumer] window, FORCED resident regardless of the
+    # cold/evict decision. With h2d_streams=1 only ONE transfer is on the
+    # channel at a time and the early-arrived pool is bounded by bw·W — so the
+    # per-tid arc DOUBLE-COUNTS the in-flight pool when consumers (esp.
+    # first-uses at prefill) cluster within τ. Measured: this is the dominant
+    # modeled-peak over-count on llama (≈4.6GB pre-arc0 + ≈1.0GB refetch-arc on
+    # llama8b@8 → modeled 11969 vs true 8190). The honest model (pre-first-use
+    # = size·g, gap = size·(1−e) over the WHOLE gap incl. arc; in-flight = the
+    # single bw·W floor below) collapses the over-count to ~154MB and PRESERVES
+    # the sdxl/sd3 wins.
+    #
+    # WHY IT IS NOT THE DEFAULT (validated 2026-06-07): the over-count was
+    # implicitly propping up the llama wins. Removing it makes over-streaming
+    # plans model-feasible, and (a) the channel-L objective then PREFERS them
+    # (it over-credits overlap in the bandwidth-bound regime), (b) the static
+    # plan fills cold to cap with worse residency-quality than online Belady →
+    # reactive-evict thrash / abort. Net: llama8b@12 regressed WIN 1.733 →
+    # LOSE 3.148 (87 vs 49GB), @14 0.673 → 1.433, tight caps abort even with
+    # 595MB headroom. So peak fidelity is NECESSARY but not SUFFICIENT for
+    # llama; it must be paired with a channel-L volume-pricing fix (and the
+    # injector realizability fix) before it is a net win. Gated until then;
+    # diffusion is unaffected either way. _legacy_arc=True restores the arc
+    # forcing (the shipped behavior).
+    _legacy_arc = os.environ.get("MILP_HONEST_INFLIGHT") != "1"
+
     n_samples_total = len(samples)
     audit_progress_step = max(1, n_samples_total // 10)
     for _sample_idx, (nid_sample, t_l) in enumerate(samples):
@@ -1741,6 +1781,19 @@ def _solve_milp(
             if t_l <= e_:
                 const_addons += sz_ / MODEL_SCALE
         var_coefs: dict[int, float] = {}
+        _cat: dict[str, list] = {}
+
+        def _tag(cat: str, const_mb: float = 0.0, var: "tuple | None" = None):
+            if not _categorize:
+                return
+            slot = _cat.get(cat)
+            if slot is None:
+                slot = [0.0, []]
+                _cat[cat] = slot
+            slot[0] += const_mb
+            if var is not None:
+                slot[1].append(var)
+
         for tid in feasible_tids:
             pt = pool[tid]
             size = pt.size_bytes / MODEL_SCALE  # MB; every use below is MB
@@ -1748,6 +1801,7 @@ def _solve_milp(
             # frozenset of consumer node ids.
             if nid_sample in _pt_consumer_nids_set[tid]:
                 const_addons += size
+                _tag("consumed", size)
                 continue
             first_start = _pt_first_start[tid]
             last_end = _pt_last_end[tid]
@@ -1764,13 +1818,19 @@ def _solve_milp(
             arc_tau = _pt_arc_tau[tid]
 
             if t_l < first_start:
-                arc_0_start = max(0, first_start - arc_tau)
-                if t_l >= arc_0_start:
-                    const_addons += size
-                else:
-                    var_coefs[c_var_idx[tid]] = (
-                        var_coefs.get(c_var_idx[tid], 0.0) + size
-                    )
+                # Pre-first-use: resident iff cold (size·g). A STREAMED weight
+                # (g=0) is loaded JIT just before first use; that in-flight load
+                # is the single bw·W floor (h2d_streams=1), not per-tid here.
+                if _legacy_arc:
+                    arc_0_start = max(0, first_start - arc_tau)
+                    if t_l >= arc_0_start:
+                        const_addons += size
+                        _tag("pre_arc0_forced", size)
+                        continue
+                var_coefs[c_var_idx[tid]] = (
+                    var_coefs.get(c_var_idx[tid], 0.0) + size
+                )
+                _tag("pre_cold", var=(c_var_idx[tid], size))
                 continue
             if t_l > last_end:
                 # Post-last-use. g-mode: FREED after last use (lifetime) — the
@@ -1780,6 +1840,7 @@ def _solve_milp(
                     var_coefs[c_var_idx[tid]] = (
                         var_coefs.get(c_var_idx[tid], 0.0) + size
                     )
+                    _tag("post_cold", var=(c_var_idx[tid], size))
                 continue
             k_in = None
             for k in range(len(pt.consumers) - 1):
@@ -1790,11 +1851,19 @@ def _solve_milp(
                 # Sample sits on a consumer's [start, end] boundary
                 # without matching node id — treat as alive.
                 const_addons += size
+                _tag("boundary_forced", size)
                 continue
             arc_kp1_start = pt.consumers[k_in + 1][1] - arc_tau
-            if t_l >= arc_kp1_start:
+            if _legacy_arc and t_l >= arc_kp1_start:
+                # Legacy: force the refetch arc resident per-tid (over-counts
+                # the serial in-flight pool when consumers cluster within τ).
                 const_addons += size
+                _tag("arc_refetch_forced", size)
             elif pt.gap_feasibility[k_in] and (tid, k_in) in e_var_idx:
+                # Whole feasible gap — dead-zone AND refetch arc — is residency
+                # `size · (1 − e_{t,k_in})`, independent of c_t. When evicted
+                # (e=1) the brief in-flight refetch during the arc is the single
+                # bw·W floor, not per-tid size (removes the arc over-count).
                 # Dead zone of a feasible gap (HYBRID): residency is
                 # `size · (1 − e_{t,k_in})`, independent of c_t.
                 # Encode the constant `size` and the −size coefficient
@@ -1809,15 +1878,20 @@ def _solve_milp(
                 var_coefs[e_col] = (
                     var_coefs.get(e_col, 0.0) - size
                 )
+                _tag("evictable", size, (e_col, -size))
             else:
-                # Infeasible gap — no evict can fit, tensor stays.
+                # Infeasible gap — no evict var (refetch can't fit the gap), so
+                # the tensor stays resident.
                 const_addons += size
+                _tag("infeasible_forced", size)
 
         # Save this sample's peak terms for post-solve true-peak recompute.
         peak_sample_terms.append((
             float(const_addons),
             [(vc, cf) for vc, cf in var_coefs.items() if abs(cf) >= 1e-9],
         ))
+        if _categorize:
+            peak_sample_cats.append(_cat)
 
         # P ≥ const_addons + Σ var_coef · c + α · L_window_i
         #   ⇒  Σ var_coef · c − P + α · L_window_i ≤ −const_addons
@@ -1973,6 +2047,12 @@ def _solve_milp(
     if _gmode and peak_target_bytes is not None:
         import bisect as _bis
         _cap_b = float(peak_target_bytes)
+        if not _legacy_arc:
+            # Faithful path: reserve the safety margin as in-flight/prefetch
+            # headroom so the cold working set leaves room for the runtime's
+            # dst-claim pipeline (prevents the runtime OOM where reactive evict
+            # has no idle victim because cold filled the cap to the top).
+            _cap_b = float(peak_target_bytes) * (1.0 - float(safety_margin_frac))
         _cstarts = {t: [c[1] for c in pool[t].consumers] for t in feasible_tids}
         _g = {t: 0.0 for t in feasible_tids}
         _resident: set[int] = set()
@@ -1993,6 +2073,13 @@ def _solve_milp(
             i = _bis.bisect_right(cs, tau)
             return float(cs[i]) if i < len(cs) else float("inf")
 
+        # Faithful eviction: capture EVERY greedy eviction (incl. short/infeasible
+        # gaps that have no e-var). The lossy `_eset` keeps only feasible-gap
+        # evictions for the MILP warm-start; `_greedy_full_evicts` keeps them all
+        # so the emit can realize the exact offline-Belady eviction sequence
+        # (MILP_FAITHFUL_EVICT). Dropping short-gap evictions is the root of the
+        # ~26-36GB runtime reactive thrash on llama (see memory).
+        _greedy_full_evicts: set[tuple[int, int]] = set()
         for (_tau, _t, _k) in _events:
             if _t not in _resident:
                 sz = float(pool[_t].size_bytes)
@@ -2001,8 +2088,10 @@ def _solve_milp(
                     _vk = _last_idx[_victim]
                     if _vk == -1:
                         _g[_victim] = 0.0           # evicted before first use → not cold
-                    elif (_victim, _vk) in e_var_idx:
-                        _eset.add((_victim, _vk))
+                    else:
+                        _greedy_full_evicts.add((_victim, _vk))
+                        if (_victim, _vk) in e_var_idx:
+                            _eset.add((_victim, _vk))
                     _resident.discard(_victim); _rb -= float(pool[_victim].size_bytes)
                 _resident.add(_t); _rb += sz
             _last_idx[_t] = _k
@@ -2026,16 +2115,62 @@ def _solve_milp(
                     _v += _coef * float(feasible_warm_start[_col])
                 if _v > _greedy_pk:
                     _greedy_pk = _v
+            # Optional bound on the raise (option 3 safe default): cap how far
+            # above the true target the soft-cap may float. Diffusion's over-
+            # count is tiny (~50MB) so any frac ≥0.01 leaves it untouched; for
+            # llama the raise is GBs, so bounding it keeps tight caps honest
+            # (greedy seed may then be infeasible → MILP runs at ≈Belady rather
+            # than over-committing and OOMing).
+            _raise_bound = float("inf")
+            _mrf = os.environ.get("MILP_MAX_SOFTCAP_RAISE_FRAC")
+            if _mrf is not None and target_adj_mb > 0:
+                _raise_bound = target_adj_mb * (1.0 + float(_mrf))
+            if not _legacy_arc:
+                # Faithful path: NEVER raise the soft-cap above the true target.
+                # The plan must fit the real cap; honest peak makes the greedy's
+                # modeled peak ≈ its true residency (≤ cap) already, so the raise
+                # is unnecessary and only re-introduces the over-commit thrash.
+                _raise_bound = min(_raise_bound, target_adj_mb)
             if _greedy_pk > ub_list[_softcap_ub_pos]:
-                if audit:
-                    print(f"[ct_milp_overlap:audit] raising soft-cap "
-                          f"{ub_list[_softcap_ub_pos]:.0f}→{_greedy_pk:.0f}MB so "
-                          f"greedy seed is feasible (auto-calibrated over-count "
-                          f"{_greedy_pk - ub_list[_softcap_ub_pos]:.0f}MB)")
-                ub_list[_softcap_ub_pos] = _greedy_pk
+                _new_ub = min(_greedy_pk, _raise_bound)
+                if _new_ub > ub_list[_softcap_ub_pos]:
+                    if audit:
+                        print(f"[ct_milp_overlap:audit] raising soft-cap "
+                              f"{ub_list[_softcap_ub_pos]:.0f}→{_new_ub:.0f}MB "
+                              f"(greedy modeled peak {_greedy_pk:.0f}MB, bound "
+                              f"{_raise_bound:.0f}MB) so greedy seed is feasible")
+                    ub_list[_softcap_ub_pos] = _new_ub
         if audit:
             print(f"[ct_milp_overlap:audit] greedy-Belady warm-start: "
                   f"cold={sum(_g.values()):.0f} tids, evicts={len(_eset)}")
+        # Attribute the greedy seed's BINDING-sample modeled peak across
+        # categories. The gap between this modeled peak and the true cap is the
+        # over-count we must eliminate (forced residency that Belady evicts
+        # reactively). Tells us which forced category to convert to channel-L
+        # lateness, and how many MB each is worth, before re-sweeping.
+        if _categorize and peak_sample_cats:
+            _ws = feasible_warm_start
+            _best_i, _best_pk = -1, -1.0
+            for _i, (_cst, _trm) in enumerate(peak_sample_terms):
+                _v = _cst + sum(_cf * float(_ws[_col]) for _col, _cf in _trm)
+                if _v > _best_pk:
+                    _best_pk, _best_i = _v, _i
+            if _best_i >= 0:
+                _cats = peak_sample_cats[_best_i]
+                _parts = {}
+                for _cat_name, (_cmb, _vterms) in _cats.items():
+                    _parts[_cat_name] = _cmb + sum(
+                        _cf * float(_ws[_col]) for _col, _cf in _vterms)
+                _forced = {k: v for k, v in _parts.items() if "forced" in k
+                           or k == "consumed"}
+                _total_forced = sum(_forced.values())
+                print(f"[ct_milp_overlap:audit] GREEDY peak attribution @ "
+                      f"binding sample {_best_i}: modeled_peak={_best_pk:.0f}MB "
+                      f"target={target_adj_mb:.0f}MB over={_best_pk-target_adj_mb:.0f}MB")
+                for _cat_name in sorted(_parts, key=lambda k: -_parts[k]):
+                    print(f"    {_cat_name:>20s}: {_parts[_cat_name]:8.0f}MB")
+                print(f"    {'TOTAL_FORCED':>20s}: {_total_forced:8.0f}MB "
+                      f"(un-evictable; this is the over-count lever)")
     if not _greedy_seeded:
         for tid in feasible_tids:
             pt = pool[tid]
@@ -2288,6 +2423,22 @@ def _solve_milp(
                     e_solution[(tid, k)] = float(x[e_var_idx[(tid, k)]])
                 else:
                     e_solution[(tid, k)] = 0.0
+        # FAITHFUL EVICTION (MILP_FAITHFUL_EVICT=1): override the MILP's lossy
+        # feasible-gap e-solution with the EXACT offline-Belady greedy plan —
+        # cold = greedy g, evictions = the FULL greedy sequence incl. short
+        # gaps. Offline-optimal caching for ~uniform weights IS greedy
+        # farthest-next-use, and emitting every eviction (not just feasible-gap
+        # ones) makes the realized volume match offline Belady instead of
+        # leaking ~26-36GB into runtime reactive eviction. The MILP still ran
+        # (overlap/peak diagnostics); only the eviction plan is replaced.
+        if os.environ.get("MILP_FAITHFUL_EVICT") == "1" and _greedy_seeded:
+            c_solution = {tid: float(_g.get(tid, 0.0)) for tid in feasible_tids}
+            e_solution = {}
+            for tid in feasible_tids:
+                for k in range(len(pool[tid].consumers) - 1):
+                    e_solution[(tid, k)] = (
+                        1.0 if (tid, k) in _greedy_full_evicts else 0.0
+                    )
         peak_bytes = int(_alive_peak(c_solution, e_solution) * MODEL_SCALE)
         # Slacks are in ms (model units); convert back to ns. Total
         # lateness = sum across windows (cascading stalls add up).
@@ -2590,6 +2741,11 @@ def _emit_neutral(
     # g-mode: cold-start is the MODELED `g` decision (c≥0.5), evictions apply
     # on top (no skip). No heuristic cold-set needed.
     _gmode_emit = os.environ.get("MILP_GMODE") == "1"
+    # Faithful eviction: emit evictions in ALL gaps (incl. short/infeasible
+    # ones) so the offline-Belady eviction sequence is realized exactly. A
+    # short-gap evict→refetch costs a stall (the refetch issuer falls back to a
+    # near-sync load), not an abort — that stall is the honest cost.
+    _faithful_emit = os.environ.get("MILP_FAITHFUL_EVICT") == "1"
     lifetime_cold: set[int] = set()
     if _lifetime_mode and cold_budget_bytes:
         order = sorted(
@@ -2602,6 +2758,65 @@ def _emit_neutral(
             if used + sz <= int(cold_budget_bytes):
                 lifetime_cold.add(t)
                 used += sz
+
+    # HEADROOM-AWARE PREFETCH (MILP_HEADROOM_PREFETCH=1). A streamed load is
+    # issued AHEAD only where the modeled cold-residency leaves VRAM room for it
+    # over the ahead-window; otherwise it is left to DEMAND-LOAD (the sim loads
+    # it JIT at its consumer and reactive Belady frees room). The MILP already
+    # plans sync residency (a streamed weight is modeled resident only when
+    # used); this makes the emit HONOR that instead of secretly prefetching
+    # everything ~W ahead and claiming dst VRAM on a full cap (the llama
+    # reactive-thrash). Where there is slack (sdxl) prefetch-ahead still fires →
+    # overlap kept. Cold-residency timeline = step function over cold tids'
+    # lifetimes; _max_resident(a,b) = peak cold bytes over [a,b].
+    import bisect as _hr_bisect
+    _headroom_pf = os.environ.get("MILP_HEADROOM_PREFETCH") == "1"
+    _hr_times: list[int] = []
+    _hr_res: list[int] = []
+    if _headroom_pf and cold_budget_bytes:
+        _hr_deltas: list[tuple[int, int]] = []
+        for _t2, _p2 in pool.items():
+            _cv2 = result.c_solution.get(_t2, None)
+            _cold2 = (_t2 in result.forced_cold or _cv2 is None
+                      or float(_cv2) >= KEEP_THRESHOLD)
+            if _lifetime_mode:
+                _cold2 = _t2 in lifetime_cold
+            if _cold2 and _p2.consumers:
+                _hr_deltas.append((int(_p2.consumers[0][1]), int(_p2.size_bytes)))
+                _hr_deltas.append((int(_p2.consumers[-1][2]) + 1,
+                                   -int(_p2.size_bytes)))
+        _hr_deltas.sort()
+        _acc = 0
+        for _ht, _hd in _hr_deltas:
+            _acc += _hd
+            if _hr_times and _hr_times[-1] == _ht:
+                _hr_res[-1] = _acc
+            else:
+                _hr_times.append(_ht)
+                _hr_res.append(_acc)
+
+    def _max_resident(a: int, b: int) -> int:
+        if not _hr_times:
+            return 0
+        m = 0
+        ia = _hr_bisect.bisect_right(_hr_times, a) - 1
+        if 0 <= ia < len(_hr_res):
+            m = _hr_res[ia]
+        j = _hr_bisect.bisect_left(_hr_times, a)
+        while j < len(_hr_times) and _hr_times[j] <= b:
+            if _hr_res[j] > m:
+                m = _hr_res[j]
+            j += 1
+        return m
+
+    def _can_prefetch_ahead(issue_lp: int, consume_lp: int, size_b: int) -> bool:
+        """True if prefetching `size_b` over [issue_lp, consume_lp] fits under the
+        cold budget; else the load should demand-load (reactive frees room)."""
+        if not _headroom_pf or not cold_budget_bytes:
+            return True
+        head = int(cold_budget_bytes) - _max_resident(int(issue_lp),
+                                                      int(consume_lp))
+        return head >= int(size_b)
 
     for tid, pt in pool.items():
         uid = uid_by_tid[tid]
@@ -2657,20 +2872,25 @@ def _emit_neutral(
             issue_graph_id_field = (
                 -1 if int(issue_gid) == int(c0_gid) else int(issue_gid)
             )
-            prefetches.append(NeutralPrefetch(
-                tensor_uid=uid,
-                issue_launch_id=max(0, int(c0_lid)),
-                wait_launch_id=max(0, int(c0_lid)),
-                transfer_start_ns=int(max(0, c0_trace_start - pt.tau_h2d_ns)),
-                transfer_end_ns=int(c0_trace_start),
-                reason="lateness_initial",
-                issue_node_id=int(issue_nid),
-                wait_node_id=int(c0_nid),
-                cgsim_tid=int(tid),
-                trusted_async=(issue_nid != c0_nid),
-                issue_graph_id=issue_graph_id_field,
-                iter_mask=[],
-            ))
+            # Headroom gate: prefetch ahead only if the modeled cold residency
+            # leaves room over the ahead-window; else demand-load at consumer_0
+            # (reactive Belady frees room JIT — no early dst-claim / thrash).
+            if _can_prefetch_ahead(c0_lp_start - _issue_offset,
+                                   c0_lp_start, pt.size_bytes):
+                prefetches.append(NeutralPrefetch(
+                    tensor_uid=uid,
+                    issue_launch_id=max(0, int(c0_lid)),
+                    wait_launch_id=max(0, int(c0_lid)),
+                    transfer_start_ns=int(max(0, c0_trace_start - pt.tau_h2d_ns)),
+                    transfer_end_ns=int(c0_trace_start),
+                    reason="lateness_initial",
+                    issue_node_id=int(issue_nid),
+                    wait_node_id=int(c0_nid),
+                    cgsim_tid=int(tid),
+                    trusted_async=(issue_nid != c0_nid),
+                    issue_graph_id=issue_graph_id_field,
+                    iter_mask=[],
+                ))
 
         # Skip per-gap emit only for c-feasible cold tids — the
         # MILP's coupling guarantees e=0 for them. c-infeasible cold
@@ -2687,7 +2907,7 @@ def _emit_neutral(
         # the hybrid `cold-at-layout + mid-run evict + refetch`
         # pattern (see Coupling section in _solve_milp).
         for k in range(len(pt.consumers) - 1):
-            if not pt.gap_feasibility[k]:
+            if not pt.gap_feasibility[k] and not _faithful_emit:
                 continue
             ev = result.e_solution.get((tid, k), 0.0)
             if float(ev) < KEEP_THRESHOLD:
@@ -2739,22 +2959,26 @@ def _emit_neutral(
             refetch_graph_id_field = (
                 -1 if int(re_gid) == int(kp1_gid) else int(re_gid)
             )
-            prefetches.append(NeutralPrefetch(
-                tensor_uid=uid,
-                issue_launch_id=max(0, int(pt.consumer_launch_ids[k + 1])),
-                wait_launch_id=max(0, int(kp1_lid)),
-                transfer_start_ns=int(max(
-                    ck_trace_end + 1, ckp1_trace_start - pt.tau_h2d_ns,
-                )),
-                transfer_end_ns=int(ckp1_trace_start),
-                reason=refetch_reason,
-                issue_node_id=int(re_nid),
-                wait_node_id=int(ckp1_nid),
-                cgsim_tid=int(tid),
-                trusted_async=(re_nid != ckp1_nid),
-                issue_graph_id=refetch_graph_id_field,
-                iter_mask=[],
-            ))
+            # Headroom gate: the evict above always frees the weight; the refetch
+            # is prefetched ahead only if there's room, else it demand-loads at
+            # consumer_{k+1} (reactive frees room JIT — no early dst-claim).
+            if _can_prefetch_ahead(re_lp_ts, ckp1_lp_start, pt.size_bytes):
+                prefetches.append(NeutralPrefetch(
+                    tensor_uid=uid,
+                    issue_launch_id=max(0, int(pt.consumer_launch_ids[k + 1])),
+                    wait_launch_id=max(0, int(kp1_lid)),
+                    transfer_start_ns=int(max(
+                        ck_trace_end + 1, ckp1_trace_start - pt.tau_h2d_ns,
+                    )),
+                    transfer_end_ns=int(ckp1_trace_start),
+                    reason=refetch_reason,
+                    issue_node_id=int(re_nid),
+                    wait_node_id=int(ckp1_nid),
+                    cgsim_tid=int(tid),
+                    trusted_async=(re_nid != ckp1_nid),
+                    issue_graph_id=refetch_graph_id_field,
+                    iter_mask=[],
+                ))
 
     graph_ids_seen: set[int] = set()
     for pt in pool.values():
