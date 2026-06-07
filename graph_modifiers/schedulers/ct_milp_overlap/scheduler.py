@@ -1516,8 +1516,32 @@ def _solve_milp(
     # bw·W in-flight term to the peak floor below. This makes modeled peak
     # track true sim peak (was over by ~335-575MB), so margin can go to 0 and
     # the LP fills the real cap instead of under-filling and over-streaming.
+    # ISSUE-TIME ARC (MILP_ISSUE_TIME_ARC=1). The sim claims a prefetch's dst
+    # VRAM from the moment it is ISSUED, which the emit places at
+    # max(τ, W) before the consumer (see _pick_issuer_node / _issue_offset).
+    # The default arc is only τ (the transfer window), so for any weight with
+    # τ < W the [consume−W, consume−τ] slice of dst-claim is UNACCOUNTED in the
+    # peak → the modeled peak under-counts the true peak → the converged
+    # tight-cap plan's realized peak overflows → abort. Charging the arc at the
+    # actual issue lead max(τ, W) makes the modeled peak a true upper bound on
+    # the sim's residency (no tight-cap abort) and prices prefetch-ahead's VRAM
+    # cost honestly at loose caps. Big weights (τ ≥ W) are unchanged.
+    _issue_arc = os.environ.get("MILP_ISSUE_TIME_ARC") == "1"
+    # CHARGE C-INFEASIBLE IN-FLIGHT (MILP_CINFEAS_INFLIGHT=1). A c-infeasible
+    # weight (first use too early to stream in time, e.g. the 1002MB embedding
+    # used at every token's t≈0) MUST be resident when loaded; if the model
+    # leaves it streamable with no in-flight charge (honest mode), the MILP
+    # streams it to "save" cold budget → at runtime its 1002MB dst-claim can't
+    # fit a full cap → abort / 50GB reactive thrash. Charging its load/refetch
+    # arc as forced in-flight (size over [use−τ, use]) makes streaming it
+    # peak-expensive → the objective cold-resides it (what Belady does), while
+    # small c-feasible weights stay honest (no prefill over-count). Targeted —
+    # only the c-infeasible set (the embeddings), not all weights.
+    _cinfeas_inflight = os.environ.get("MILP_CINFEAS_INFLIGHT") == "1"
+    _arc_lead = (lambda t: max(int(pool[t].tau_h2d_ns), int(_W_ns))) if _issue_arc \
+        else (lambda t: int(pool[t].tau_h2d_ns))
     _pt_arc_tau: dict[int, int] = {
-        tid: int(round(pool[tid].tau_h2d_ns * float(arc_queue_factor)))
+        tid: int(round(_arc_lead(tid) * float(arc_queue_factor)))
         for tid in feasible_tids
     }
     _pt_consumer_nids_set: dict[int, frozenset[int]] = {
@@ -1816,12 +1840,19 @@ def _solve_milp(
             # widen by `arc_queue_factor` to match. Set to 1.0 to
             # disable, larger to model deeper queue serialization.
             arc_tau = _pt_arc_tau[tid]
+            # Force the per-tid in-flight arc charge for legacy mode OR (honest
+            # mode) for c-infeasible weights, so their load/refetch arc residency
+            # is counted and the objective cold-resides them rather than
+            # streaming an un-streamable weight.
+            _force_arc = _legacy_arc or (
+                _cinfeas_inflight and not pt.c_feasibility
+            )
 
             if t_l < first_start:
                 # Pre-first-use: resident iff cold (size·g). A STREAMED weight
                 # (g=0) is loaded JIT just before first use; that in-flight load
                 # is the single bw·W floor (h2d_streams=1), not per-tid here.
-                if _legacy_arc:
+                if _force_arc:
                     arc_0_start = max(0, first_start - arc_tau)
                     if t_l >= arc_0_start:
                         const_addons += size
@@ -1854,9 +1885,10 @@ def _solve_milp(
                 _tag("boundary_forced", size)
                 continue
             arc_kp1_start = pt.consumers[k_in + 1][1] - arc_tau
-            if _legacy_arc and t_l >= arc_kp1_start:
-                # Legacy: force the refetch arc resident per-tid (over-counts
-                # the serial in-flight pool when consumers cluster within τ).
+            if _force_arc and t_l >= arc_kp1_start:
+                # Legacy / c-infeasible: force the refetch arc resident per-tid
+                # (the load is in-flight; c-infeasible weights must be charged
+                # so the objective cold-resides them instead of streaming).
                 const_addons += size
                 _tag("arc_refetch_forced", size)
             elif pt.gap_feasibility[k_in] and (tid, k_in) in e_var_idx:
@@ -2057,7 +2089,16 @@ def _solve_milp(
         _g = {t: 0.0 for t in feasible_tids}
         _resident: set[int] = set()
         _rb = 0.0
-        for t in sorted(feasible_tids, key=lambda t: pool[t].consumers[0][1]):
+        # Cold-start C-INFEASIBLE weights FIRST (they cannot be streamed in time
+        # — e.g. the 1002MB embedding used at every token's t≈0 — so they MUST be
+        # cold-resident; Belady pins exactly these). Then fill the rest by
+        # soonest-first-use. Without this, the greedy fills the budget with small
+        # early weights and STREAMS the big embeddings → their forced in-flight
+        # (cinfeas) piles on the cold set → modeled peak > cap → Belady plan
+        # excluded → MILP over-evicts. (c_feasibility False sorts before True.)
+        for t in sorted(feasible_tids,
+                        key=lambda t: (pool[t].c_feasibility,
+                                       pool[t].consumers[0][1])):
             sz = float(pool[t].size_bytes)
             if _rb + sz <= _cap_b:
                 _g[t] = 1.0; _resident.add(t); _rb += sz
