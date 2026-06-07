@@ -348,19 +348,8 @@ def _build_pool(
         # in a late-starting graph (e.g. UNet first kernel in G_3
         # when G_0..G_2 already ran) wrongly looks c-infeasible
         # because its graph's first node provides no slack.
-        # MILP_RELAX_GAP_FEASIBILITY=1: mark every gap feasible, giving the LP
-        # an e_{t,k} even on gaps smaller than the transfer time. Evicting
-        # there makes the refetch land late (sim stalls via the injector's
-        # sync-fallback), which the lateness term prices — so the LP can free
-        # peak by evicting otherwise-forced-resident weights in their small
-        # gaps. This trades stall for peak → lets tighter budgets become
-        # FEASIBLE that the unrelaxed filter forces over-cap.
-        _relax_gap = os.environ.get("MILP_RELAX_GAP_FEASIBILITY") == "1"
         gap_feas: list[bool] = []
         for i in range(len(consumers) - 1):
-            if _relax_gap:
-                gap_feas.append(True)
-                continue
             ck_end = consumers[i][2]
             ckp1_start = consumers[i + 1][1]
             target = ckp1_start - tau_h2d
@@ -2179,13 +2168,6 @@ def _solve_milp(
             i = _bis.bisect_right(cs, tau)
             return float(cs[i]) if i < len(cs) else float("inf")
 
-        # Faithful eviction: capture EVERY greedy eviction (incl. short/infeasible
-        # gaps that have no e-var). The lossy `_eset` keeps only feasible-gap
-        # evictions for the MILP warm-start; `_greedy_full_evicts` keeps them all
-        # so the emit can realize the exact offline-Belady eviction sequence
-        # (MILP_FAITHFUL_EVICT). Dropping short-gap evictions is the root of the
-        # ~26-36GB runtime reactive thrash on llama (see memory).
-        _greedy_full_evicts: set[tuple[int, int]] = set()
         for (_tau, _t, _k) in _events:
             if _t not in _resident:
                 sz = float(pool[_t].size_bytes)
@@ -2194,10 +2176,8 @@ def _solve_milp(
                     _vk = _last_idx[_victim]
                     if _vk == -1:
                         _g[_victim] = 0.0           # evicted before first use → not cold
-                    else:
-                        _greedy_full_evicts.add((_victim, _vk))
-                        if (_victim, _vk) in e_var_idx:
-                            _eset.add((_victim, _vk))
+                    elif (_victim, _vk) in e_var_idx:
+                        _eset.add((_victim, _vk))
                     _resident.discard(_victim); _rb -= float(pool[_victim].size_bytes)
                 _resident.add(_t); _rb += sz
             _last_idx[_t] = _k
@@ -2520,22 +2500,6 @@ def _solve_milp(
                     e_solution[(tid, k)] = float(x[e_var_idx[(tid, k)]])
                 else:
                     e_solution[(tid, k)] = 0.0
-        # FAITHFUL EVICTION (MILP_FAITHFUL_EVICT=1): override the MILP's lossy
-        # feasible-gap e-solution with the EXACT offline-Belady greedy plan —
-        # cold = greedy g, evictions = the FULL greedy sequence incl. short
-        # gaps. Offline-optimal caching for ~uniform weights IS greedy
-        # farthest-next-use, and emitting every eviction (not just feasible-gap
-        # ones) makes the realized volume match offline Belady instead of
-        # leaking ~26-36GB into runtime reactive eviction. The MILP still ran
-        # (overlap/peak diagnostics); only the eviction plan is replaced.
-        if os.environ.get("MILP_FAITHFUL_EVICT") == "1" and _greedy_seeded:
-            c_solution = {tid: float(_g.get(tid, 0.0)) for tid in feasible_tids}
-            e_solution = {}
-            for tid in feasible_tids:
-                for k in range(len(pool[tid].consumers) - 1):
-                    e_solution[(tid, k)] = (
-                        1.0 if (tid, k) in _greedy_full_evicts else 0.0
-                    )
         peak_bytes = int(_alive_peak(c_solution, e_solution) * MODEL_SCALE)
         # Slacks are in ms (model units); convert back to ns. Total
         # lateness = sum across windows (cascading stalls add up).
@@ -2830,11 +2794,6 @@ def _emit_neutral(
     # g-mode: cold-start is the MODELED `g` decision (c≥0.5), evictions apply
     # on top (no skip). No heuristic cold-set needed.
     _gmode_emit = os.environ.get("MILP_GMODE") == "1"
-    # Faithful eviction: emit evictions in ALL gaps (incl. short/infeasible
-    # ones) so the offline-Belady eviction sequence is realized exactly. A
-    # short-gap evict→refetch costs a stall (the refetch issuer falls back to a
-    # near-sync load), not an abort — that stall is the honest cost.
-    _faithful_emit = os.environ.get("MILP_FAITHFUL_EVICT") == "1"
 
     # HEADROOM-AWARE PREFETCH (MILP_HEADROOM_PREFETCH=1). A streamed load is
     # issued AHEAD only where the modeled cold-residency leaves VRAM room for it
@@ -2994,7 +2953,7 @@ def _emit_neutral(
         # the hybrid `cold-at-layout + mid-run evict + refetch`
         # pattern (see Coupling section in _solve_milp).
         for k in range(len(pt.consumers) - 1):
-            if not pt.gap_feasibility[k] and not _faithful_emit:
+            if not pt.gap_feasibility[k]:
                 continue
             ev = result.e_solution.get((tid, k), 0.0)
             if float(ev) < KEEP_THRESHOLD:
