@@ -1205,6 +1205,32 @@ def _solve_milp(
             f"({c_feas_false_bytes/1e6:.1f}MB)"
         )
 
+    # DIAGNOSTIC (MILP_DUMP_CINFEAS=1): break down the c-infeasible set into
+    # "only the first (token-0) use is un-streamable but later gaps ARE
+    # streamable" vs "genuinely un-streamable (no feasible gap anywhere)".
+    if os.environ.get("MILP_DUMP_CINFEAS") == "1":
+        _ci = [t for t in feasible_tids if not pool[t].c_feasibility]
+        _ci_bytes = sum(pool[t].size_bytes for t in _ci)
+        _ci_later_streamable = [t for t in _ci if any(pool[t].gap_feasibility)]
+        _ci_later_bytes = sum(pool[t].size_bytes for t in _ci_later_streamable)
+        _ci_never = [t for t in _ci if not any(pool[t].gap_feasibility)]
+        _ci_never_bytes = sum(pool[t].size_bytes for t in _ci_never)
+        _multi = [t for t in _ci if len(pool[t].consumers) > 1]
+        import collections
+        _bysz = collections.Counter()
+        for t in _ci:
+            _bysz[round(pool[t].size_bytes/1e6)] += 1
+        print(f"[ct_milp:cinfeas_dump] total c-infeasible={len(_ci)} tids "
+              f"({_ci_bytes/1e6:.0f}MB) | LATER-STREAMABLE (has feasible gap)="
+              f"{len(_ci_later_streamable)} ({_ci_later_bytes/1e6:.0f}MB) | "
+              f"GENUINELY-unstreamable (no feasible gap)={len(_ci_never)} "
+              f"({_ci_never_bytes/1e6:.0f}MB) | multi-consumer={len(_multi)}", flush=True)
+        _top = sorted(_ci, key=lambda t: -pool[t].size_bytes)[:6]
+        for t in _top:
+            pt = pool[t]
+            print(f"    tid={t} {pt.size_bytes/1e6:.0f}MB consumers={len(pt.consumers)} "
+                  f"any_gap_feasible={any(pt.gap_feasibility)} name={pt.name[:40]!r}", flush=True)
+
     # ---- 2. Variable layout ----
     c_var_idx: dict[int, int] = {}
     for col, tid in enumerate(feasible_tids):
@@ -1218,6 +1244,21 @@ def _solve_milp(
     # var ⇒ e≡0) for c-infeasible weights; combined with the forced-cold bound
     # (g=1) below they stay resident the whole run, matching Belady.
     _pin_cinf = os.environ.get("MILP_CINFEAS_INFLIGHT") == "1"
+    # MILP_PIN_UNSTREAMABLE_ONLY=1: the c_feasibility flag keys on consumers[0]
+    # (the token-0 use), so a weight whose ONLY tight use is token-0 but which
+    # has feasible gaps in later tokens is wrongly lumped into the "must pin"
+    # set — inflating it (8b@3: 4601MB flagged vs 2101MB genuinely un-streamable)
+    # and tripping the 0.85·cap gate that then disables the pin entirely, leaving
+    # the giant embedding streamed → per-token 1GB reload → abort. Restrict the
+    # pin/forced-resident set to the GENUINELY un-streamable weights (c-infeasible
+    # AND no feasible gap anywhere ⇒ can never be evicted+refetched). The
+    # over-flagged later-streamable weights fall back to (0,1) and stream normally.
+    _pin_unstream_only = os.environ.get("MILP_PIN_UNSTREAMABLE_ONLY") == "1"
+
+    def _pin_pred(pt) -> bool:
+        if _pin_unstream_only:
+            return (not pt.c_feasibility) and (not any(pt.gap_feasibility))
+        return not pt.c_feasibility
     # GATE: only pin if the c-infeasible set FITS resident with churn room. If
     # Σ c-infeasible bytes exceeds ~85% of the cap, pinning all of them is
     # infeasible (can't keep > cap resident) or leaves no room for the dynamic
@@ -1227,7 +1268,7 @@ def _solve_milp(
     # the un-streamable set genuinely fits (llama3b@2: 1731MB of 2048 = 84%).
     if _pin_cinf and peak_target_bytes is not None:
         _cinf_bytes = sum(
-            pool[t].size_bytes for t in feasible_tids if not pool[t].c_feasibility
+            pool[t].size_bytes for t in feasible_tids if _pin_pred(pool[t])
         )
         if _cinf_bytes > 0.85 * float(peak_target_bytes):
             _pin_cinf = False
@@ -1239,7 +1280,7 @@ def _solve_milp(
     col = nv
     for tid in feasible_tids:
         pt = pool[tid]
-        if _pin_cinf and not pt.c_feasibility:
+        if _pin_cinf and _pin_pred(pt):
             continue  # pinned resident: no eviction variables
         for k in range(len(pt.consumers) - 1):
             # Only feasible gaps get e variables; infeasible ones are
@@ -1350,7 +1391,7 @@ def _solve_milp(
     bounds_list: list[tuple[float, float | None]] = []
     for tid in feasible_tids:
         pt = pool[tid]
-        if not pt.c_feasibility and (not _relax_cinfeasible or _pin_cinf):
+        if _pin_pred(pt) and (not _relax_cinfeasible or _pin_cinf):
             # No GPU node fires early enough that a runtime prefetch
             # could deliver this tid in time. Pin c=1 → load at layout
             # phase, before runtime PCIe contention starts. Under _pin_cinf
@@ -1836,6 +1877,16 @@ def _solve_milp(
     # forcing (the shipped behavior).
     _legacy_arc = os.environ.get("MILP_HONEST_INFLIGHT") != "1"
 
+    # MILP_CINFEAS_SINGLE_STREAM=1: the forced in-flight ARC terms
+    # (pre_arc0_forced / arc_refetch_forced) model weights mid-transfer. With
+    # h2d_streams=1 the PCIe channel runs ONE transfer at a time, so at any
+    # instant at most one such arc's bytes are actually in-flight — yet the
+    # default charges every overlapping arc's full size into the constant
+    # (llama8b@3: ~3863MB of overlapping c-infeasible refetch arcs summed as
+    # concurrent residency, a phantom that alone exceeds the cap). Charge only
+    # the LARGEST forced arc per sample (the single-stream bound); genuine
+    # resident terms (consumed / boundary / infeasible-gap / cold) still sum.
+    _force_single_stream = os.environ.get("MILP_CINFEAS_SINGLE_STREAM") == "1"
     n_samples_total = len(samples)
     audit_progress_step = max(1, n_samples_total // 10)
     for _sample_idx, (nid_sample, t_l) in enumerate(samples):
@@ -1846,6 +1897,7 @@ def _solve_milp(
                 flush=True,
             )
         const_addons = constant_floor
+        _farc_max = 0.0   # largest forced in-flight arc at this sample (single-stream)
         # Intermediate residency at this sample (bytes → MB).
         for s_, e_, sz_ in _intermediates:
             if s_ > t_l:
@@ -1903,6 +1955,11 @@ def _solve_milp(
                 if _force_arc:
                     arc_0_start = max(0, first_start - arc_tau)
                     if t_l >= arc_0_start:
+                        # Pre-first-use cold load: these weights are loaded and
+                        # then sit RESIDENT (dst claimed) until their use, so
+                        # overlapping ones ARE concurrently resident — sum, not
+                        # single-stream. (Single-stream applies only to the
+                        # runtime refetch arcs below, which serialize.)
                         const_addons += size
                         _tag("pre_arc0_forced", size)
                         continue
@@ -1937,7 +1994,10 @@ def _solve_milp(
                 # Legacy / c-infeasible: force the refetch arc resident per-tid
                 # (the load is in-flight; c-infeasible weights must be charged
                 # so the objective cold-resides them instead of streaming).
-                const_addons += size
+                if _force_single_stream:
+                    _farc_max = max(_farc_max, size)
+                else:
+                    const_addons += size
                 _tag("arc_refetch_forced", size)
             elif pt.gap_feasibility[k_in] and (tid, k_in) in e_var_idx:
                 # Whole feasible gap — dead-zone AND refetch arc — is residency
@@ -1964,6 +2024,11 @@ def _solve_milp(
                 # the tensor stays resident.
                 const_addons += size
                 _tag("infeasible_forced", size)
+
+        # Single-stream in-flight bound: only the largest forced arc is actually
+        # transferring at this instant (h2d_streams=1), so add it once instead
+        # of the per-tid sum done above.
+        const_addons += _farc_max
 
         # Save this sample's peak terms for post-solve true-peak recompute.
         peak_sample_terms.append((
@@ -2501,6 +2566,23 @@ def _solve_milp(
                 else:
                     e_solution[(tid, k)] = 0.0
         peak_bytes = int(_alive_peak(c_solution, e_solution) * MODEL_SCALE)
+        if os.environ.get("MILP_DUMP_PEAK") == "1":
+            _softcap_rhs = (ub_list[_softcap_ub_pos] if _softcap_ub_pos >= 0 else None)
+            _ap = _alive_peak(c_solution, e_solution)
+            # find binding sample + its composition
+            _bind_v = -1.0; _bind_i = -1
+            for _i, (cs_, tr_) in enumerate(peak_sample_terms):
+                _v = cs_ + sum(cf*float(c_solution.get(_c_col_to_tid.get(co,-1),0.0)
+                               if co in _c_col_to_tid else e_solution.get(_e_col_to_key.get(co),0.0))
+                               for co, cf in tr_)
+                if _v > _bind_v: _bind_v = _v; _bind_i = _i
+            _cs_b, _tr_b = peak_sample_terms[_bind_i]
+            _cold_at_bind = sum(cf*float(c_solution.get(_c_col_to_tid[co],0.0))
+                                for co, cf in _tr_b if co in _c_col_to_tid)
+            print(f"[ct_milp:peak_dump] LP P={float(x[P_IDX]):.0f}MB s_P={float(x[S_PEAK_IDX]):.0f}MB "
+                  f"softcap_rhs={_softcap_rhs} | _alive_peak={_ap:.0f}MB | "
+                  f"binding sample#{_bind_i} value={_bind_v:.0f}MB (const={_cs_b:.0f} cold_var={_cold_at_bind:.0f}) "
+                  f"| target=cap", flush=True)
         # Slacks are in ms (model units); convert back to ns. Total
         # lateness = sum across windows (cascading stalls add up).
         # Single max-lateness on the H2D channel = makespan extension (ms→ns).
@@ -2555,6 +2637,32 @@ def _solve_milp(
             else:
                 peak_overrun_bytes = 0
                 target_infeasible = False
+        elif (peak_target_bytes is not None and _gmode_decode
+              and not _legacy_arc):
+            # g-mode with the HONEST in-flight peak: peak_bytes is faithful to
+            # the sim, so a modeled overrun is a REAL over-cap violation — not
+            # the legacy-arc over-count. Report it (target_infeasible) so an
+            # over-cap plan is NOT silently marked feasible. Do NOT run the
+            # repair (it streams cold back, undoing the greedy floor); g-mode's
+            # safety net is reactive eviction, but reactive can't cover a large
+            # modeled overrun (e.g. an un-reloadable 1GB embedding at llama8b@3,
+            # ~1.6GB over), so surfacing it is the honest signal. Legacy-arc
+            # g-mode keeps overrun=0 (its peak over-counts; reactive handles it).
+            target_adj_mb = max(
+                0.0,
+                float(peak_target_bytes) * (1.0 - float(safety_margin_frac)),
+            ) / MODEL_SCALE
+            peak_overrun_bytes = max(
+                0, int(peak_bytes - target_adj_mb * MODEL_SCALE)
+            )
+            target_infeasible = peak_overrun_bytes > 1
+            if audit:
+                print(
+                    f"[ct_milp_overlap:solver] g-mode honest overrun: "
+                    f"peak={peak_bytes/1e6:.0f}MB target={target_adj_mb:.0f}MB "
+                    f"overrun={peak_overrun_bytes/1e6:.0f}MB "
+                    f"target_infeasible={target_infeasible}"
+                )
     if not (res.success and res.x is not None):
         # Hard-fallback: stream every async-feasible tid (c=0),
         # cold-load every c_feasibility=False tid (c=1, layout time).
@@ -2811,8 +2919,19 @@ def _emit_neutral(
     # MUST match the scheduler's gate so the injector exclusion matches the
     # MILP pin (else we'd mark a non-pinned weight non-evictable).
     _pin_active = os.environ.get("MILP_CINFEAS_INFLIGHT") == "1"
+    # MUST mirror the solver-side _pin_pred: under MILP_PIN_UNSTREAMABLE_ONLY the
+    # pinned set is the GENUINELY un-streamable weights (c-infeasible AND no
+    # feasible gap), not all c-infeasible — else the gate/tag here diverges from
+    # the LP and the injector fails to protect the pinned weight.
+    _pin_unstream_only = os.environ.get("MILP_PIN_UNSTREAMABLE_ONLY") == "1"
+
+    def _pin_pred2(p) -> bool:
+        if _pin_unstream_only:
+            return (not p.c_feasibility) and (not any(p.gap_feasibility))
+        return not p.c_feasibility
+
     if _pin_active and cold_budget_bytes:
-        _cinf_b = sum(p.size_bytes for p in pool.values() if not p.c_feasibility)
+        _cinf_b = sum(p.size_bytes for p in pool.values() if _pin_pred2(p))
         if _cinf_b > 0.85 * float(cold_budget_bytes):
             _pin_active = False
     _hr_times: list[int] = []
@@ -2882,7 +3001,7 @@ def _emit_neutral(
             # at a tight cap (llama3b@2/@3, the 751MB embedding). Tagged reason so
             # the injector can exclude them.
             _pinned = (_pin_active
-                       and not pt.c_feasibility)
+                       and _pin_pred2(pt))
             cold_starts.append(NeutralColdStart(
                 tensor_uid=uid,
                 anchor_launch_id=(
