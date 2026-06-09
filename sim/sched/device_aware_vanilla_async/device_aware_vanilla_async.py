@@ -401,6 +401,18 @@ class DeviceAwareVanillaAsync(BaseScheduler):
 
     # ============================================================ helpers
     def _memory_for_tensor(self, tensor: Tensor) -> BaseMemory:
+        # DAV_SSD_VRAM_ONLY=1: model a system with only SSD + VRAM (no DRAM
+        # tier in the weight datapath). Weights are CUDA-homed exactly like the
+        # DRAM-baseline path, so layout stages them SSD->DRAM->VRAM for FREE
+        # (reactive-evicting overflow at tight caps); only the runtime
+        # streaming of EVICTED weights is counted. The difference from the RAM
+        # baseline is that layout phase 3 (below) drops the DRAM staging mirror
+        # for WEIGHTs, so a weight evicted at runtime reloads from the SSD
+        # storage copy via _find_latest_region at the SSD read_io_curve, not
+        # from a 25 GB/s RAM mirror. (Earlier this force-homed every WEIGHT
+        # RAM-empty so every weight loaded at runtime from SSD — that
+        # double-charged the one-pass resident-set placement the DRAM baseline
+        # gets for free; see layout() phase 3.)
         device = str(tensor.args.get("device", "cpu")).lower()
         if device in self.memory_by_device:
             return self.memory_by_device[device]
@@ -731,6 +743,28 @@ class DeviceAwareVanillaAsync(BaseScheduler):
                 self.sys.transfer(ram_to_vram)
 
             self._layout_phase = 3
+            return False
+
+        if self._layout_phase == 3:
+            # DAV_SSD_VRAM_ONLY: drop the DRAM staging mirror for WEIGHT
+            # tensors. Phases 0-2 placed every CUDA-homed weight into VRAM for
+            # free (SSD->DRAM->VRAM); the phase-2 ram->vram transfers have
+            # drained by now (the layout loop runs one pass per layout() call),
+            # so the staging regions are IDLE and releasable. Freeing them
+            # removes the only RAM copy of each weight, so a weight evicted at
+            # runtime reloads from the SSD storage copy (via _find_latest_region,
+            # which falls through memory->storage) at the SSD read curve rather
+            # than a 25 GB/s RAM mirror. INPUT/LEAF staging is kept (runtime CPU
+            # ops may read it). No-op without DAV_SSD_VRAM_ONLY (RAM baseline
+            # keeps its mirror).
+            if os.environ.get("DAV_SSD_VRAM_ONLY") == "1":
+                for tid, (stage, _home) in self._cuda_staging.items():
+                    t = self.sys.trace.tensor_map.get(tid)
+                    if t is None or t.args.get("tensor_type") != "WEIGHT":
+                        continue
+                    if stage.access_status == DataRegionAccess.IDLE:
+                        self.sys.release(stage)
+            self._layout_phase = 4
             return True
 
         return True
