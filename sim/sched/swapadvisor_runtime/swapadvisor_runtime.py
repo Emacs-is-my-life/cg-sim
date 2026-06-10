@@ -1,10 +1,13 @@
 """SwapAdvisor realized as an ONLINE RUNTIME policy.
 
-SwapAdvisor (Huang et al., ASPLOS'20) is fundamentally allocator-level logic:
-demand-driven swap-in plus Belady eviction (swap out the resident tensor whose
-*next use is furthest in the future*) reacting to GPU memory pressure. The
-paper plans this offline over the MXNet allocator's physical memory objects;
-its residency unit is the **physical storage object**, not a logical tensor id.
+SwapAdvisor (Huang et al., ASPLOS'20) plans swapping OFFLINE to maximize
+compute/communication overlap: it proactively prefetches swapped-out tensors
+*as early as possible* and, under memory pressure, swaps out the resident
+tensor whose *next use is furthest in the future* (Belady). This is NOT a
+demand-driven policy — on-demand swapping is precisely the ODSwap baseline the
+paper beats by up to 80x; proactive overlap is the central mechanism. The
+planner reasons over the MXNet allocator's physical memory objects; its
+residency unit is the **physical storage object**, not a logical tensor id.
 
 Porting that as an offline per-tensor schedule into cg-sim's graph_modifiers
 mis-modeled the residency unit: the unified timeline represents each physical
@@ -17,16 +20,35 @@ storage was coalesced for correct accounting.
 This runtime sidesteps both problems by reasoning over the simulator's **real
 physical storage** (the page allocator already coalesces aliases by storage),
 exactly as SwapAdvisor reasons over physical memory objects. It subclasses
-``DeviceAwareVanillaAsync`` and adds the one thing DAV lacks — online eviction:
+``DeviceAwareVanillaAsync`` and adds the two things DAV lacks — proactive
+prefetch and online eviction:
 
-  * weights are RAM-homed (streamed), so they start ABSENT in VRAM and are
-    demand-swapped-in by DAV's inherited ``_ensure_inputs_resident``;
+  * weights are RAM-homed (streamed), so they start ABSENT in VRAM;
+  * proactive prefetch (``_proactive_prefetch``, ON by default) pulls the
+    weights of upcoming nodes into spare VRAM ahead of the execution frontier,
+    overlapping the RAM->VRAM copy with compute — SwapAdvisor's central
+    mechanism. Demand swap-in (DAV's inherited ``_ensure_inputs_resident``) is
+    the safety net for anything prefetch didn't cover in time. NB: the timing
+    is approximate vs the paper, which fires each prefetch at the binding
+    victim's last-use (victim-paired ASAP); this online form fires
+    opportunistically into currently-free space over a bounded horizon;
   * when a VRAM claim can't fit (real memory pressure), instead of aborting we
     evict the resident streamable storage with the *furthest next use*
     (Belady), freeing VRAM-only and keeping the RAM mirror so the next swap-in
     is a cheap RAM->VRAM copy;
   * full-trace lookahead (the sim has the whole trace) gives the exact next-use
     ordering Belady needs — faithful to "Belady is given the schedule".
+
+What is NOT ported (and why): SwapAdvisor's defining contribution — a genetic
+algorithm jointly searching operator schedule x memory-pool allocation (§5) —
+is structurally out of scope here: Inductor fixes the launch order at compile
+and there is no MXNet-style size-class pool to configure. So this is faithful
+to SwapAdvisor's swap-PLANNER intent (Belady + overlap on physical storage),
+not the SwapAdvisor SYSTEM. The same-size-class victim restriction (§4.1) is an
+opt-in ablation (SWAPRT_SIZE_CLASS=1), OFF by default: it is a limitation forced
+by MXNet's fixed-object pool, not an optimization (global Belady is a strict
+victim superset, never slower on makespan), and it triggers heavy re-streaming
+churn that makes the sim >10x slower here even after eviction was optimized.
 
 Budget = the VRAM hardware size in the input.yaml (``vram0.memory_size_KB``);
 no separate knob. The input.yaml must carry NO injected schedule, so DAV's
@@ -35,10 +57,22 @@ injector hooks stay inert and only this online policy acts.
 Env knobs (debug / ablation):
   SWAPRT_NO_EVICT=1   — disable Belady eviction (skeleton test: should abort at
                         the VRAM claim under pressure, locating the hook).
+  SWAPRT_HEADROOM_FRAC=F — static activation headroom the cold seed reserves,
+                        as a fraction of global-peak activation (default 0.0 =
+                        seed every weight that fits the budget; pass-2 repair is
+                        runtime Belady). Raise toward 1.0 for a more
+                        conservative seed that reserves room up front.
   SWAPRT_PREFETCH=0   — disable proactive async prefetch (overlap). Prefetch is
                         ON by default, faithful to SwapAdvisor's "prefetch as
                         early as possible" overlap (§4.1/§4.2); set to 0 to fall
                         back to pure demand swap-in for ablation.
+  SWAPRT_SIZE_CLASS=1 — enable the same-size-class victim restriction (§4.1
+                        fixed-size-object pool) with a global-Belady fallback;
+                        the ``size_class_tol`` scheduler arg coarsens classes
+                        (adjacent sizes within the ratio merge; 0.0 -> exact).
+                        OFF by default — paper-literal but never faster on
+                        makespan and >10x slower to simulate (re-streaming
+                        churn). Opt-in ablation only.
 """
 
 from __future__ import annotations
@@ -56,7 +90,7 @@ from sim.sched.device_aware_vanilla_async.device_aware_vanilla_async import (
 
 
 class SwapAdvisorRuntime(DeviceAwareVanillaAsync):
-    """Online SwapAdvisor: demand swap-in + Belady eviction on physical storage."""
+    """Online SwapAdvisor: proactive prefetch + Belady eviction on physical storage."""
 
     _STREAMABLE_TYPES = frozenset({"WEIGHT", "LEAF"})
 
@@ -92,6 +126,35 @@ class SwapAdvisorRuntime(DeviceAwareVanillaAsync):
         # online stats
         self._sa_evictions = 0
         self._sa_swap_ins = 0  # reserved for proactive prefetch (v2)
+        # SwapAdvisor size-class-restricted victim pool (§4.1/§4.2), opt-in via
+        # SWAPRT_SIZE_CLASS=1. Mirrors MXNet's fixed-size-object pool: a size-s
+        # claim may only reuse a freed object from s's size-class, with a
+        # global-Belady fallback when the class is exhausted. OFF by default:
+        # it is an MXNet-pool limitation, not an optimization (global Belady is a
+        # strict victim superset, never slower on makespan), AND it triggers
+        # heavy re-streaming churn — even with the batched-eviction optimization
+        # it ran >10x slower (>570s vs 30s on sdxl@1.6G; >1hr/cell in the sweep)
+        # because the restriction evicts soon-needed weights. Kept as an opt-in
+        # ablation for paper-literal runs; not viable as a default here.
+        self._size_class_on = os.environ.get("SWAPRT_SIZE_CLASS") == "1"
+        # adjacent observed sizes within this ratio merge into one class
+        # (0.0 -> one class per distinct page-count).
+        self._size_class_tol = float(self.args.get("size_class_tol", 0.0))
+        self._size_class: dict[int, int] = {}  # tid -> class id
+        self._sa_sizeclass_fallbacks = 0  # picks that fell to global Belady
+        # Initial-resident headroom scale — SwapAdvisor's two-pass (§4.2)
+        # realized for the online setting. The cold seed reserves
+        # (global-peak activation x frac) pages for activations and fills the
+        # rest with the soonest-first-use weights. Default 0.0 = the two-pass
+        # intent: PASS 1 seeds every weight that fits the budget (the cyclic
+        # Belady-optimal t=0 set is exactly soonest-first-use, since the bulk
+        # weight mass is re-used K>=3x per trace); PASS-2 repair — dropping a
+        # seeded weight when a later activation spike causes pressure — is done
+        # DYNAMICALLY by runtime Belady (cold weights keep a RAM mirror, so the
+        # eviction is free), not as a redundant compile-time fixpoint. Measured
+        # -3..-5% e2e on tight diffusion caps, neutral on llama (activations
+        # ~0). frac>0 reserves static headroom instead (more conservative).
+        self._headroom_frac = float(os.environ.get("SWAPRT_HEADROOM_FRAC", "0.0"))
 
     # ----------------------------------------------------------- compile
     def compile(self, trace: Trace) -> None:
@@ -116,6 +179,8 @@ class SwapAdvisorRuntime(DeviceAwareVanillaAsync):
         self._streamable_set = set(self._streamable_tids)
         for tid in self._streamable_tids:
             self._evictable_tensor_ids.add(tid)
+        if self._size_class_on:
+            self._size_class = self._build_size_classes(trace)
         # GPU/compute nodes in execution (start_ns) order — the prefetch
         # horizon walks this list ahead of the execution frontier.
         self._sched_nodes = sorted(
@@ -123,16 +188,20 @@ class SwapAdvisorRuntime(DeviceAwareVanillaAsync):
             for nid, n in trace.node_map.items()
         )
 
-        # --- Budget-bounded initial residency (SwapAdvisor's cold/initial set).
-        # Cold-resident weights from (free) layout up to budget minus an
-        # activation headroom, so the timed forward pass doesn't pay PCIe for
-        # weights that already fit. The rest are streamed. Over-seeding is
-        # self-correcting: cold weights keep a DRAM staging mirror, so Belady
-        # can still evict them at runtime if activations need the room.
+        # --- SwapAdvisor two-pass initial residency (§4.2), realized online.
+        # PASS 1: cold-resident the soonest-first-use weights up to the budget
+        # (minus an optional static headroom; see _headroom_frac). PASS-2 repair
+        # is dynamic — runtime Belady evicts a cold weight if/when an activation
+        # spike actually needs the room (cold weights keep a DRAM mirror, so the
+        # eviction is free). So over-seeding is self-correcting and no
+        # compile-time fixpoint is needed: the online Belady IS pass 2.
         if self._seed_initial:
             self._cold_tids = self._select_cold_residents(trace, starts)
 
     def _select_cold_residents(self, trace: Trace, starts) -> set[int]:
+        """Pass 1 of SwapAdvisor's two-pass initial residency: the soonest-
+        first-use weights that fit (budget - static headroom). Pass-2 repair is
+        runtime Belady (see compile()). Returns the cold-resident weight tids."""
         budget_pages = self._vram.space.num_total_pages
         # First-use (start_ns) per tensor, and producer start per tensor.
         first_use: dict[int, int] = {}
@@ -164,7 +233,7 @@ class SwapAdvisorRuntime(DeviceAwareVanillaAsync):
         for _, d in events:
             cur += d
             peak = max(peak, cur)
-        headroom_pages = peak
+        headroom_pages = int(peak * self._headroom_frac)
         cold_target = max(0, budget_pages - headroom_pages)
         # Cold-resident streamable weights in first-use order until the target
         # is reached (earliest-needed weights resident first -> no startup stall).
@@ -187,6 +256,27 @@ class SwapAdvisorRuntime(DeviceAwareVanillaAsync):
             flush=True,
         )
         return cold
+
+    def _build_size_classes(self, trace: Trace) -> dict[int, int]:
+        """Map each streamable tid -> a size-class id, mirroring SwapAdvisor's
+        fixed-size-object memory pool (§4.1): a size-s allocation may only reuse
+        a freed object of the same size-class. Classes are the sorted set of
+        observed streamable page-counts; adjacent sizes within
+        ``size_class_tol`` merge into one class (tol=0 -> exact-size classes)."""
+        tmap = trace.tensor_map
+        sizes = sorted({tmap[tid].num_pages for tid in self._streamable_tids})
+        size_to_class: dict[int, int] = {}
+        cls = -1
+        base = None
+        for s in sizes:
+            if base is None or s > base * (1.0 + self._size_class_tol):
+                cls += 1
+                base = s
+            size_to_class[s] = cls
+        return {
+            tid: size_to_class[tmap[tid].num_pages]
+            for tid in self._streamable_tids
+        }
 
     # ----------------------------------------------------------- homing
     def _memory_for_tensor(self, tensor: Tensor) -> BaseMemory:
@@ -221,43 +311,57 @@ class SwapAdvisorRuntime(DeviceAwareVanillaAsync):
         self._nu_cursor[tid] = i
         return float(cs[i][0]) if i < len(cs) else float("inf")
 
-    def _select_belady_victim(self, memory: BaseMemory, exclude_tid: int):
-        """Resident evictable storage with the furthest next use (Belady).
-        Only IDLE regions are eligible (a BEING_READ/WRITTEN region cannot be
-        freed this tick). Returns a tid or None."""
-        best_tid = None
-        best_key = None
-        for region in list(memory.space._regions_by_page_idx_start.values()):
+    def _evict_until_fits(self, memory: BaseMemory, incoming: Tensor) -> None:
+        """Evict furthest-next-use victims (immediate VRAM-only free, RAM mirror
+        preserved) until ``incoming`` fits or nothing more is evictable.
+
+        Belady (§4.2): evict the resident storage whose next use is furthest in
+        the future. Only IDLE regions are eligible (a BEING_READ/WRITTEN region
+        can't be freed this tick). With size-class ON (§4.1 fixed-size pool),
+        same-class victims are tried first, then a global-Belady fallback (a
+        page allocator isn't a fixed-object pool, so a class can drain before
+        ``incoming`` fits; the fallback keeps the budget-safe / abort-free
+        invariant).
+
+        The candidate set is gathered and ordered in ONE scan per claim (and
+        ``_next_use`` is stable within a tick), instead of rescanning every
+        resident region once per eviction — the latter is quadratic when a
+        single claim needs many evictions (size-class + fragmentation), which
+        dominated wall-clock at packed budgets."""
+        need = incoming.num_pages
+        if self._find_free_page(memory, need) is not None:
+            return
+        sc = self._size_class.get(incoming.id) if self._size_class_on else None
+        # ONE scan: collect IDLE evictable victims with next-use, split by class.
+        same: list[tuple[float, int]] = []
+        other: list[tuple[float, int]] = []
+        for region in memory.space._regions_by_page_idx_start.values():
             tid = getattr(region, "tensor_id", None)
-            if tid is None or tid == exclude_tid:
+            if tid is None or tid == incoming.id:
                 continue
             if tid not in self._evictable_tensor_ids:
                 continue
             if region.access_status != DataRegionAccess.IDLE:
                 continue
-            key = self._next_use(tid)
-            if best_key is None or key > best_key:
-                best_key = key
-                best_tid = tid
-        return best_tid
-
-    def _evict_until_fits(self, memory: BaseMemory, incoming: Tensor) -> None:
-        """Evict furthest-next-use victims (immediate VRAM-only free, RAM
-        mirror preserved) until ``incoming`` fits or nothing more is
-        evictable."""
-        need = incoming.num_pages
-        tried: set[int] = set()
-        while self._find_free_page(memory, need) is None:
-            victim = self._select_belady_victim(memory, exclude_tid=incoming.id)
-            if victim is None or victim in tried:
-                break  # nothing (more) evictable -> caller will abort
-            tried.add(victim)
-            self._release_vram_only(victim)
+            nu = self._next_use(tid)
+            if sc is not None and self._size_class.get(tid) == sc:
+                same.append((nu, tid))
+            else:
+                other.append((nu, tid))
+        # Furthest next use first; same-class tier ahead of the global fallback.
+        same.sort(reverse=True)
+        other.sort(reverse=True)
+        order = same + other  # (same is empty when size-class is OFF)
+        n_same = len(same)
+        for i, (_nu, tid) in enumerate(order):
+            if self._find_free_page(memory, need) is not None:
+                break  # fits now -> stop evicting
+            if i >= n_same and sc is not None:
+                self._sa_sizeclass_fallbacks += 1
+            self._release_vram_only(tid)
             self._sa_evictions += 1
-            # If the release was deferred (region still BUSY), it did not free
-            # space; stop to avoid spinning (caller aborts -> visible failure).
-            if memory.space.get_by_tensor_id(victim):
-                continue
+        # If still no contiguous hole, the caller's claim aborts (visible
+        # failure) — every IDLE evictable victim has been freed.
 
     def _claim_region(self, memory: BaseMemory, tensor: Tensor):
         # Belady eviction only on the GPU under real pressure; other memories
@@ -325,5 +429,6 @@ class SwapAdvisorRuntime(DeviceAwareVanillaAsync):
         base.update({
             "swapadvisor_runtime_evictions": self._sa_evictions,
             "swapadvisor_runtime_prefetches": self._sa_swap_ins,
+            "swapadvisor_runtime_sizeclass_fallbacks": self._sa_sizeclass_fallbacks,
         })
         return base

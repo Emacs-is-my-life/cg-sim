@@ -144,6 +144,17 @@ class NeutralPrefetch:
     # iter counter). Allows multi-iter tensors to be reloaded only in a
     # subset of iters.
     iter_mask: list[int] = field(default_factory=list)
+    # Structural swap-in gate (SwapAdvisor control edge W_swapout→W_swapin):
+    # cg-sim node ids of the eviction trigger-nodes whose freed bytes this
+    # swap-in reuses (a fixed-pool producer/consumer pairing — see the
+    # planner). DAV defers firing this prefetch's H2D (and the VRAM claim)
+    # until every gate node has retired (NodeStatus.DONE). Gating on the
+    # evict NODE — not on the victim being "absent" — is what makes the
+    # bound real: the trigger node consumes the victim as an input, so it
+    # can only retire after the victim was resident and then freed, which
+    # genuinely accounts the reused byte and ties the load to tl-progression
+    # (it cannot run ahead of the evictions it depends on). Empty = no gate.
+    gate_evict_node_ids: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -460,6 +471,7 @@ def write_neutral_schedule(
                 "cross_iter": p.cross_iter,
                 "iter_mask": list(p.iter_mask),
                 "cgsim_tid": int(p.cgsim_tid),
+                "gate_evict_node_ids": [int(n) for n in p.gate_evict_node_ids],
             }
             for p in schedule.prefetches
         ],
@@ -541,6 +553,9 @@ def load_neutral_schedule(path: str | Path) -> NeutralSchedule:
                 cross_iter=bool(p.get("cross_iter", False)),
                 iter_mask=[int(x) for x in p.get("iter_mask", [])],
                 cgsim_tid=int(p.get("cgsim_tid", -1)),
+                gate_evict_node_ids=[
+                    int(n) for n in p.get("gate_evict_node_ids", [])
+                ],
             )
             for p in doc.get("prefetches", [])
         ],

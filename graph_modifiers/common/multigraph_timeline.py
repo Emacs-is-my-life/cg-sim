@@ -176,6 +176,7 @@ def build_unified_timeline(
     cpu_per_launch_ns: int = 0,
     graph_multiplicity: dict[int, int] | None = None,
     replicate_uses: bool = False,
+    order_by_global_start_ns: bool = False,
 ) -> UnifiedTimeline:
     """Build a global timeline by concatenating per-graph kernel sequences.
 
@@ -275,36 +276,64 @@ def build_unified_timeline(
     # GPU as serial when in fact they overlap. This compaction pass
     # only sees GPU events anyway; CPU dispatch is implicit in the
     # gaps we just removed.
-    global_pos = 0
-    t_cursor = 0
+    # Per-graph compilation hash (independent of task build order).
     for gid in graph_order:
         lm = sidecars.launch_maps.get(gid, {})
         per_graph_hash[gid] = str(lm.get("compilation_hash", ""))
-        for nid in per_graph_nodes[gid]:
-            dur = _dur_ns(nid)
-            start = t_cursor
-            end = t_cursor + dur
-            t_cursor = end
-            lid = nid_to_lid.get(nid, 0)
-            trace_s = int(trace.node_map[nid].args.get("start_ns") or 0)
-            trace_e = int(trace.node_map[nid].args.get("end_ns") or trace_s)
-            tasks.append(GlobalTask(
-                global_pos=global_pos,
-                graph_id=gid,
-                launch_id=lid,
-                node_id=nid,
-                duration_ns=dur,
-                start_ns=start,
-                end_ns=end,
-                trace_start_ns=trace_s,
-                trace_end_ns=trace_e,
-            ))
-            per_graph_tasks[gid].append(global_pos)
-            if replicate_uses:
-                per_graph_launch_to_task[gid].setdefault(lid, []).append(global_pos)
-            else:
-                per_graph_launch_to_task[gid][lid] = global_pos
-            global_pos += 1
+
+    # Task build order.
+    #   Default (per-graph concatenation): graphs run sequentially in profile
+    #   order ([all of A][all of B]…). Correct for LP schedulers that treat
+    #   each graph as an isolated sub-problem.
+    #   ``order_by_global_start_ns=True``: interleave ALL graphs' kernels by
+    #   TRACE start_ns — the order the runtime actually executes (the engine
+    #   enforces it via start_gated_edges). swapadvisor needs this: its
+    #   demand-swap plan pairs each load with the eviction that frees its slot
+    #   IN WALK ORDER, so the plan is feasible only if the walk order == the
+    #   executor's order. Under per-graph concat the two diverge for multi-graph
+    #   models and the plan's load/evict pairing is scrambled at runtime →
+    #   gate deadlock (a swap-in waits on an evict the cursor reaches later) or
+    #   loads outrun evicts → over-residency. Building the walk in global
+    #   start_ns order makes every emitted gate backward-in-execution.
+    if order_by_global_start_ns:
+        build_seq: list[tuple[int, int]] = sorted(
+            ((nid, gid) for gid in graph_order for nid in per_graph_nodes[gid]),
+            key=lambda ng: (
+                int(trace.node_map[ng[0]].args.get("start_ns") or 0), ng[0],
+            ),
+        )
+    else:
+        build_seq = [
+            (nid, gid) for gid in graph_order for nid in per_graph_nodes[gid]
+        ]
+
+    global_pos = 0
+    t_cursor = 0
+    for nid, gid in build_seq:
+        dur = _dur_ns(nid)
+        start = t_cursor
+        end = t_cursor + dur
+        t_cursor = end
+        lid = nid_to_lid.get(nid, 0)
+        trace_s = int(trace.node_map[nid].args.get("start_ns") or 0)
+        trace_e = int(trace.node_map[nid].args.get("end_ns") or trace_s)
+        tasks.append(GlobalTask(
+            global_pos=global_pos,
+            graph_id=gid,
+            launch_id=lid,
+            node_id=nid,
+            duration_ns=dur,
+            start_ns=start,
+            end_ns=end,
+            trace_start_ns=trace_s,
+            trace_end_ns=trace_e,
+        ))
+        per_graph_tasks[gid].append(global_pos)
+        if replicate_uses:
+            per_graph_launch_to_task[gid].setdefault(lid, []).append(global_pos)
+        else:
+            per_graph_launch_to_task[gid][lid] = global_pos
+        global_pos += 1
 
     # Tensor table. Iterate sidecars in graph_order so per-graph tids stay
     # adjacent and tensors used earlier get smaller uids.
