@@ -56,6 +56,7 @@ Evict ``issue_launch_id`` is always "after this launch completes".
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -453,6 +454,7 @@ def write_neutral_schedule(
                 "used_by_launch_ids": list(t.used_by_launch_ids),
                 "shape": list(t.shape) if t.shape else [],
                 "graph_input_idx": t.graph_input_idx,
+                "trace_tids": [int(x) for x in t.trace_tids],
             }
             for t in schedule.tensors
         ],
@@ -535,6 +537,7 @@ def load_neutral_schedule(path: str | Path) -> NeutralSchedule:
                     int(t["graph_input_idx"])
                     if t.get("graph_input_idx") is not None else None
                 ),
+                trace_tids=[int(x) for x in t.get("trace_tids", [])],
             )
             for t in doc.get("tensors", [])
         ],
@@ -589,6 +592,402 @@ def load_neutral_schedule(path: str | Path) -> NeutralSchedule:
 # ---------------------------------------------------------------------------
 # Conversion to PyTorch jit_sim_prune_schedule.json
 # ---------------------------------------------------------------------------
+
+_GPU_KINDS = ("gpu_stream", "gpu", "gpu_runtime")
+
+
+def _build_gpu_node_index(trace) -> tuple[
+    dict[int, tuple[int, int, int]], dict[int, int],
+]:
+    """node_id -> (graph_id, launch_id, iter_idx) for GPU compute nodes,
+    plus per-graph multiplicity (wrapper invocations in the trace).
+
+    Each wrapper invocation executes every launch_id exactly once, so the
+    k-th occurrence of a (gid, lid) pair ordered by start_ns belongs to the
+    graph's k-th iteration.
+    """
+    per_key: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    for nid, node in trace.node_map.items():
+        args = node.args or {}
+        if str(args.get("resource_kind") or "") not in _GPU_KINDS:
+            continue
+        gid_raw = args.get("compiled_graph_id")
+        lid_raw = args.get("compiled_launch_id")
+        if gid_raw is None or lid_raw is None:
+            continue
+        try:
+            gid, lid = int(gid_raw), int(lid_raw)
+        except (TypeError, ValueError):
+            continue
+        if lid < 0:
+            continue
+        start = int(args.get("start_ns") or 0)
+        per_key.setdefault((gid, lid), []).append((start, int(nid)))
+    occ_counts: dict[int, list[int]] = {}
+    for (gid, _lid), occ in per_key.items():
+        occ_counts.setdefault(gid, []).append(len(occ))
+    # Mode, not max: a launch backed by several GPU trace nodes per
+    # execution (kernel + memcpy sub-events) would otherwise inflate the
+    # graph's iteration count and missize every cyclic iter mask.
+    multiplicity = {
+        gid: Counter(counts).most_common(1)[0][0]
+        for gid, counts in occ_counts.items()
+    }
+    # Iter index = occurrence index normalized by the launch's nodes-per-
+    # iteration: a 4-iter graph whose lid has 24 GPU nodes maps occurrence
+    # 0..5 → iter 0, 6..11 → iter 1, … Raw occurrence indices would put
+    # garbage iters (9, 20, …) into the cyclic masks.
+    index: dict[int, tuple[int, int, int]] = {}
+    for (gid, lid), occ in per_key.items():
+        occ.sort()
+        mult = max(1, multiplicity.get(gid, 1))
+        per_iter = max(1, len(occ) // mult)
+        for idx, (_s, nid) in enumerate(occ):
+            index[nid] = (gid, lid, min(idx // per_iter, mult - 1))
+    return index, multiplicity
+
+
+def _nodes_section(
+    trace,
+    node_starts: list[int] | None,
+    node_ends: list[int] | None,
+) -> list[dict[str, Any]]:
+    if node_starts is None or node_ends is None:
+        node_starts, node_ends = [], []
+        t_cursor = 0
+        for _nid, node in trace.node_map.items():
+            node_starts.append(t_cursor)
+            t_cursor += int(getattr(node, "compute_time_micros", 0) * 1_000)
+            node_ends.append(t_cursor)
+    return [
+        {
+            "idx": int(nid),
+            "name": str(getattr(node, "name", "")),
+            "resource_kind": str(node.args.get("resource_kind") or ""),
+            "start_ns": int(node_starts[i]),
+            "end_ns": int(node_ends[i]),
+        }
+        for i, (nid, node) in enumerate(trace.node_map.items())
+    ]
+
+
+def remap_neutral_to_compile_space(
+    neutral: NeutralSchedule,
+    tid_to_sidecar: dict[int, Any],
+) -> tuple[int, int]:
+    """Rewrite tensor identities from trace-space to compile-space.
+
+    Order-axis emitters (``ct_milp_overlap._emit_neutral`` family) fill
+    ``compiled_tensor_id`` with the cg-sim trace tid and
+    ``graph_input_name`` with the profiler name. The PyTorch wrapper
+    resolves ops only by sidecar ``compiled_tensor_id`` /
+    ``graph_input_name``, so each tensor is rewritten via
+    ``tid_to_sidecar`` (see ``tid_resolve.map_trace_tids_to_sidecar``).
+
+    Unmappable tensors are marked with ``compiled_tensor_id=-1`` and an
+    empty ``graph_input_name``; converters must skip their ops (the
+    weights stay CUDA-resident). Returns (n_unmapped, unmapped_bytes).
+    """
+    n_unmapped = 0
+    unmapped_bytes = 0
+    for t in neutral.tensors:
+        tid = int(t.trace_tids[0]) if t.trace_tids else int(t.compiled_tensor_id)
+        side = tid_to_sidecar.get(tid)
+        if side is None:
+            t.compiled_tensor_id = -1
+            t.graph_input_name = ""
+            n_unmapped += 1
+            unmapped_bytes += int(t.size_bytes)
+            continue
+        t.graph_id = int(side.graph_id)
+        t.compiled_tensor_id = int(side.compiled_tensor_id)
+        t.graph_input_name = str(side.graph_input_name)
+        t.graph_input_idx = side.entry.get("graph_input_idx")
+    return n_unmapped, unmapped_bytes
+
+
+def neutral_to_pytorch_anchored(
+    neutral: NeutralSchedule,
+    *,
+    trace,
+    node_starts: list[int] | None = None,
+    node_ends: list[int] | None = None,
+    compilation_hashes: dict[int, str] | None = None,
+) -> dict[str, Any]:
+    """Convert an order-axis NeutralSchedule into the PyTorch runtime JSON.
+
+    ``neutral_to_pytorch`` trusts the launch-id fields, but order-axis
+    emitters (``ct_milp_overlap._emit_neutral`` and derivatives) set
+    ``issue_launch_id == wait_launch_id`` and carry the real issuer only in
+    ``issue_node_id`` — converting those directly degrades every same-graph
+    async prefetch to a sync H2D at its consumer. This converter:
+
+      * recovers (graph, launch, iter) anchors from exact trace node ids,
+        classifying each prefetch as same-iter async, cross-iter wrap, or
+        cross-graph async;
+      * merges the per-iteration entries the order axis emits (one per
+        consumer event) into one op per anchor pair;
+      * normalizes per-tensor iter masks — the PyTorch wrapper applies ONE
+        h2d mask and ONE evict mask per tensor (``set_iter_mask``), so
+        per-op masks are unioned per tensor and dropped when they cover
+        every iteration.
+    """
+    node_index, multiplicity = _build_gpu_node_index(trace)
+    uid_to_tensor = neutral.tensor_by_uid()
+    hashes = {
+        int(g): str(h)
+        for g, h in (compilation_hashes or neutral.compilation_hashes or {}).items()
+    }
+
+    # (gid, lid) -> first-occurrence node id, for cold-start anchoring.
+    first_node: dict[tuple[int, int], int] = {}
+    for nid, (gid, lid, it) in node_index.items():
+        if it == 0:
+            first_node[(gid, lid)] = nid
+
+    def _mapped(t: NeutralTensor | None) -> bool:
+        return (
+            t is not None
+            and int(t.compiled_tensor_id) >= 0
+            and bool(t.graph_input_name)
+        )
+
+    skipped_ops = 0
+    skipped_bytes = 0
+
+    # ---- prefetches: derive anchors, merge per-iter duplicates ----
+    pf_groups: dict[tuple, dict[str, Any]] = {}
+    for p in neutral.prefetches:
+        t = uid_to_tensor.get(p.tensor_uid)
+        if not _mapped(t):
+            skipped_ops += 1
+            skipped_bytes += int(t.size_bytes) if t is not None else 0
+            continue
+        cons = node_index.get(int(p.wait_node_id))
+        if cons is not None:
+            cgid, clid, citer = cons
+        else:
+            cgid, clid, citer = int(t.graph_id), int(p.wait_launch_id), 0
+        issuer = node_index.get(int(p.issue_node_id))
+        if issuer is None or int(p.issue_node_id) == int(p.wait_node_id):
+            igid, ilid, iiter = cgid, clid, citer  # sync demand-load
+        else:
+            igid, ilid, iiter = issuer
+        cross_graph = igid != cgid
+        cross_iter = not cross_graph and iiter < citer
+        is_async = cross_graph or cross_iter or ilid != clid
+        after_lid = ilid if is_async else -1
+        key = (
+            p.tensor_uid, after_lid, clid,
+            igid if cross_graph else -1, cross_iter,
+        )
+        g = pf_groups.get(key)
+        if g is None:
+            g = pf_groups[key] = {
+                "tensor": t,
+                "trusted": bool(p.trusted_async),
+                "iters": set(),
+                "duration_ns": max(
+                    int(p.transfer_end_ns - p.transfer_start_ns), 0,
+                ),
+                "reason": p.reason,
+                "before_node": int(p.wait_node_id),
+                "issue_node": int(p.issue_node_id),
+            }
+        g["iters"].add(citer)
+        if not cross_graph:
+            # The fire boundary is gated by the same per-tensor h2d mask
+            # (in the consumer graph's iter domain); for cross-iter ops
+            # the fire iter precedes the wait iter and must be in the
+            # mask too. (Cross-graph fires are dispatched unmasked.)
+            g["iters"].add(iiter)
+        g["trusted"] = g["trusted"] and bool(p.trusted_async)
+
+    # ---- evicts: anchor at the issuing consumer's launch, merge ----
+    ev_groups: dict[tuple, dict[str, Any]] = {}
+    for e in neutral.evicts:
+        t = uid_to_tensor.get(e.tensor_uid)
+        if not _mapped(t):
+            skipped_ops += 1
+            continue
+        anchor = node_index.get(int(e.issue_node_id))
+        if anchor is not None:
+            agid, alid, aiter = anchor
+        else:
+            agid, alid, aiter = int(t.graph_id), int(e.issue_launch_id), 0
+        key = (e.tensor_uid, alid)
+        g = ev_groups.get(key)
+        if g is None:
+            g = ev_groups[key] = {
+                "tensor": t,
+                "graph_id": agid,
+                "iters": set(),
+                "duration_ns": max(
+                    int(e.transfer_end_ns - e.transfer_start_ns), 0,
+                ),
+                "reason": e.reason,
+                "after_node": int(e.issue_node_id),
+            }
+        g["iters"].add(aiter)
+
+    # ---- lifetime release ----
+    # The order-axis model frees a streamed tensor after its last consumer
+    # event; cg-sim's executor releases at consumer-retire natively, but
+    # the PyTorch runtime needs an explicit evict or the tensor stays
+    # resident and the realized peak reverts to baseline. Anchor at the
+    # tensor's last consumer launch on its graph's last iteration; the
+    # reload next pipeline call is the tensor's own (cyclic) initial
+    # prefetch. Hybrid cold tensors reload via cold_start, whose sync
+    # wrapper-top load would serialize — leave them resident.
+    cold_uids = {c.tensor_uid for c in neutral.cold_starts}
+    for uid in {k[0] for k in pf_groups} - cold_uids:
+        t = uid_to_tensor[uid]
+        lids = [int(x) for x in t.used_by_launch_ids]
+        if not lids:
+            continue
+        key = (uid, max(lids))
+        last_iter = multiplicity.get(int(t.graph_id), 1) - 1
+        g = ev_groups.get(key)
+        if g is None:
+            ev_groups[key] = {
+                "tensor": t,
+                "graph_id": int(t.graph_id),
+                "iters": {last_iter},
+                "duration_ns": 0,
+                "reason": "lifetime_release",
+                "after_node": -1,
+            }
+        else:
+            g["iters"].add(last_iter)
+
+    # ---- per-tensor mask normalization ----
+    # The wrapper installs one h2d mask + one evict mask per tensor; ops of
+    # the same tensor must agree. Union per tensor; a union covering every
+    # iteration of the tensor's graph collapses to the fire-every-iter
+    # (empty mask) semantic.
+    def _tensor_masks(groups: dict[tuple, dict[str, Any]]) -> dict[int, list[int]]:
+        union: dict[int, set[int]] = {}
+        for (uid, *_k), g in groups.items():
+            union.setdefault(uid, set()).update(g["iters"])
+        masks: dict[int, list[int]] = {}
+        for uid, iters in union.items():
+            t = uid_to_tensor[uid]
+            mult = multiplicity.get(int(t.graph_id), 1)
+            masks[uid] = [] if iters >= set(range(mult)) else sorted(iters)
+        return masks
+
+    pf_masks = _tensor_masks(pf_groups)
+    ev_masks = _tensor_masks(ev_groups)
+    # A masked h2d also masks its WAIT, so a partial h2d mask is only safe
+    # for tensors whose residency the schedule itself cycles. Never-evicted
+    # tensors keep the fire-every-iter semantic (resident fires are O(1)
+    # skips) so any externally-emptied storage is re-covered by the wait's
+    # sync fallback.
+    evicted_uids = {uid for (uid, *_k) in ev_groups}
+    pf_masks = {
+        uid: (m if uid in evicted_uids else [])
+        for uid, m in pf_masks.items()
+    }
+
+    io_operations: list[dict[str, Any]] = []
+    for (uid, after_lid, before_lid, issue_gid, cross_iter), g in sorted(
+        pf_groups.items(), key=lambda kv: (kv[0][2], kv[0][0]),
+    ):
+        t = g["tensor"]
+        io_operations.append({
+            "type": "vram_prefetch_h2d",
+            "tensor_name": t.graph_input_name,
+            "tensor_kind": "WEIGHT",
+            "before_node": g["before_node"],
+            "after_node": -1,
+            "duration_ns": g["duration_ns"],
+            "size_bytes": int(t.size_bytes),
+            "reason": g["reason"],
+            "before_launch_id": int(before_lid),
+            "after_launch_id": int(after_lid),
+            "compiled_tensor_id": int(t.compiled_tensor_id),
+            "compiled_graph_id": int(t.graph_id),
+            "compilation_hash": hashes.get(int(t.graph_id), ""),
+            "compiled_graph_input_name": t.graph_input_name,
+            "trusted_async": bool(g["trusted"]),
+            "issue_compiled_graph_id": int(issue_gid),
+            "issue_node_id": g["issue_node"],
+            "wait_node_id": g["before_node"],
+            "cross_iter": bool(cross_iter),
+            "iter_mask": pf_masks.get(uid, []),
+        })
+    for (uid, after_lid), g in sorted(
+        ev_groups.items(), key=lambda kv: (kv[0][1], kv[0][0]),
+    ):
+        t = g["tensor"]
+        io_operations.append({
+            "type": "vram_evict_d2h",
+            "tensor_name": t.graph_input_name,
+            "tensor_kind": "WEIGHT",
+            "after_node": g["after_node"],
+            "duration_ns": g["duration_ns"],
+            "size_bytes": int(t.size_bytes),
+            "reason": g["reason"],
+            "after_launch_id": int(after_lid),
+            "compiled_tensor_id": int(t.compiled_tensor_id),
+            "compiled_graph_id": int(g["graph_id"]),
+            "compilation_hash": hashes.get(int(g["graph_id"]), ""),
+            "compiled_graph_input_name": t.graph_input_name,
+            "issue_node_id": g["after_node"],
+            "evict_node_id": g["after_node"],
+            "iter_mask": ev_masks.get(uid, []),
+        })
+
+    cold_start_prefetches: list[dict[str, Any]] = []
+    for c in neutral.cold_starts:
+        t = uid_to_tensor.get(c.tensor_uid)
+        if not _mapped(t):
+            skipped_ops += 1
+            continue
+        lid = int(c.anchor_launch_id)
+        cold_start_prefetches.append({
+            "tensor_name": t.graph_input_name,
+            "tensor_kind": "WEIGHT",
+            "reason": c.reason,
+            "miss_ns": 0,
+            "attach_before_node": int(
+                first_node.get((int(t.graph_id), lid), -1)
+            ),
+            "eager_start": True,
+            "before_launch_id": lid,
+            "compiled_tensor_id": int(t.compiled_tensor_id),
+            "compiled_graph_id": int(t.graph_id),
+            "compilation_hash": hashes.get(int(t.graph_id), ""),
+            "compiled_graph_input_name": t.graph_input_name,
+        })
+
+    if skipped_ops:
+        print(
+            f"[neutral->pytorch] skipped {skipped_ops} ops on unmapped "
+            f"tensors ({skipped_bytes / 1e6:.0f}MB of planned prefetch "
+            f"volume stays CUDA-resident)",
+            flush=True,
+        )
+
+    summary = dict(neutral.meta)
+    summary["graph_multiplicity"] = {
+        str(g): int(m) for g, m in sorted(multiplicity.items())
+    }
+    # Order-axis plans model residency across the whole pipeline; the
+    # wrapper's per-graph-boundary cross-graph eviction would break them.
+    summary["cross_graph_evict"] = False
+
+    doc: dict[str, Any] = {
+        "summary": summary,
+        "nodes": _nodes_section(trace, node_starts, node_ends),
+        "io_operations": io_operations,
+        "spill_decisions": [],
+        "cold_start_prefetches": cold_start_prefetches,
+        "steady_state_resident": [],
+    }
+    if neutral.graph_order:
+        doc["compilation_hash"] = hashes.get(int(neutral.graph_order[0]), "")
+    return doc
 
 
 def _build_launch_to_node(
@@ -734,26 +1133,7 @@ def neutral_to_pytorch(
             "compiled_graph_input_name": t.graph_input_name,
         })
 
-    # Node section: provide a default synthesized timeline if callers don't pass one.
-    if node_starts is None or node_ends is None:
-        node_starts = []
-        node_ends = []
-        t_cursor = 0
-        for _nid, node in trace.node_map.items():
-            node_starts.append(t_cursor)
-            dur = int(getattr(node, "compute_time_micros", 0) * 1_000)
-            t_cursor += dur
-            node_ends.append(t_cursor)
-
-    nodes_section: list[dict[str, Any]] = []
-    for i, (nid, node) in enumerate(trace.node_map.items()):
-        nodes_section.append({
-            "idx": int(nid),
-            "name": str(getattr(node, "name", "")),
-            "resource_kind": str(node.args.get("resource_kind") or ""),
-            "start_ns": int(node_starts[i]),
-            "end_ns": int(node_ends[i]),
-        })
+    nodes_section = _nodes_section(trace, node_starts, node_ends)
 
     first_hash = (
         neutral.compilation_hashes.get(neutral.graph_order[0], "")

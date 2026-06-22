@@ -662,6 +662,18 @@ class _LPResult:
     # Window bounds in the LP's time axis (sim_t if available, else
     # trace_t). Length = NUM_LATENESS_WINDOWS, (s_i, e_i) per window.
     window_bounds_ns: list[tuple[int, int]] = field(default_factory=list)
+    # Lazy-row generation (MILP_EXACT_PEAK): baseline instants where the
+    # solved plan's EXACT residency exceeds the target — the sampled peak
+    # rows missed them. solve_neutral re-solves with these as extra
+    # samples until empty.
+    violated_sample_ts: list[int] = field(default_factory=list)
+    # Greedy-Belady seed plan (g-mode + exact mode): a known
+    # exact-grid-feasible incumbent. solve_neutral falls back to it when
+    # the lazy rounds exhaust with the LP plan still exact-infeasible.
+    seed_c_solution: dict[int, float] = field(default_factory=dict)
+    seed_e_solution: dict[tuple[int, int], float] = field(default_factory=dict)
+    seed_peak_bytes: int = 0
+    seed_lateness_ns: int = 0
 
 
 def _select_sample_points(
@@ -1139,6 +1151,7 @@ def _solve_milp(
     lookahead_ns: int = 5_000_000,
     audit: bool,
     phase1_time_limit_s: float | None = None,
+    extra_peak_sample_ts: list[int] | None = None,
 ) -> _LPResult:
     """Build and solve the lateness MILP.
 
@@ -1277,15 +1290,36 @@ def _solve_milp(
                       f"{_cinf_bytes/1e6:.0f}MB > 0.85·cap "
                       f"{0.85*peak_target_bytes/1e6:.0f}MB (would over-pin)")
     e_var_idx: dict[tuple[int, int], int] = {}
+    # MILP_EVAR_ALL_GAPS=1: create e (evict+refetch) vars on EVERY gap, not
+    # just gap_feasibility-approved ones. Pruning "infeasible" gaps forces
+    # those tids modeled-resident across them, which structurally EXCLUDES
+    # Belady-class rotations: on llama8b@6 the greedy-Belady seed drops
+    # 1443 evictions (10-14GB) whose gaps have no e var, and the LP
+    # relaxation bound is stuck at 5.7s vs Belady's realizable 4.3s. With
+    # full coverage, a tight gap is PRICED instead of pruned: its channel
+    # job releases at r = max(prior_use_end, d − W) and a too-short gap
+    # simply contributes lateness (and the injector emits the refetch with
+    # a sync_fallback issuer when no async issuer exists). The model
+    # chooses; nothing is silently forbidden.
+    _evar_all = os.environ.get("MILP_EVAR_ALL_GAPS") == "1"
     col = nv
     for tid in feasible_tids:
         pt = pool[tid]
-        if _pin_cinf and _pin_pred(pt):
-            continue  # pinned resident: no eviction variables
+        if _pin_cinf and _pin_pred(pt) and not _evar_all:
+            # Pinned resident: no eviction variables. Under
+            # MILP_EVAR_ALL_GAPS the pin keeps c=1 (cold at layout — the
+            # first use is still un-streamable) but mid-run HYBRID
+            # evict+refetch e vars are allowed: their refetch arcs are
+            # priced (MILP_CINFEAS_INFLIGHT) and the channel rows price
+            # the volume, so the LP — not a hard pin — decides whether
+            # rotating them is worth it (RT's Belady does rotate them;
+            # the e≡0 pin froze 2.1GB on llama8b and cost the seed 1486
+            # dropped evictions / 14.7GB of encodable rotation).
+            continue
         for k in range(len(pt.consumers) - 1):
             # Only feasible gaps get e variables; infeasible ones are
-            # implicit (e ≡ 0).
-            if pt.gap_feasibility[k]:
+            # implicit (e ≡ 0) — unless MILP_EVAR_ALL_GAPS lifts the prune.
+            if pt.gap_feasibility[k] or _evar_all:
                 e_var_idx[(tid, k)] = col
                 col += 1
     n_e = col - nv
@@ -1352,6 +1386,15 @@ def _solve_milp(
     # per-job result; this is the form that scales to sd3/llama.
     _timeline_end_ns = max(c[1] for pt in pool.values() for c in pt.consumers)
     NUM_CHANNEL_BUCKETS = max(16, min(512, int(max_peak_samples)))
+    # SUM-LATENESS OBJECTIVE (MILP_SUM_LATENESS=1, default OFF). Price the
+    # objective as Σ_b ℓ_b (per-bucket lateness, "integral of channel
+    # backlog") instead of the single L = max lateness. Physics question
+    # this A/Bs: when a consumer stalls, do later deadlines shift with it
+    # (stalls ABSORB → makespan extension = max lateness, the current
+    # model) or does sim's gated executor cascade them (→ sum)? Sum also
+    # prices sustained saturation ∝ its duration, pushing harder toward
+    # low-volume (Belady-like) plans in bandwidth-bound regimes.
+    _sum_lateness = os.environ.get("MILP_SUM_LATENESS") == "1"
     _bucket_w_ns = max(1.0, (_timeline_end_ns - _timeline_start_ns)
                        / NUM_CHANNEL_BUCKETS)
 
@@ -1380,6 +1423,10 @@ def _solve_milp(
     col += 1                                                 # single max-lateness
     S_PEAK_IDX = col
     col += 1
+    LSUM_IDX_BASE = -1
+    if _sum_lateness:
+        LSUM_IDX_BASE = col
+        col += NUM_CHANNEL_BUCKETS                           # ℓ_b per bucket
     total_vars = col
     _t0_ms = _timeline_start_ns / MODEL_SCALE
 
@@ -1409,6 +1456,8 @@ def _solve_milp(
     bounds_list.append(
         (0.0, None) if peak_target_bytes is not None else (0.0, 0.0)
     )                                                        # s_P
+    if _sum_lateness:
+        bounds_list.extend([(0.0, None)] * NUM_CHANNEL_BUCKETS)  # ℓ_b
 
     integrality_arr = None
     if not lp_relaxation:
@@ -1434,7 +1483,21 @@ def _solve_milp(
     # Smaller ε leaves L_max as the dominant signal (LP arbitrary at
     # equal-lateness plans); larger ε pushes the LP to MAX cold
     # subject to peak, mirroring the multistream objective.
-    epsilon_per_byte = 1.0  # ns / byte
+    epsilon_per_byte = 1.0  # ns / byte (legacy)
+    # MILP_EPS_PHYS=1: price streamed volume at its PHYSICAL channel cost
+    # 1/bw (ns/byte) instead of the legacy 1.0. The comment above claims the
+    # tiebreaker "exactly prices streaming at its physical cost", but at
+    # 25 GB/s the physical cost is 1/25 = 0.04 ns/byte — the legacy 1.0
+    # over-prices volume ~25x, i.e. the LP accepts up to 25x more REAL
+    # stall (L) to avoid a byte of PCIe. That historically compensated for
+    # the peak over-count (more cold ⇒ fewer refetches), but it distorts
+    # the lateness↔volume tradeoff the channel rows are supposed to own.
+    # MILP_EPS_NS_PER_BYTE=<float> overrides outright (takes precedence).
+    if os.environ.get("MILP_EPS_PHYS") == "1":
+        epsilon_per_byte = 1.0 / max(float(effective_h2d_bw(hw)), 1e-9)
+    _eps_env = os.environ.get("MILP_EPS_NS_PER_BYTE")
+    if _eps_env:
+        epsilon_per_byte = float(_eps_env)
     c_obj = np.zeros(total_vars, dtype=np.float64)
     # Per-window slack: cost 1 ns of objective per ns of stall in
     # each window. Sum across windows = total wall-clock extension
@@ -1454,6 +1517,13 @@ def _solve_milp(
     # point of prefetching, and what the old per-window throughput proxy
     # could not see.
     c_obj[L_IDX] = 1.0                              # per ms of makespan extension
+    if _sum_lateness:
+        # Σℓ_b carries the lateness cost; keep a tiny weight on L so the
+        # solver pins it to the true max lateness for honest reporting
+        # (otherwise L is unpriced and floats above its lower bounds).
+        c_obj[L_IDX] = 1e-6
+        for _b in range(NUM_CHANNEL_BUCKETS):
+            c_obj[LSUM_IDX_BASE + _b] = 1.0
     if peak_target_bytes is not None:
         c_obj[S_PEAK_IDX] = PEAK_SLACK_PENALTY      # per MB over cap
     for tid in feasible_tids:
@@ -1759,6 +1829,21 @@ def _solve_milp(
             ]
         samples = sorted(arc_samples + other_samples, key=lambda x: x[1])
 
+    if extra_peak_sample_ts:
+        # Lazy-row generation (MILP_EXACT_PEAK): instants where a previous
+        # round's solved plan exceeded the target on the EXACT event grid.
+        # Appended AFTER thinning so they are never dropped.
+        _have_ts = {s[1] for s in samples}
+        for _t_extra in extra_peak_sample_ts:
+            if int(_t_extra) not in _have_ts:
+                samples.append((-1, int(_t_extra)))
+                _have_ts.add(int(_t_extra))
+        samples.sort(key=lambda x: x[1])
+        if audit:
+            print(f"[ct_milp_overlap:audit] lazy peak rows: +"
+                  f"{len(extra_peak_sample_ts)} violated instants from "
+                  f"previous round")
+
     if audit:
         print(
             f"[ct_milp_lateness:audit] event-aligned sample grid: "
@@ -1999,9 +2084,12 @@ def _solve_milp(
                 else:
                     const_addons += size
                 _tag("arc_refetch_forced", size)
-            elif pt.gap_feasibility[k_in] and (tid, k_in) in e_var_idx:
-                # Whole feasible gap — dead-zone AND refetch arc — is residency
-                # `size · (1 − e_{t,k_in})`, independent of c_t. When evicted
+            elif (tid, k_in) in e_var_idx:
+                # Whole gap with an e var — dead-zone AND refetch arc — is
+                # residency `size · (1 − e_{t,k_in})`, independent of c_t.
+                # (Under MILP_EVAR_ALL_GAPS this includes gap_feasibility-
+                # pruned gaps: their refetch lateness is priced by the
+                # channel rows instead of forcing residency.) When evicted
                 # (e=1) the brief in-flight refetch during the arc is the single
                 # bw·W floor, not per-tid size (removes the arc over-count).
                 # Dead zone of a feasible gap (HYBRID): residency is
@@ -2147,6 +2235,12 @@ def _solve_milp(
         rows.append(row); cols.append(L_IDX); vals.append(-1.0)
         ub_list.append(float(T_b))
         row += 1
+        # --- per-bucket lateness (sum-objective variant): C_b − ℓ_b ≤ T_b ---
+        if _sum_lateness:
+            rows.append(row); cols.append(C_b); vals.append(1.0)
+            rows.append(row); cols.append(LSUM_IDX_BASE + b); vals.append(-1.0)
+            ub_list.append(float(T_b))
+            row += 1
 
     nb = row
 
@@ -2188,6 +2282,98 @@ def _solve_milp(
     # ≈Belady so the (hard, 100s-fractional) llama MILP can't ship a worse plan
     # even without converging. g=1 for the soonest-first-use cold set up to cap;
     # e=1 for the gaps Belady evicts. Builds a tight, peak-feasible incumbent.
+    # MILP_EXACT_PEAK=1: exact full-event-grid plan-peak evaluator (MB).
+    # The LP's peak rows are a 256-sample RELAXATION (max_peak_samples
+    # thinning); measured on llama8b@6 the binding instant fell between
+    # samples and the sampled peak under-read the model's own residency
+    # semantics by ~360MB (5945 sampled vs 6306 exact) — the realized
+    # "drift" that kept aborting the faithful plan. This line-sweep
+    # evaluates a (c,e) plan on EVERY residency event in O(events); used
+    # for the autocal seed, the reported peak, and the overrun repair —
+    # the LP rows stay sampled (relaxation), the repair closes the holes.
+    _use_exact_peak = os.environ.get("MILP_EXACT_PEAK") == "1"
+
+    def _exact_sweep(c_sol: dict[int, float],
+                     e_sol: dict[tuple[int, int], float],
+                     ) -> list[tuple[int, float]]:
+        """Per-instant exact modeled residency (MB incl. constant floor),
+        one entry per distinct event timestamp (post-deltas)."""
+        deltas: list[tuple[int, float]] = []
+        for tid in feasible_tids:
+            pt = pool[tid]
+            size = pt.size_bytes / MODEL_SCALE
+            cold = float(c_sol.get(tid, 0.0)) >= 0.5
+            cons = pt.consumers
+            first_start = cons[0][1]
+            last_end = cons[-1][2]
+            start = _timeline_start_ns if cold else first_start
+            end = last_end if _gmode else (
+                last_end if not cold else _timeline_end_ns)
+            cur = start
+            for k in range(len(cons) - 1):
+                if float(e_sol.get((tid, k), 0.0)) >= 0.5:
+                    gs, ge = cons[k][2], cons[k + 1][1]
+                    if ge <= gs:
+                        continue  # overlapping consumers: no gap interior
+                    if gs > cur:
+                        deltas.append((cur, size))
+                        deltas.append((gs, -size))
+                    cur = max(cur, ge)
+            if end > cur:
+                deltas.append((cur, size))
+                deltas.append((end, -size))
+        for s_, e_, sz_ in _intermediates:
+            deltas.append((int(s_), sz_ / MODEL_SCALE))
+            deltas.append((int(e_) + 1, -(sz_ / MODEL_SCALE)))
+        # Apply ALL deltas at a timestamp before taking the max: a release
+        # and a claim at the same instant hand off, they don't co-reside
+        # (+before− would spike hundreds of MB of phantom co-residency at
+        # clustered consumer starts).
+        deltas.sort(key=lambda x: x[0])
+        out: list[tuple[int, float]] = []
+        acc = 0.0
+        i = 0
+        n_d = len(deltas)
+        while i < n_d:
+            t0 = deltas[i][0]
+            while i < n_d and deltas[i][0] == t0:
+                acc += deltas[i][1]
+                i += 1
+            out.append((t0, acc + float(constant_floor)))
+        return out
+
+    def _exact_plan_peak(c_sol: dict[int, float],
+                         e_sol: dict[tuple[int, int], float]) -> float:
+        sweep = _exact_sweep(c_sol, e_sol)
+        return max((v for _t, v in sweep), default=float(constant_floor))
+
+    def _exact_violations(c_sol: dict[int, float],
+                          e_sol: dict[tuple[int, int], float],
+                          threshold_mb: float,
+                          top_k: int | None = None) -> list[int]:
+        """Instants where the plan's exact residency exceeds threshold —
+        the lazy peak rows to add next round. The overflow is typically a
+        broad PLATEAU (whole iteration spans), so select worst-64 PLUS a
+        uniform thinning across all violating instants — worst-only
+        clusters on one plateau and converges hopelessly slowly."""
+        if top_k is None:
+            top_k = int(os.environ.get("MILP_LAZY_K", "512"))
+        over = [(v, t) for t, v in _exact_sweep(c_sol, e_sol)
+                if v > threshold_mb + 1.0]
+        if not over:
+            return []
+        over.sort(reverse=True)
+        keep = {t for _v, t in over[:64]}
+        rest = [t for _v, t in over[64:]]
+        n_more = max(0, top_k - len(keep))
+        if rest and n_more:
+            step = max(1.0, len(rest) / float(n_more))
+            i = 0.0
+            while int(i) < len(rest) and len(keep) < top_k:
+                keep.add(rest[int(i)])
+                i += step
+        return sorted(keep)
+
     _greedy_seeded = False
     if _gmode and peak_target_bytes is not None:
         import bisect as _bis
@@ -2217,35 +2403,99 @@ def _solve_milp(
             if _cinfeas_inflight
             else (lambda t: pool[t].consumers[0][1])
         )
-        for t in sorted(feasible_tids, key=_greedy_key):
-            sz = float(pool[t].size_bytes)
-            if _rb + sz <= _cap_b:
-                _g[t] = 1.0; _resident.add(t); _rb += sz
-        _eset: set[tuple[int, int]] = set()
         _events = sorted(
             (c[1], t, k)
             for t in feasible_tids for k, c in enumerate(pool[t].consumers)
         )
-        _last_idx = {t: -1 for t in feasible_tids}
 
         def _nu_after(u: int, tau: int) -> float:
             cs = _cstarts[u]
             i = _bis.bisect_right(cs, tau)
             return float(cs[i]) if i < len(cs) else float("inf")
 
-        for (_tau, _t, _k) in _events:
-            if _t not in _resident:
-                sz = float(pool[_t].size_bytes)
-                while _rb + sz > _cap_b and _resident:
-                    _victim = max(_resident, key=lambda u: _nu_after(u, _tau))
-                    _vk = _last_idx[_victim]
-                    if _vk == -1:
-                        _g[_victim] = 0.0           # evicted before first use → not cold
-                    elif (_victim, _vk) in e_var_idx:
-                        _eset.add((_victim, _vk))
-                    _resident.discard(_victim); _rb -= float(pool[_victim].size_bytes)
-                _resident.add(_t); _rb += sz
-            _last_idx[_t] = _k
+        def _build_greedy(cap_b: float):
+            """Greedy-Belady walk at cold budget cap_b. Returns
+            (g, eset, dropped_evicts_n, dropped_evicts_bytes)."""
+            g = {t: 0.0 for t in feasible_tids}
+            resident: set[int] = set()
+            rb = 0.0
+            for t in sorted(feasible_tids, key=_greedy_key):
+                sz = float(pool[t].size_bytes)
+                if rb + sz <= cap_b:
+                    g[t] = 1.0; resident.add(t); rb += sz
+            eset: set[tuple[int, int]] = set()
+            last_idx = {t: -1 for t in feasible_tids}
+            drop_n = 0
+            drop_b = 0.0
+            for (tau_, t_, k_) in _events:
+                if t_ not in resident:
+                    sz = float(pool[t_].size_bytes)
+                    while rb + sz > cap_b and resident:
+                        victim = max(resident, key=lambda u: _nu_after(u, tau_))
+                        vk = last_idx[victim]
+                        if vk == -1:
+                            g[victim] = 0.0     # evicted pre-first-use → not cold
+                        elif (victim, vk) in e_var_idx:
+                            eset.add((victim, vk))
+                        else:
+                            # Belady evicts here but the gap has no e var
+                            # (gap_feasibility pruned it) — the eviction is
+                            # DROPPED from the encoding: the seed keeps the
+                            # tid modeled-resident (peak ↑, volume ↓ vs the
+                            # walk's intent).
+                            drop_n += 1
+                            drop_b += float(pool[victim].size_bytes)
+                        resident.discard(victim)
+                        rb -= float(pool[victim].size_bytes)
+                    resident.add(t_); rb += sz
+                last_idx[t_] = k_
+            return g, eset, drop_n, drop_b
+
+        def _greedy_modeled_peak(g, eset) -> float:
+            """Evaluate the seed against the model's own peak rows (MB)."""
+            c_col = {c_var_idx[t]: t for t in feasible_tids}
+            e_col = {col: key for key, col in e_var_idx.items()}
+            pk = 0.0
+            for const_s, terms in peak_sample_terms:
+                v = const_s
+                for col, coef in terms:
+                    if col in c_col:
+                        v += coef * g[c_col[col]]
+                    else:
+                        v += coef * (1.0 if e_col[col] in eset else 0.0)
+                if v > pk:
+                    pk = v
+            return pk
+
+        # AUTO-CALIBRATED SEED (MILP_GSEED_AUTOCAL=1): shrink the cold
+        # budget until the seed's OWN modeled peak fits the (margin-adj)
+        # target. This replaces both the margin guess and the soft-cap
+        # raise: the seed self-prices whatever the model charges on top of
+        # cold bytes (in-flight pool, consumed/boundary windows, forced
+        # arcs), so the incumbent is feasible WITHIN the real cap — the
+        # honest precondition for running without reactive eviction.
+        _autocal = os.environ.get("MILP_GSEED_AUTOCAL") == "1"
+
+        def _seed_peak(g, eset) -> float:
+            if _use_exact_peak:
+                return _exact_plan_peak(g, {k: 1.0 for k in eset})
+            return _greedy_modeled_peak(g, eset)
+
+        _g, _eset, _evict_drop_n, _evict_drop_b = _build_greedy(_cap_b)
+        if _autocal:
+            for _cal_it in range(6):
+                _pk_try = _seed_peak(_g, _eset)
+                _over_mb = _pk_try - target_adj_mb
+                if _over_mb <= 1.0:
+                    break
+                _cap_b -= _over_mb * MODEL_SCALE
+                if audit:
+                    print(f"[ct_milp_overlap:audit] seed autocal iter "
+                          f"{_cal_it}: modeled peak {_pk_try:.0f}MB > "
+                          f"target {target_adj_mb:.0f}MB → cold budget "
+                          f"{_cap_b/1e6:.0f}MB")
+                _g, _eset, _evict_drop_n, _evict_drop_b = (
+                    _build_greedy(_cap_b))
         for tid in feasible_tids:
             feasible_warm_start[c_var_idx[tid]] = _g[tid]
         for key, col in e_var_idx.items():
@@ -2267,11 +2517,19 @@ def _solve_milp(
                 if _v > _greedy_pk:
                     _greedy_pk = _v
             _raise_bound = float("inf")
-            if not _legacy_arc:
+            if not _legacy_arc and os.environ.get("MILP_GSEED_RAISE") != "1":
                 # Faithful path: NEVER raise the soft-cap above the true target.
                 # The plan must fit the real cap; honest peak makes the greedy's
                 # modeled peak ≈ its true residency (≤ cap) already, so the raise
                 # is unnecessary and only re-introduces the over-commit thrash.
+                #
+                # MILP_GSEED_RAISE=1 overrides: measured on llama8b@6/margin 0,
+                # the honest greedy seed still models +130MB over cap (consumed/
+                # boundary_forced windows), so the clamp rejects the Belady
+                # incumbent and the MILP loses its floor. The raise stays
+                # auto-calibrated (= the seed's own over-count, ~2% here, vs
+                # multi-GB on the legacy arc) and DAV_REACTIVE_EVICT guards the
+                # realized peak, so the thrash this clamp prevented can't recur.
                 _raise_bound = min(_raise_bound, target_adj_mb)
             if _greedy_pk > ub_list[_softcap_ub_pos]:
                 _new_ub = min(_greedy_pk, _raise_bound)
@@ -2285,6 +2543,19 @@ def _solve_milp(
         if audit:
             print(f"[ct_milp_overlap:audit] greedy-Belady warm-start: "
                   f"cold={sum(_g.values()):.0f} tids, evicts={len(_eset)}")
+            # Seed plan H2D volume as the MODEL prices it: init prefetches
+            # (g=0 streamed tids) + encoded refetches. Compare directly to
+            # RT(Belady)'s whole-run H2D — if the seed volume is already ≫
+            # RT, the offline greedy walk (or its e-var encoding) loses to
+            # runtime Belady BEFORE the MILP even starts.
+            _init_mb = sum(
+                pool[t].size_bytes for t in feasible_tids if _g[t] < 0.5
+            ) / 1e6
+            _ref_mb = sum(pool[t].size_bytes for (t, _kk) in _eset) / 1e6
+            print(f"[ct_milp_overlap:audit] greedy seed H2D volume: "
+                  f"init={_init_mb:.0f}MB + refetch={_ref_mb:.0f}MB = "
+                  f"{_init_mb + _ref_mb:.0f}MB; dropped evicts "
+                  f"(no e-var)={_evict_drop_n} ({_evict_drop_b/1e6:.0f}MB)")
         # Attribute the greedy seed's BINDING-sample modeled peak across
         # categories. The gap between this modeled peak and the true cap is the
         # over-count we must eliminate (forced residency that Belady evicts
@@ -2347,9 +2618,14 @@ def _solve_milp(
         T_b = (_timeline_start_ns + (b + 1) * _bucket_w_ns) / MODEL_SCALE
         _seed_C = max(_seed_C, r_b) + W_b
         feasible_warm_start[C_IDX_BASE + b] = _seed_C
+        if _sum_lateness:
+            feasible_warm_start[LSUM_IDX_BASE + b] = max(0.0, _seed_C - T_b)
         if _seed_C - T_b > _seed_L:
             _seed_L = _seed_C - T_b
     feasible_warm_start[L_IDX] = _seed_L
+    if audit and _greedy_seeded:
+        print(f"[ct_milp_overlap:audit] greedy seed modeled channel "
+              f"max-lateness L={_seed_L:.1f}ms")
 
     if _HIGHSPY_AVAILABLE and integrality_arr is not None and not lp_relaxation:
         used_two_phase = True
@@ -2555,6 +2831,11 @@ def _solve_milp(
                 pk = v
         return pk
 
+    # Exact-grid evaluator (closes the 256-sample thinning holes) when
+    # MILP_EXACT_PEAK=1; the sampled version otherwise. Drives the
+    # reported peak AND the overrun repair below.
+    _plan_peak = _exact_plan_peak if _use_exact_peak else _alive_peak
+
     if res.success and res.x is not None:
         x = np.asarray(res.x)
         for tid in feasible_tids:
@@ -2565,7 +2846,7 @@ def _solve_milp(
                     e_solution[(tid, k)] = float(x[e_var_idx[(tid, k)]])
                 else:
                     e_solution[(tid, k)] = 0.0
-        peak_bytes = int(_alive_peak(c_solution, e_solution) * MODEL_SCALE)
+        peak_bytes = int(_plan_peak(c_solution, e_solution) * MODEL_SCALE)
         if os.environ.get("MILP_DUMP_PEAK") == "1":
             _softcap_rhs = (ub_list[_softcap_ub_pos] if _softcap_ub_pos >= 0 else None)
             _ap = _alive_peak(c_solution, e_solution)
@@ -2588,9 +2869,16 @@ def _solve_milp(
         # Single max-lateness on the H2D channel = makespan extension (ms→ns).
         lateness_ns = int(float(x[L_IDX]) * MODEL_SCALE)
         if audit:
+            _lsum_msg = ""
+            if _sum_lateness:
+                _lsum = sum(
+                    float(x[LSUM_IDX_BASE + _b])
+                    for _b in range(NUM_CHANNEL_BUCKETS)
+                )
+                _lsum_msg = f" sum-lateness Σℓ={_lsum:.2f}ms (objective)"
             print(
                 f"[ct_milp_overlap:audit] channel max-lateness "
-                f"L={float(x[L_IDX]):.2f}ms (= makespan extension)"
+                f"L={float(x[L_IDX]):.2f}ms (= makespan extension)" + _lsum_msg
             )
         # g-mode raises the soft-cap (greedy floor) and relies on reactive
         # eviction for realized overflow, so the overrun-repair (which would
@@ -2614,7 +2902,7 @@ def _solve_milp(
                     c_solution,
                     e_solution,
                     target_adj_mb,
-                    _alive_peak,
+                    _plan_peak,
                 )
                 peak_bytes = int(
                     overrun_repair_diag["final_peak_model"] * MODEL_SCALE
@@ -2692,7 +2980,7 @@ def _solve_milp(
                     e_solution[(tid, k)] = 0.0
         # Honest peak: recompute the true max-over-samples alive set for
         # the stream-everything assignment (model units MB → bytes).
-        peak_bytes = int(_alive_peak(c_solution, e_solution) * MODEL_SCALE)
+        peak_bytes = int(_plan_peak(c_solution, e_solution) * MODEL_SCALE)
         lateness_ns = 0
         if peak_target_bytes is not None:
             target_adj = max(
@@ -2710,6 +2998,43 @@ def _solve_milp(
                 f"bound-cold). true_peak={peak_bytes/1e6:.1f}MB "
                 f"target_infeasible={target_infeasible}"
             )
+
+    # Lazy-row generation: instants the SOLVED plan exceeds the target on
+    # the exact event grid (the sampled rows missed them). solve_neutral
+    # re-solves with these as extra peak samples until none remain.
+    violated_sample_ts: list[int] = []
+    if (_use_exact_peak and peak_target_bytes is not None
+            and res.success and res.x is not None):
+        _viol_thresh = max(
+            0.0,
+            float(peak_target_bytes) * (1.0 - float(safety_margin_frac)),
+        ) / MODEL_SCALE
+        violated_sample_ts = _exact_violations(
+            c_solution, e_solution, _viol_thresh)
+        if audit and violated_sample_ts:
+            print(f"[ct_milp_overlap:solver] exact-grid violations: "
+                  f"{len(violated_sample_ts)} instants above target "
+                  f"(worst kept for next lazy round)")
+
+    # Expose the greedy-Belady seed as a known exact-feasible incumbent
+    # for solve_neutral's fallback (B&B discipline: if the search can't
+    # produce a feasible improvement, ship the incumbent).
+    _seed_c_out: dict[int, float] = {}
+    _seed_e_out: dict[tuple[int, int], float] = {}
+    _seed_pk_bytes = 0
+    _seed_lat_ns = 0
+    if _use_exact_peak and _greedy_seeded:
+        _seed_c_out = {
+            t: float(feasible_warm_start[c_var_idx[t]])
+            for t in feasible_tids
+        }
+        _seed_e_out = {
+            key: float(feasible_warm_start[col])
+            for key, col in e_var_idx.items()
+        }
+        _seed_pk_bytes = int(
+            _exact_plan_peak(_seed_c_out, _seed_e_out) * MODEL_SCALE)
+        _seed_lat_ns = int(float(feasible_warm_start[L_IDX]) * MODEL_SCALE)
 
     diagnostics = {
         "pool_size": len(pool),
@@ -2742,6 +3067,11 @@ def _solve_milp(
         diagnostics=diagnostics,
         per_window_lateness_ns=per_window_lateness_ns,
         window_bounds_ns=window_bounds_ns,
+        violated_sample_ts=violated_sample_ts,
+        seed_c_solution=_seed_c_out,
+        seed_e_solution=_seed_e_out,
+        seed_peak_bytes=_seed_pk_bytes,
+        seed_lateness_ns=_seed_lat_ns,
     )
 
 
@@ -3000,8 +3330,13 @@ def _emit_neutral(
             # eviction will evict the un-streamable weight and the refetch aborts
             # at a tight cap (llama3b@2/@3, the 751MB embedding). Tagged reason so
             # the injector can exclude them.
+            _has_evict = any(
+                float(result.e_solution.get((tid, _k2), 0.0)) >= KEEP_THRESHOLD
+                for _k2 in range(len(pt.consumers) - 1)
+            )
             _pinned = (_pin_active
-                       and _pin_pred2(pt))
+                       and _pin_pred2(pt)
+                       and not _has_evict)  # hybrid-evicted ⇒ must stay evictable
             cold_starts.append(NeutralColdStart(
                 tensor_uid=uid,
                 anchor_launch_id=(
@@ -3072,10 +3407,15 @@ def _emit_neutral(
         # the hybrid `cold-at-layout + mid-run evict + refetch`
         # pattern (see Coupling section in _solve_milp).
         for k in range(len(pt.consumers) - 1):
-            if not pt.gap_feasibility[k]:
-                continue
+            # The solver only assigns e on gaps that had e vars; under
+            # MILP_EVAR_ALL_GAPS that includes gap_feasibility-pruned
+            # gaps (tight refetch → sync_fallback issuer below), so gate
+            # on the SOLUTION, not on the pruned feasibility flag.
             ev = result.e_solution.get((tid, k), 0.0)
             if float(ev) < KEEP_THRESHOLD:
+                continue
+            if (not pt.gap_feasibility[k]
+                    and os.environ.get("MILP_EVAR_ALL_GAPS") != "1"):
                 continue
             consumer_k = pt.consumers[k]
             consumer_kp1 = pt.consumers[k + 1]
@@ -3326,24 +3666,77 @@ def solve_neutral(
                 print(f"[ct_milp_lateness:audit] sidecars provided but timeline "
                       f"build failed: {e}")
 
-    result = _solve_milp(
-        pool, trace, hw,
-        sim_times=sim_times,
-        peak_target_bytes=peak_target_bytes,
-        extra_static_bytes=extra_static_bytes,
-        safety_margin_frac=safety_margin_frac,
-        max_peak_samples=max_peak_samples,
-        time_limit_s=time_limit_s,
-        phase1_time_limit_s=phase1_time_limit_s,
-        solver_threads=solver_threads,
-        lp_relaxation=lp_relaxation,
-        arc_queue_factor=arc_queue_factor,
-        lateness_peak_coupling=lateness_peak_coupling,
-        relax_cinfeasible=relax_cinfeasible,
-        intermediate_axis_fix=intermediate_axis_fix,
-        lookahead_ns=lookahead_ns,
-        audit=audit,
+    # Lazy peak-row generation (MILP_EXACT_PEAK=1): the sampled peak rows
+    # are a relaxation the solver can exploit (evict exactly at sampled
+    # instants, overflow between them — measured 2.6GB on llama8b@6).
+    # Re-solve with the violated exact-grid instants added as rows until
+    # the solved plan is exact-feasible (or rounds exhausted).
+    _lazy_rounds = (
+        int(os.environ.get("MILP_LAZY_ROUNDS", "3"))
+        if os.environ.get("MILP_EXACT_PEAK") == "1" else 1
     )
+    _extra_ts: list[int] = []
+    for _lazy_i in range(max(1, _lazy_rounds)):
+        result = _solve_milp(
+            pool, trace, hw,
+            sim_times=sim_times,
+            peak_target_bytes=peak_target_bytes,
+            extra_static_bytes=extra_static_bytes,
+            safety_margin_frac=safety_margin_frac,
+            max_peak_samples=max_peak_samples,
+            time_limit_s=time_limit_s,
+            phase1_time_limit_s=phase1_time_limit_s,
+            solver_threads=solver_threads,
+            lp_relaxation=lp_relaxation,
+            arc_queue_factor=arc_queue_factor,
+            lateness_peak_coupling=lateness_peak_coupling,
+            relax_cinfeasible=relax_cinfeasible,
+            intermediate_axis_fix=intermediate_axis_fix,
+            lookahead_ns=lookahead_ns,
+            audit=audit,
+            extra_peak_sample_ts=_extra_ts or None,
+        )
+        _new_ts = [t for t in result.violated_sample_ts
+                   if t not in set(_extra_ts)]
+        if not _new_ts:
+            break
+        _extra_ts.extend(_new_ts)
+        if audit:
+            print(f"[ct_milp_overlap:solver] lazy round {_lazy_i + 1}: "
+                  f"+{len(_new_ts)} violated instants "
+                  f"({len(_extra_ts)} total) — re-solving")
+
+    # Seed fallback (B&B incumbent discipline): the lazy rounds exhausted
+    # with the LP plan still exceeding the target on the exact event grid
+    # — shipping it would abort in sim (no reactive net in the faithful
+    # config). The greedy-Belady seed is a known exact-feasible plan; use
+    # it instead. MILP_SEED_FALLBACK=0 disables (ship the violating plan).
+    if (result.violated_sample_ts and result.seed_c_solution
+            and peak_target_bytes is not None
+            and os.environ.get("MILP_SEED_FALLBACK", "1") == "1"):
+        _target_adj_b = float(peak_target_bytes) * (
+            1.0 - float(safety_margin_frac))
+        if result.seed_peak_bytes <= _target_adj_b + 2e6:
+            if audit:
+                print(f"[ct_milp_overlap:solver] SEED FALLBACK: LP plan "
+                      f"exact-infeasible after lazy rounds "
+                      f"(peak={result.peak_bytes/1e6:.0f}MB > "
+                      f"{_target_adj_b/1e6:.0f}MB); shipping the "
+                      f"exact-feasible greedy-Belady incumbent "
+                      f"(peak={result.seed_peak_bytes/1e6:.0f}MB, "
+                      f"L={result.seed_lateness_ns/1e6:.0f}ms)")
+            result.c_solution = dict(result.seed_c_solution)
+            result.e_solution = dict(result.seed_e_solution)
+            result.peak_bytes = int(result.seed_peak_bytes)
+            result.lateness_ns = int(result.seed_lateness_ns)
+            result.target_infeasible = False
+            result.peak_overrun_bytes = 0
+            result.diagnostics["seed_fallback"] = True
+        elif audit:
+            print(f"[ct_milp_overlap:solver] seed fallback unavailable: "
+                  f"seed exact peak {result.seed_peak_bytes/1e6:.0f}MB "
+                  f"also above target — shipping LP plan (will likely "
+                  f"abort without a reactive net)")
 
     # Lifetime-mode cold-start budget: cap MINUS peak activation residency +
     # static overhead, so layout cold-loading leaves room for runtime

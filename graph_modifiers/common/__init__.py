@@ -30,9 +30,12 @@ from .neutral import (
     build_neutral_schedule_from_timeline,
     load_neutral_schedule,
     neutral_to_pytorch,
+    neutral_to_pytorch_anchored,
+    remap_neutral_to_compile_space,
     resolve_neutral_cgsim_tids,
     write_neutral_schedule,
 )
+from .tid_resolve import map_trace_tids_to_sidecar
 from .stall_metric import StallMetrics, compute_stall_metrics
 from .cli import add_calibration_args, resolve_calibration
 from .storage_coalesce import coalesce_by_storage, coalesced_size_total
@@ -69,6 +72,9 @@ __all__ = [
     "build_neutral_schedule_from_timeline",
     "load_neutral_schedule",
     "neutral_to_pytorch",
+    "neutral_to_pytorch_anchored",
+    "remap_neutral_to_compile_space",
+    "map_trace_tids_to_sidecar",
     "write_neutral_schedule",
     "StallMetrics",
     "compute_stall_metrics",

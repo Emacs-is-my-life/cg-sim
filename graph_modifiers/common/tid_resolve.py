@@ -162,6 +162,68 @@ def build_lid_ctid_order(
     return out
 
 
+def map_trace_tids_to_sidecar(
+    trace: Trace, tl, max_vote_launches: int = 5,
+) -> dict[int, Any]:
+    """trace tid -> sidecar GlobalTensor (compile-space identity).
+
+    Inverse of :func:`resolve_tid_for_node`: for every non-synthetic
+    sidecar tensor, resolve a trace tid at each of its first
+    ``max_vote_launches`` consumer launches (iter-0 GPU node) and keep the
+    majority. Trace tids claimed by several sidecar entries (storage
+    aliases) map to the entry with the lowest ``graph_input_idx``.
+
+    Trace tids absent from the result are invisible to the compiled
+    wrapper (synthetic shadow weights, misclassified intermediates) and
+    cannot be streamed by the PyTorch runtime.
+    """
+    from collections import Counter
+
+    SYNTH_CTID_BASE = 1_000_000_000
+    tensor_metas: dict[tuple[int, int], dict[str, Any]] = {}
+    by_key: dict[tuple[int, int], Any] = {}
+    for t in tl.tensors:
+        if t.compiled_tensor_id >= SYNTH_CTID_BASE or t.graph_id < 0:
+            continue
+        key = (int(t.graph_id), int(t.compiled_tensor_id))
+        tensor_metas[key] = {
+            "used_by_launch_ids": list(t.entry.get("used_by_launch_ids", [])),
+            "shape": list(t.entry.get("shape") or []) or None,
+            "size_bytes": int(t.size_bytes) or None,
+            "dtype": t.dtype or None,
+            "graph_input_idx": t.entry.get("graph_input_idx"),
+        }
+        by_key[key] = t
+
+    lid_ctid_order = build_lid_ctid_order(tensor_metas)
+    lid_to_node = build_lid_to_node_id(trace)
+
+    claims: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    for (gid, ctid), meta in tensor_metas.items():
+        c: Counter = Counter()
+        for lid in (meta["used_by_launch_ids"] or [])[:max_vote_launches]:
+            nid = lid_to_node.get((gid, int(lid)), -1)
+            if nid < 0:
+                continue
+            r = resolve_tid_for_node(
+                trace, nid, gid, int(lid), ctid, tensor_metas, lid_ctid_order,
+            )
+            if r is not None:
+                c[int(r)] += 1
+        if c:
+            claims[c.most_common(1)[0][0]].append((gid, ctid))
+
+    out: dict[int, Any] = {}
+    for tid, keys in claims.items():
+        keys.sort(key=lambda k: (
+            tensor_metas[k]["graph_input_idx"]
+            if tensor_metas[k]["graph_input_idx"] is not None else 1 << 30,
+            k,
+        ))
+        out[tid] = by_key[keys[0]]
+    return out
+
+
 def resolve_tid_for_node(
     trace: Trace,
     node_id: int,
